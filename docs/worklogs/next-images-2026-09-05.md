@@ -1,9 +1,11 @@
 # SchLib image resource inventory, 2026-09-05
 
 Dated, non-authoritative investigation for the NEXT step 1 image-resource gate.
-This is current Rust and fixture evidence, **not original AD26 verification**.
-`AD26-dotnet/` was unavailable. No native parser, public resource type, or opaque
-retention field was added by this investigation.
+The initial inventory below uses current Rust and fixture evidence. The later
+**Original managed implementation follow-up** separately records fresh AD26
+decompilation and a Windows decoder probe. `AD26-dotnet/` remains unavailable;
+the installed original assemblies were found later. No native parser, public
+resource type, or opaque retention field was added by this investigation.
 
 ## Corpus and method
 
@@ -156,3 +158,125 @@ connect strict source image_data decoding to the same typed resource boundary
 and public API, retaining the source authoring operation separately from target
 resource scope. Until this exists, rejecting image_data is safer and more
 accurate than accepting it into intent that cannot be materialized.
+
+
+## Original managed implementation follow-up
+
+The `ghidra` executable is installed, but `ghidra project info altium26`
+reported that the project does not exist in its configured project directory
+(`/home/dev/projects/parasolid-re/work/ghidra-projects`). The alternate
+`/home/dev/ghidra-cli-projects` collection also has no altium26 project. No native
+Ghidra program was imported or decompiled during this bounded investigation.
+
+Original binaries were subsequently found at
+`/mnt/c/Program Files/Altium/AD26/System/`. This includes native `AdvSch.dll`
+and the managed assemblies needed for the immediate contracts. The `ilspy`
+command was initially unavailable; the existing local ilspy-cli source was
+built with its locked dependencies and an isolated `/tmp/altium-ilspy-target`
+target directory. Individual original types/methods were then decompiled with
+`/tmp/altium-ilspy-target/debug/ilspy`; no bulk assembly decompilation was needed.
+Fresh output is under `/tmp/altium-original-evidence/`.
+
+Original assembly SHA-256 values:
+
+- `Altium.Sch.DataModel.dll`:
+  `3a34fe9ea365fae99230e9c86d5c5b3f892db394145446f1e4b955f9cca879ed`.
+- `Altium.Edp.Interfaces.dll`:
+  `d78c97628715171adf6fe7974ec0bf2124d15712fd8775d82cbe9e91210dc6eb`.
+
+### Serialization and loading contract
+
+The original type
+`Altium.Sch.DataModel.ImageCache.ImageCacheItem.GetDataForExport` establishes the
+observed container framing directly. In `ImageCacheItem.cs:35`, a bitmap writes
+only `image.SaveToStream`. A non-bitmap writes `image.SaveBmpToStream`, then a
+single byte containing the UTF-8 byte length of `image.GraphicClass`, then those
+UTF-8 bytes, then `image.SaveToStream`. The class tag is therefore UTF-8, even
+though all observed names are ASCII. This is distinct from the enclosing
+Storage resource identifier's Windows-1252 envelope encoding.
+
+`EngineObjects.Utils.Images.ImageBase` declares these class/format associations:
+`TBitmap`→BMP, `TJPEGImage`→JPEG, `TdxPNGImage`→PNG, `TMetafile`→EMF, and
+`TGifImage`→GIF. Its dispatch also recognizes `TSVGImage`; for `TMetafile`, it
+chooses enhanced versus Windows metafile based on the actual stream. The corpus
+supports the narrower formats inventoried above; absent GIF/SVG fixtures are
+not a reason to silently accept undecoded data.
+
+`ImagePng` and `ImageJpg` override `IsBitmap` to false and supply the respective
+class tags. `ImageBmp.SaveToStream` decodes through System.Drawing and saves in
+the class's declared format. `ImageBase.SaveBmpToStream` (`ImageBase.cs:239`)
+creates a 24-bit RGB bitmap, paints white, draws the image, and saves BMP.
+`MaxSizeForBitmap` (`ImageBase.cs:294`) proportionally scales to at most 1024×768.
+These functions substantiate the preview/source distinction and dimension
+mismatches in the corpus; recreating only the preview is not full resource
+semantics.
+
+`ImageCache.GetRawImageData` (`ImageCache.cs:147`) loads the leading image,
+re-encodes it to establish a boundary length, then reads the one-byte class-name
+length, UTF-8 class name and source stream. It validates the class/stream before
+using it. The original includes malformed-input bitmap fallbacks and ignored
+errors. **Those are not acceptable parser policies for this repository**:
+unknown or malformed class/source data must be a contextual error here.
+The verified BMP-declared length in this corpus offers a directly checked
+boundary; a proposed parser must not rely on nondeterministic codec re-encoding
+to find trailing source objects.
+
+For `TMetafile`, `GetRawImageData` appends an orientation byte to its internal
+cache representation. `ImageEnhancedMetafile.SaveToStream`
+(`ImageEnhancedMetafile.cs:201`) removes that byte while exporting and restores
+it afterward. It is **not** an extra byte belonging to the native Storage EMF
+payload. The class validates the EMF signature at offset 40 and delegates
+rendering/decoding to System.Drawing.Metafile. This managed evidence does not
+itself decode the GDIC/WMF nested data. That still requires typed format work;
+recognizing or copying a GDI record is insufficient.
+
+`SchDataExporterBaseV5.AddImageEmbeddedObjectToList` obtains the data through
+`ImageCache.GetImageDataForExport`, associates it with the supplied resource
+name, and adds that embedded object to the export list. This links the verified
+class serializer to SchLib resource export rather than only an unrelated image
+utility.
+
+### Fourth-byte policy evidence
+
+`ImageBmp` constructs `Picture` with `Image.FromStream`. Its `IsAlphaPicture`
+(`ImageBmp.cs:186`) first checks decoded image flags for alpha; if that bit is
+absent it returns false without treating the stored fourth byte as transparency.
+It subsequently inspects decoded ARGB alpha only for images marked as alpha.
+This alone does not prove every older BMP fourth-byte encoding.
+
+A read-only Windows System.Drawing probe was run on all 15 extracted 32-bit
+corpus BMP resources using Windows PowerShell, through the same public
+`Image.FromStream` API. Every decoded image reported `Format32bppRgb`, no alpha
+flag, and first-pixel alpha 255, including all nine resources whose stored
+fourth bytes are uniformly zero. Evidence:
+`/tmp/altium-bmp-gdi-probe.ps1` and
+`/tmp/altium-original-evidence/bmp-gdi-probe.json`.
+This used Windows PowerShell's .NET Framework/System.Drawing and GDI+, not a
+running AD26 application or its exact .NET 8 runtime. It supports a typed RGB
+interpretation with explicitly handled unused fourth-byte encoding for the
+observed BI_RGB variant; blindly importing the fourth byte as alpha contradicts
+both the observed decoder result and the original alpha-flag branch. Validation
+and canonical serialization rules for unused bytes still need to be chosen
+explicitly. No arbitrary alpha guess or opaque per-pixel payload is warranted.
+
+### Original physical pen-width table
+
+A fresh decompile of `Altium.Edp.Interfaces.dll`, type `Rt_Schematic.Consts`,
+contains `LineWidthArrayC` (`Consts.cs:7273–7291` in this output):
+
+| Original TSize | Internal coordinate width | Mil width using existing Coord scale |
+| --- | ---: | ---: |
+| eZeroSize | 0 | 0 |
+| eSmall | 100000 | 10 |
+| eMedium | 300000 | 30 |
+| eLarge | 500000 | 50 |
+
+This independently confirms the values cited by the current schematic renderer.
+`BusLineWidthArrayC` is a separate table and must not substitute for graphical
+pen widths. The table establishes exact supported physical widths; it does not
+justify nearest-width rounding or saturation for arbitrary authored dimensions.
+A source conversion should accept only exact matches and fail otherwise.
+
+The fresh original managed evidence closes the previously missing class-framing
+and pen-table evidence, but **does not complete typed image parsing, resource
+API work, codec metadata handling, or independent native roundtrip validation**.
