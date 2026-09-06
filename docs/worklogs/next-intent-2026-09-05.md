@@ -48,3 +48,12 @@ tests passed 168 tests and CLI compilation passed. Independent agent reviews
 accepted both bounded changes. Solver cases include centered/branching chains,
 explicit corners, effective absolute references, integer rounding, and incompatible
 coordinate constraints. These checks still do not execute native patches.
+
+After generated pad import support and typed graphic policies, all five dumps
+again compile deterministically with unchanged counts. The final language suite
+passes 353 tests, the legacy suite passes 168 tests, and CLI compilation passes.
+Both changes passed independent review. Generated imports have seven fixture-free
+tests covering naming, overrides, source capture, and checked geometry. Graphic
+policies have five test groups for applicability, defaults, enum values, clear
+operations, and retained absence. Typed image resources and verified physical
+pen-width conversion remain open.

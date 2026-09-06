@@ -234,15 +234,17 @@ show replaced values and deleted descendants without similarity-based retargetin
 
 ## Graphic policy frontier
 
-The legacy `graphic_from_spec` constructors in
+The implemented graphic policies use the legacy `graphic_from_spec` constructors in
 `crates/altium-format-spec/src/executor.rs` supply defaults, but those fallback
 values do not prove valid creation geometry. Arc, elliptical-arc, and pie end
-angles default to typed absence, not 360 degrees; the intent policy must represent
-that distinction before supporting reset. Native line widths use `PenWidth`, while
+angles default to typed absence, not 360 degrees; intent reset/clear now preserves
+that distinction. Native line widths use `PenWidth`, while
 the old compiler exposes coordinates and the old executor ignores them. Polyline
 `closed` and image `show_border` have no direct field in the current public graphic
-API. Define typed mappings or reject these during elaboration rather than discard
-them. Font defaults require validation against the destination font table.
+API. The new intent compiler rejects those properties and dimensioned pen widths;
+named typed pen widths are supported. Font defaults require validation against the
+destination font table. These policy choices are checked against current Rust
+code, not a new independent AD26 source verification.
 
 The old `image_data` compiler field has no corresponding public image-resource
 mutation boundary and is ignored by its executor. The replacement intent compiler

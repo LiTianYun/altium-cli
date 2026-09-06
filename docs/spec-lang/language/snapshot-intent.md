@@ -72,10 +72,8 @@ cargo run -p altium-spec-lang --example check_schlib_intent -- design.schlib-spe
 ```
 
 This is a front-end API, not the replacement CLI planner. Full step 1 still needs
-graphic default and clear policies and typed image-resource support.
-Unsupported image_data fails explicitly. Graphic fields are intent, not proof of
-a native mapping: line-width enum conversion and fields without a native counterpart
-must be resolved before materialization. Later steps must verify ownership,
+typed image-resource support and physical pen-width compatibility.
+Unsupported image_data fails explicitly. Later steps must verify ownership,
 materialize/project equality, scope enforcement, and native serialization.
 
 Pin coordinates retain either a paired `at`/`location` operation or independent
@@ -90,10 +88,28 @@ Captured PcbLib imports export explicit and generated pad names for SchLib
 footprint mappings. Rows, columns, and numeric/alphanumeric grids preserve naming,
 skip, perimeter, and explicit generated-pad override semantics. Bound box edges
 support forward references. Invalid generator properties, counts, coordinates,
-and duplicate names fail contextually; expansion is limited to one million
-generated positions per footprint before allocation. Compilation uses captured
+and duplicate names fail contextually. Generator counts are bounded before
+allocation; exports allow at most one million generated positions per footprint.
+Compilation uses captured
 contents and retains the referenced definition's source path. This is a pad-name
 projection, not full PcbLib intent or native footprint materialization.
+
+## Graphic field policies
+
+`GraphicKind::field_policies` declares applicable fields, definition defaults,
+and legal clear operations for each of the 13 graphic kinds. Compilation retains
+the authored `FieldIntent`; a default does not grant write scope. Policies follow
+the current native Rust API and creation behavior, without claiming independent
+AD26 source verification. Fonts and image references still need destination
+validation; default coordinates or empty vertices do not establish valid creation
+geometry.
+
+Arc, elliptical-arc, and pie `end_angle` defaults/clears to `None`; an explicit
+`360` remains `Some(360)`. String text/URL/filename fields can clear to empty;
+required geometry, enums, flags, fonts, and vertices cannot clear. Named
+`line_width: zero | small | medium | large` values use `PenWidth`. Physical or
+dimensioned widths fail with a diagnostic until their conversion is verified.
+Polyline `closed` and image `show_border` fail as inapplicable properties.
 
 ## Retained layout dependencies
 

@@ -33,7 +33,8 @@ Import resolution and immutable transitive source capture also live in the
 language crate. Collection scope and contextual operations parse into explicit
 AST/CST forms. The typed SchLib intent core compiles captured imports and retains
 field operations, collection scope, source provenance, and spread origins. Full
-step 1 is still open for graphic policies/image resources. Captured footprint
+step 1 is still open for typed image resources and physical pen-width compatibility.
+Graphic field defaults/clear policies now match the current typed Rust API. Captured footprint
 imports now export generated pad names. Independent pin axes and owner-local auto-size constraints
 now resolve over effective target/base geometry. CLI plan still renders an ECO while apply recompiles
 the spec and invokes a different executor; preview/apply agreement is not guaranteed.

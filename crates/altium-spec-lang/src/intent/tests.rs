@@ -186,7 +186,7 @@ fn typed_graphics_preserve_mixed_source_order_and_reject_inapplicable_fields() {
     );
     assert!(compile("component A { line { radius: 1mil } }").is_err());
     assert!(compile("component A { label { font_id: 0 } }").is_err());
-    assert!(compile("component A { rectangle { from: reset } }").is_err());
+    assert!(compile("component A { rectangle { from: reset } }").is_ok());
 }
 #[test]
 fn scopes_swap_bindings_and_map_paths_are_resolved_strictly() {
