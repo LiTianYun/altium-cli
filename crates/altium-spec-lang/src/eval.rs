@@ -160,7 +160,9 @@ pub enum Value {
     Null,
     CoordPoint(i32, i32),
     Array(Vec<Value>),
-    Object(IndexMap<String, Value>),
+    Object(EvaluatedObject),
+    /// Typed source-definition reference, never an object literal or string.
+    Definition(DefinitionReference),
     /// A declared swap group reference; the inner string is the group's entity name.
     SwapGroup(String),
     /// An import object — maps entity names to their string names.
@@ -187,6 +189,65 @@ pub enum Value {
     },
     /// A geometric shape value in Altium internal units (10,000 per mil).
     Shape(Shape),
+}
+
+/// An evaluated object retains declaration provenance until a typed field owner
+/// can validate synonyms. Keys are ordered by their last overlay occurrence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvaluatedObject {
+    values: IndexMap<String, Value>,
+    direct_groups: Vec<IndexMap<String, Span>>,
+}
+impl EvaluatedObject {
+    pub fn into_values(self) -> IndexMap<String, Value> {
+        self.values
+    }
+    pub(crate) fn direct_groups(&self) -> &[IndexMap<String, Span>] {
+        &self.direct_groups
+    }
+}
+impl From<IndexMap<String, Value>> for EvaluatedObject {
+    fn from(values: IndexMap<String, Value>) -> Self {
+        Self {
+            values,
+            direct_groups: Vec::new(),
+        }
+    }
+}
+impl std::ops::Deref for EvaluatedObject {
+    type Target = IndexMap<String, Value>;
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+impl IntoIterator for EvaluatedObject {
+    type Item = (String, Value);
+    type IntoIter = indexmap::map::IntoIter<String, Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a EvaluatedObject {
+    type Item = (&'a String, &'a Value);
+    type IntoIter = indexmap::map::Iter<'a, String, Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter()
+    }
+}
+
+/// A resolved source definition used by authored-intent compilation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DefinitionReference {
+    Component {
+        source: std::path::PathBuf,
+        name: String,
+    },
+    Footprint {
+        source: std::path::PathBuf,
+        name: String,
+        pads: IndexMap<String, String>,
+    },
 }
 
 // ── Shape type ────────────────────────────────────────────────────────────────
@@ -489,6 +550,12 @@ impl Value {
                     .collect();
                 format!("{{{}}}", items.join(", "))
             }
+            Value::Definition(DefinitionReference::Component { name, .. }) => {
+                format!("<component:{name}>")
+            }
+            Value::Definition(DefinitionReference::Footprint { name, .. }) => {
+                format!("<footprint:{name}>")
+            }
             Value::SwapGroup(s) => s.clone(),
             Value::ImportObject { alias, .. } => format!("<import:{alias}>"),
             Value::ImportRef { alias, name } => format!("{alias}.{name}"),
@@ -514,6 +581,7 @@ impl Value {
             Value::CoordPoint(..) => "coord",
             Value::Array(_) => "array",
             Value::Object(_) => "object",
+            Value::Definition(_) => "definition_reference",
             Value::SwapGroup(_) => "swap_group",
             Value::ImportObject { .. } => "import_object",
             Value::ImportRef { .. } => "import_ref",
@@ -546,7 +614,7 @@ impl Value {
     /// Extract as object map, or error.
     pub fn into_object(self, span: Option<Span>) -> EvalResult<IndexMap<String, Value>> {
         match self {
-            Value::Object(m) => Ok(m),
+            Value::Object(m) => Ok(m.into_values()),
             Value::ImportObject { entries, .. } => Ok(entries),
             other => Err(SpecError::new(
                 SpecErrorCode::NotAnObject,
@@ -885,6 +953,8 @@ fn tokens_to_source(tokens: &[crate::lexer::Token]) -> String {
 
 fn eval_object(obj: &Object, scope: &ScopeStack) -> EvalResult<Value> {
     let mut result: IndexMap<String, Value> = IndexMap::new();
+    let mut spans: IndexMap<String, Span> = IndexMap::new();
+    let mut direct_groups = Vec::new();
 
     for item in &obj.items {
         match &item.node {
@@ -896,19 +966,41 @@ fn eval_object(obj: &Object, scope: &ScopeStack) -> EvalResult<Value> {
             }
             ObjectItem::Spread(spread_expr) => {
                 let spread_val = eval_expr(spread_expr, scope)?;
-                let spread_map = spread_val.into_object(Some(spread_expr.span))?;
+                let spread_map = match spread_val {
+                    Value::Object(object) => {
+                        direct_groups.extend(object.direct_groups.clone());
+                        object.into_values()
+                    }
+                    value => value.into_object(Some(spread_expr.span))?,
+                };
                 for (k, v) in spread_map {
+                    result.shift_remove(&k);
                     result.insert(k, v);
                 }
             }
             ObjectItem::Property(prop) => {
+                if let Some(previous) = spans.insert(prop.key.node.clone(), prop.key.span) {
+                    return Err(SpecError::at(
+                        SpecErrorCode::DuplicateEntity,
+                        format!(
+                            "duplicate object property '{}'; first supplied at {}..{}",
+                            prop.key.node, previous.start, previous.end
+                        ),
+                        prop.key.span,
+                    ));
+                }
                 let val = eval_expr(&prop.value, scope)?;
+                result.shift_remove(&prop.key.node);
                 result.insert(prop.key.node.clone(), val);
             }
         }
     }
 
-    Ok(Value::Object(result))
+    direct_groups.push(spans);
+    Ok(Value::Object(EvaluatedObject {
+        values: result,
+        direct_groups,
+    }))
 }
 
 // ── Binary operator ───────────────────────────────────────────────────────────
@@ -1080,6 +1172,15 @@ fn eval_unary_neg(val: Value, span: Span) -> EvalResult<Value> {
 
 fn eval_field_access(base: Value, field: &str, span: Option<Span>) -> EvalResult<Value> {
     match base {
+        Value::Definition(DefinitionReference::Footprint { name, pads, .. }) => {
+            pads.get(field).cloned().map(Value::String).ok_or_else(|| {
+                SpecError::new(
+                    SpecErrorCode::InvalidFieldAccess,
+                    format!("no pad '{field}' in footprint '{name}'"),
+                    span,
+                )
+            })
+        }
         Value::Object(map) => map.get(field).cloned().ok_or_else(|| {
             SpecError::new(
                 SpecErrorCode::InvalidFieldAccess,
@@ -1144,6 +1245,10 @@ fn eval_index_access(base: Value, idx: Value, span: Option<Span>) -> EvalResult<
                     span,
                 )
             })
+        }
+        (value @ Value::Definition(_), Value::String(key)) => eval_field_access(value, &key, span),
+        (value @ Value::Definition(_), Value::Integer(key)) => {
+            eval_field_access(value, &key.to_string(), span)
         }
         (Value::Object(map), Value::String(key)) => map.get(&key).cloned().ok_or_else(|| {
             SpecError::new(
@@ -1833,7 +1938,7 @@ mod tests {
         let mut defaults_map = IndexMap::new();
         defaults_map.insert("shape".to_string(), Value::String("round".to_string()));
         defaults_map.insert("x_size".to_string(), Value::Dim(600_000));
-        scope.define("defaults".to_string(), Value::Object(defaults_map));
+        scope.define("defaults".to_string(), Value::Object(defaults_map.into()));
 
         let spread_item = spanned(ObjectItem::Spread(spanned(Expr::Ident(
             "defaults".to_string(),
@@ -1942,7 +2047,7 @@ mod tests {
         let mut map = IndexMap::new();
         map.insert("layer".to_string(), Value::String("TopLayer".to_string()));
         let mut scope = make_scope();
-        scope.define("smd".to_string(), Value::Object(map));
+        scope.define("smd".to_string(), Value::Object(map.into()));
 
         let base = spanned(Expr::Ident("smd".to_string()));
         let expr = spanned(Expr::Path(Box::new(base), spanned("layer".to_string())));

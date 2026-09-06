@@ -991,14 +991,8 @@ impl<'a> SpecParser<'a> {
             }
 
             if next.same_variant(&TokenKind::Colon) {
-                self.bump(); // IDENT
-                self.bump(); // :
-                let value = self.parse_expr()?;
+                let prop = self.parse_property()?;
                 let end = self.prev_span();
-                let prop = Property {
-                    key: Spanned::new(name, name_span),
-                    value,
-                };
                 return Ok(Spanned::new(PartItem::Property(prop), start.merge(end)));
             }
         }

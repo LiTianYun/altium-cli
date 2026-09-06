@@ -42,3 +42,39 @@ NEXT.md steps.
 The evolving semantic contract is in
 [the proposal](../../proposals/snapshot-intent.md); the current implementation
 boundary and remaining gates are tracked in [STATUS.md](../../../STATUS.md).
+
+## Typed SchLib intent API
+
+`altium_spec_lang::intent::compile_schlib` compiles an import-free AST;
+`compile_captured_schlib` evaluates the immutable captured graph without filesystem
+reads. Imported definitions and constants remain available through explicit
+references; imported components are not scheduled as root output. Definition
+references are typed, so an ordinary object cannot impersonate a footprint.
+
+Field intent retains `Absent`, `Set`, `Inherit`, `Reset`, and `Clear`, with spans.
+Collection permissions remain independent of child fields. Component, part, pin,
+parameter, alias, footprint-map, and graphic intents are typed. Field policies
+resolve definition defaults and instance target/base precedence for supported
+fields; they do not grant writes to omitted fields. Existing annotation data and
+imported footprint source references remain source metadata, not native bindings.
+
+Spread expressions retain direct-property origins through evaluation. Later spread
+entries preserve the established override order; duplicate direct assignments to
+the same field (including typed synonyms such as parameter text/value) error.
+Null supplied by a spread keeps its Clear meaning. Objects are not globally
+rewritten to canonical field names.
+
+Use the read-only diagnostic example to compile from captured contents twice and
+check equal results:
+
+```sh
+cargo run -p altium-spec-lang --example check_schlib_intent -- design.schlib-spec
+```
+
+This is a front-end API, not the replacement CLI planner. Full step 1 still needs
+retained anchor dependencies, generated footprint-pad imports, graphic default and
+clear policies, and typed image-resource support. Unsupported image_data and
+generated pad references fail explicitly. Graphic fields are intent, not proof of
+a native mapping: line-width enum conversion and fields without a native counterpart
+must be resolved before materialization. Later steps must verify ownership,
+materialize/project equality, scope enforcement, and native serialization.

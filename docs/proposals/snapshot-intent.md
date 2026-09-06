@@ -2,8 +2,9 @@
 
 This is the proposed semantic contract for [NEXT.md](../../NEXT.md), step 1.
 It does not describe a shipped planner. Existing component/import/expression syntax
-is reused below; `inherit`, `reset`, collection declarations, and uniform `null`
-clearing still require implementation. The legacy compiler's `Option` values,
+is reused below. The front end and typed intent core now preserve `inherit`,
+`reset`, collection declarations, and supported `null` clearing. These operations
+are not yet executable through snapshot plans; the remaining gates are in STATUS.md. The legacy compiler's `Option` values,
 eager defaults, and additive executor do not establish this contract.
 
 ## Context and authority
@@ -54,8 +55,14 @@ values for arithmetic, interpolation, `let`, or object spreading. Quoted
 `"inherit"` and `"reset"` remain ordinary string values. Nested expression use of
 these operations is an error. Null as a general expression remains available,
 but a property resolving to null must undergo the same clearability check as a
-literal null. Duplicate properties, including synonyms such as `text` and `value`,
-are errors rather than last-write-wins.
+literal null. Duplicate directly authored properties, including synonyms such as
+`text` and `value`, are errors rather than last-write-wins. Object spreading keeps
+its existing declared source-order overlay semantics: `...base, length: 40mil`
+explicitly overrides the inherited entry, and a later spread may override earlier
+entries. This intentional overlay is distinct from repeating a direct property.
+Validate duplicate direct keys inside spread-source object literals before evaluation
+so evaluation cannot erase a typo. The final overlaid typed field retains its authored Set/Clear meaning;
+no hidden historical baseline or extra write scope is inferred.
 
 Defaults belong to a typed field registry, versioned with the plan schema. For the
 initial SchLib surface: pin `name` and `hidden_net_name` default to empty strings;
@@ -224,3 +231,20 @@ be preserved, it must block. Source annotations are source metadata only. Native
 IDs remain typed native data; neither annotations nor generated IDs may become
 cross-artifact execution bindings. Reports derive from actual typed patches and
 show replaced values and deleted descendants without similarity-based retargeting.
+
+## Graphic policy frontier
+
+The legacy `graphic_from_spec` constructors in
+`crates/altium-format-spec/src/executor.rs` supply defaults, but those fallback
+values do not prove valid creation geometry. Arc, elliptical-arc, and pie end
+angles default to typed absence, not 360 degrees; the intent policy must represent
+that distinction before supporting reset. Native line widths use `PenWidth`, while
+the old compiler exposes coordinates and the old executor ignores them. Polyline
+`closed` and image `show_border` have no direct field in the current public graphic
+API. Define typed mappings or reject these during elaboration rather than discard
+them. Font defaults require validation against the destination font table.
+
+The old `image_data` compiler field has no corresponding public image-resource
+mutation boundary and is ignored by its executor. The replacement intent compiler
+rejects it. A complete implementation needs typed resource APIs and strict image
+validation; no raw payload retention can fill that gap.

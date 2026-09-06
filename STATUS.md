@@ -38,7 +38,11 @@ immutable capture API retains exact root/transitive text, ASTs, canonical paths,
 ordered edges, and dependency order, and rechecks content/path resolutions.
 [Collection/contextual-operation syntax](docs/spec-lang/language/snapshot-intent.md)
 is parsed and preserved by the CST; legacy commands explicitly reject collection
-scope instead of ignoring it. Full step 1 intent semantics are not yet implemented. `altium-sync` remains a dependency scaffold. No state subsystem
+scope instead of ignoring it. The typed SchLib intent core now preserves field operations/spans, collection
+scope, typed definition references, imported source provenance, and nested spread
+origins. It compiles captured transitive values without reopening imports. Full
+step 1 remains open: retained anchor dependencies, generated footprint-pad imports,
+graphic default/clear policies, and typed image resources. `altium-sync` remains a dependency scaffold. No state subsystem
 existed to remove. Obsolete design notes and scaffold identity
 plans were removed, including the unused `altium-sync` random-ID dependency.
 Existing native Altium IDs, spec annotations, and ephemeral spec-to-spec sync
@@ -57,6 +61,13 @@ rejected unsupported content. This is not a roundtrip acceptance gate.
 Syntax/capture validation: 286 language tests and 168 legacy spec tests pass.
 Independent reviews covered captured source provenance, contextual operations,
 CST edits, and legacy rejection guards; findings were fixed before commit.
+
+Typed-intent validation: all 309 language tests (including 23 intent tests),
+168 legacy spec tests, and the CLI compile check pass after independent review.
+Core findings were fixed before commit. The [five-library captured-intent check](docs/worklogs/next-intent-2026-09-05.md)
+spans the SchLib corpus by size and compiles identical intent twice per capture.
+It covers 7,260 components, 41,528 pins, and 27,464 graphics; this is front-end
+coverage, not binary preservation or a completed step 1 gate.
 
 Current CLI execution architecture is unchanged: `plan` renders the legacy ECO and `apply`
 recompiles/runs the separate executor. Saved-plan execution, precondition checks,

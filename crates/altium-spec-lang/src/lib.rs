@@ -13,6 +13,7 @@ pub mod diagnostic;
 pub mod eval;
 pub mod formatter;
 pub mod import;
+pub mod intent;
 pub mod lexer;
 pub mod parser;
 pub mod trivia;

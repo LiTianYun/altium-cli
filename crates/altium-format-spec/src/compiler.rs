@@ -204,7 +204,7 @@ fn build_component_binding(
         );
     }
 
-    Value::Object(fields)
+    Value::Object(fields.into())
 }
 
 /// Transform a pin position from symbol space to schematic space.
@@ -5826,7 +5826,7 @@ fn extract_pad_template(
     span: crate::diagnostic::Span,
 ) -> Result<IndexMap<String, Value>, SpecError> {
     match props.get("pad") {
-        Some(Value::Object(m)) => Ok(m.clone()),
+        Some(Value::Object(m)) => Ok(m.clone().into_values()),
         Some(other) => Err(SpecError::at(
             SpecErrorCode::TypeMismatch,
             format!("pad: expected object, got {}", other.kind_name()),
@@ -6205,7 +6205,7 @@ fn eval_object_to_map_skip_row_keys(
             if prop.key.node == "pad" {
                 if let crate::ast::Expr::Object(inner_obj) = &prop.value.node {
                     let map = eval_object_to_map(inner_obj, scope)?;
-                    result.insert("pad".to_string(), Value::Object(map));
+                    result.insert("pad".to_string(), Value::Object(map.into()));
                 } else {
                     let val = eval_expr(&prop.value, scope)?;
                     result.insert("pad".to_string(), val);
