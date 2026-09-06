@@ -365,7 +365,7 @@ impl std::fmt::Display for SchRecordType {
 }
 
 /// Font definition from SchSheet RECORD=31.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SchFont {
     pub id: i32,      // 1-based index
     pub name: String, // e.g., "Times New Roman"
@@ -378,7 +378,7 @@ pub struct SchFont {
 }
 
 /// Indexed display style entry from SchLib FileHeader style table.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SchDisplayStyle {
     pub id: i32, // 1-based index
     pub gradient_depth: Option<i32>,
@@ -405,7 +405,7 @@ pub struct SchDisplayStyle {
 ///
 /// Coord fields combine the integer part and `_Frac` companion into a single
 /// value: `raw = integer * 100_000 + frac`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SchDisplaySettings {
     // Grid settings
     pub snap_grid_on: Option<bool>,

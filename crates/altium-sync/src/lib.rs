@@ -23,3 +23,6 @@
 //! - `render` — exact patch reporting and optional display-only pairing/grouping
 
 pub mod image_asset;
+pub mod schlib;
+
+pub(crate) mod collection;

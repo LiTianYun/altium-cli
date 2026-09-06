@@ -1,8 +1,11 @@
+mod snapshot;
+pub use snapshot::{SchLibComponentSnapshot, SchLibSnapshot};
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use altium_format_types::constants::component::{
-    ALIAS_COUNT, ALL_PIN_COUNT, COMP_COUNT, COMP_DESCR, LIB_REF, LIB_REFERENCE, PART_COUNT,
+    ALIAS_COUNT, COMP_COUNT, COMP_DESCR, LIB_REF, LIB_REFERENCE, PART_COUNT,
 };
 use altium_format_types::constants::file_headers::{
     EMBEDDED_OBJECT_HEADER_RECORD, SCH_ICON_STORAGE_HEADER, SCH_LIBRARY_BINARY_HEADER_V50,
@@ -80,6 +83,7 @@ use crate::tracked_cfb::TrackedCfbDocument;
 use crate::util::generate_unique_id;
 use crate::{AltiumFormatError, Result, ResultExt};
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct SchLib {
     header: SchLibHeader,
     components: Vec<SchLibComponent>,
@@ -87,17 +91,19 @@ pub struct SchLib {
     aliases: Vec<SchLibAlias>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SchLibEmbeddedImage {
     pub file_name: String,
     pub data: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SchLibAlias {
     pub alias_name: String,
     pub canonical_name: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SchLibHeader {
     pub weight: i32,
     pub minor_version: i32,
@@ -107,7 +113,7 @@ pub(crate) struct SchLibHeader {
     pub components: Vec<SchLibComponentIndex>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SchLibComponentIndex {
     pub lib_ref: String,
     pub description: String,
@@ -1640,23 +1646,12 @@ fn serialize_section_keys(section_keys: &HashMap<String, String>) -> Option<Vec<
 
 // Serializes a component's Data stream (component record + child records).
 fn serialize_component_data(comp: &SchLibComponent) -> Result<Vec<u8>> {
-    // Build the component (RECORD=1) block directly to avoid needing Clone on SchComponent.
+    // Export the stored data-object fields. FileFormatV5.ExportComponent calls
+    // ISchDataComponent.GetAllPinCount(), which returns the cached value directly;
+    // it does not call the engine object's separate cache-updating getter.
     let mut params = ParameterCollection::new();
     params.insert(RECORD, (SchRecordType::Component as i32).to_param_value());
     serialize_component_record(&comp.component, &mut params);
-    // FileFormatV5 exports GetAllPinCount(). In engine code, the stored value is only
-    // recomputed when it is <= 0; otherwise an existing positive value is preserved.
-    let mut all_pin_count_for_export = comp.component.all_pin_count;
-    if all_pin_count_for_export <= 0 {
-        all_pin_count_for_export = comp
-            .records
-            .iter()
-            .filter(|r| matches!(r, SchRecord::Pin(_)))
-            .count() as i32;
-    }
-    if all_pin_count_for_export != 0 {
-        params.insert(ALL_PIN_COUNT, all_pin_count_for_export.to_param_value());
-    }
     let mut stream = write_text_block(&params.to_bytes());
     for record in &comp.records {
         stream.extend_from_slice(&serialize_record(record)?);

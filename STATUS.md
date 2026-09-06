@@ -15,7 +15,7 @@ altium-format          (core: parsing, serialization, high-level API, rendering 
   └→ altium-format-render-png  (PNG rasterization via resvg)
 altium-format-spec     (declarative spec language for Altium documents — being replaced)
 altium-spec-lang       (lossless CST, parser, formatter, expression evaluation)
-altium-sync            (scaffold: snapshots, indexed patches, directional plan/apply)
+altium-sync            (asset capture, initial snapshot-bound patches; planner incomplete)
 altium-cli             (CLI binary)
 ```
 
@@ -43,6 +43,24 @@ scope, typed definition references, imported source provenance, and nested sprea
 origins. It compiles captured transitive values without reopening imports.
 Step 1 is complete under the revised image asset-reference scope, following
 independent completeness review. Steps 2 through 9 remain outstanding.
+Step 2 now has format-owned complete typed snapshots and immutable batch component
+replacement. Native record fields, Data/Additional separation, global settings,
+aliases and image resources remain private and intact. Cross-namespace component
+replacement is rejected using the captured native library/font/style/image/alias
+context; this does not replace ownership validation or reference relocation.
+The first sync scalar path applies explicitly addressed component descriptions,
+preserves all other typed fields, binds execution to complete typed input equality,
+and publishes only a validated candidate. The shared collection planner checks
+original indices, partial preservation, complete order, deletion permission and
+conflicting edits. Full field/collection elaboration, structural ownership repair,
+saved-plan serialization, filesystem transactions and CLI migration remain ahead.
+Real snapshot checks pass on Connectors, ICs and STM32F4: 223 components retain
+complete typed equality through native no-op save/reopen and 223 description
+replacements. The ICs check exposed and fixed an unjustified pin-count cache
+recalculation; the original AD26 exporter uses the stored data-object value.
+See the [snapshot investigation](docs/worklogs/next-snapshots-2026-09-05.md).
+Snapshot increment validation: 403 core, 168 legacy spec and 12 sync tests pass;
+the CLI builds. Independent reviews passed for each implemented boundary.
 Full image codecs were removed from the gate by the user's 2026-09-05 scope change.
 Graphic field policies now cover all 13 kinds against the existing typed Rust
 API/creation defaults, including optional arc endpoints and named PenWidth values.

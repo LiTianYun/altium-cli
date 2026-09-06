@@ -35,6 +35,8 @@ pub(crate) mod schlib_read;
 mod schlib_types;
 pub(crate) mod schlib_write;
 
+pub use crate::schlib::{SchLibComponentSnapshot, SchLibSnapshot};
+
 // ── SchLib types ─────────────────────────────────────────────────────────────
 
 pub use schlib_types::{
