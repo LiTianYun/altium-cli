@@ -85,6 +85,17 @@ depending on the missing legacy `data/BlankSchlibComponent.SchLib` file. Their
 stream-content and consumption assertions are preserved or strengthened; all
 eight targeted tests and independent review pass. This does not validate native
 SchLib semantics.
+Embedded-object envelopes now require complete zlib streams with no trailing
+compressed input, lossless Windows-1252 identifiers, and checked identifier/length
+serialization. The inner compressed length uses the verified full signed 32-bit
+field; unsupported oversized outer blocks fail before writing. Storage validates
+its header, optional record sentinel, entry count, and binary block formats, with
+stream/block/resource error context. Existing duplicate entries remain ordered.
+Both boundary changes passed independent review. The combined default library
+suite passes 385 tests, legacy spec passes 168, and the CLI builds. All 13 real
+image-bearing SchLibs still validate; an altered text-tagged resource block that
+previously passed now fails at `/Storage block #1`. This is envelope validation,
+not typed image payload support or native roundtrip acceptance.
 Coordinate literals and dimensional float conversions now reject nonfinite/overflow
 values; signed-minimum division, negation, and abs return errors instead of panics. `altium-sync` remains a dependency scaffold. No state subsystem
 existed to remove. Obsolete design notes and scaffold identity

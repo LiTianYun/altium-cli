@@ -24,7 +24,9 @@ that source. See the [inventory](../worklogs/next-images-2026-09-05.md).
 
 The initial shared vocabulary is:
 
-- `ImageResourceName`: exact decoded resource name, with no basename matching.
+- `ImageResourceName`: exact decoded storage identifier, with no basename matching.
+  Native rotated aliases also need a typed filename/orientation key, following
+  the verified `FileName=...|Orientation=...` grammar and comparison rules.
 - `PixelDimensions`, `RasterResolution`, and `BitmapRowOrder`.
 - `BitmapImageSizeDeclaration`: explicit zero versus computed size declaration.
 - Typed bitmap pixels: indexed pixels and palette, 24-bit BGR colors, or 32-bit
@@ -49,11 +51,15 @@ The detailed initial schemas and reuse constraints are recorded in the
 
 ## Document and source behavior
 
-The public SchLib API will support resource enumeration, exact-name lookup, and
-explicit insert/replace. Duplicate names and conflicting content error. No implicit
-upsert, basename matching, external file loading, or resource garbage collection.
-Embedded references must resolve; external references stay explicit. Deletion
-requires authored scope and verified reference coverage.
+The public SchLib API will support ordered resource enumeration, lookup, and
+explicit insert/replace. Native loading tolerates repeated identifiers and rotated
+aliases, so parsing must retain every typed entry in order. This does not authorize
+ambiguous name-based edits: duplicate/ambiguous keys block planning under NEXT's
+collection contract. Insert/replace must validate the complete resulting resource
+set. No implicit upsert, basename matching, external file loading, or resource
+garbage collection. Embedded references must resolve using the verified native
+alias rules; external references stay explicit. Deletion requires authored scope
+and verified reference coverage.
 
 Image placement refers to the resource separately from its geometry and display
 flags. Source image input must decode strictly into the shared model; its authored

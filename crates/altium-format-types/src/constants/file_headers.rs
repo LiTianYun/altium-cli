@@ -217,3 +217,12 @@ pub const PCB_DOC_BINARY_HEADER_V5: &str = "PCB 5.0 Binary File";
 ///
 /// **Container:** OLE2 compound document
 pub const PCB_DOC_BINARY_HEADER_V6: &str = "PCB 6.0 Binary File";
+
+/// Embedded image Storage stream header.
+/// Source: AD26 `SchDataExporterBaseV5.WriteExtendedWarehouseData`.
+pub const SCH_ICON_STORAGE_HEADER: &str = "Icon storage";
+
+/// Header record sentinel for Storage-style embedded object streams.
+/// Source: AD26 `SchDataExporterBaseV5.WriteExtendedWarehouseData` calls
+/// `Export_Instruction(0, "RECORD")` before the header parameters.
+pub const EMBEDDED_OBJECT_HEADER_RECORD: i32 = 0;

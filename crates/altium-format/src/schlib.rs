@@ -4,7 +4,9 @@ use std::path::Path;
 use altium_format_types::constants::component::{
     ALIAS_COUNT, ALL_PIN_COUNT, COMP_COUNT, COMP_DESCR, LIB_REF, LIB_REFERENCE, PART_COUNT,
 };
-use altium_format_types::constants::file_headers::SCH_LIBRARY_BINARY_HEADER_V50;
+use altium_format_types::constants::file_headers::{
+    EMBEDDED_OBJECT_HEADER_RECORD, SCH_ICON_STORAGE_HEADER, SCH_LIBRARY_BINARY_HEADER_V50,
+};
 use altium_format_types::constants::parsing::{
     C_BASE_UNIT, C_MAX_SHORT_STRING_LENGTH, C_SCH_SPECIAL_DELIMITER, INSTRUCTION_EXTRA_OBJECT_INDEX,
 };
@@ -1202,56 +1204,77 @@ pub(crate) fn serialize_pin_sidecars(pins: &[&SchPin]) -> Result<Vec<(&'static s
 // ── Storage stream (embedded images) ────────────────────────────────────────
 
 pub(crate) fn parse_storage_stream(data: &[u8]) -> Result<Vec<SchLibEmbeddedImage>> {
-    let blocks = parse_blocks(data)?;
-    if blocks.is_empty() {
+    let blocks = crate::block_stream::iter_blocks(data)
+        .enumerate()
+        .map(|(index, block)| block.with_context(|| format!("framing /Storage block #{index}")))
+        .collect::<Result<Vec<_>>>()?;
+    let Some(header_block) = blocks.first() else {
         return Err(AltiumFormatError::InvalidParamValue {
             key: STORAGE.to_owned(),
-            detail: "empty Storage stream".to_owned(),
+            detail: "empty /Storage stream".to_owned(),
         });
-    }
-    // Header block: HEADER=Icon storage, optional Weight=N
-    if blocks[0].format != BlockFormat::Text {
+    };
+    if header_block.format != BlockFormat::Text {
         return Err(AltiumFormatError::InvalidParamValue {
             key: STORAGE.to_owned(),
-            detail: "first block must be text".to_owned(),
+            detail: "/Storage block #0 header must be text".to_owned(),
         });
     }
-    let mut params = ParameterCollection::from_bytes(&blocks[0].data)?;
-    let _header: String = params.remove_required(HEADER)?;
-    let weight: usize = params.remove_with_default(WEIGHT, 0usize)?;
-    params.assert_exhausted()?;
-
-    if weight == 0 {
-        if blocks.len() > 1 {
-            return Err(AltiumFormatError::RecordCountMismatch {
-                section: "Storage".to_owned(),
-                expected: 0,
-                actual: blocks.len() - 1,
+    let weight = (|| -> Result<usize> {
+        let mut params = ParameterCollection::from_bytes(&header_block.data)?;
+        if let Some(record) = params.remove_optional::<i32>(RECORD)? {
+            if record != EMBEDDED_OBJECT_HEADER_RECORD {
+                return Err(AltiumFormatError::InvalidParamValue {
+                    key: RECORD.to_owned(),
+                    detail: format!(
+                        "expected header sentinel {EMBEDDED_OBJECT_HEADER_RECORD}, got {record}"
+                    ),
+                });
+            }
+        }
+        let header: String = params.remove_required(HEADER)?;
+        if header != SCH_ICON_STORAGE_HEADER {
+            return Err(AltiumFormatError::InvalidParamValue {
+                key: HEADER.to_owned(),
+                detail: format!("expected {SCH_ICON_STORAGE_HEADER:?}, got {header:?}"),
             });
         }
-        return Ok(Vec::new());
-    }
+        // Altium omits zero-valued Weight in empty Storage headers.
+        let weight = params.remove_with_default(WEIGHT, 0usize)?;
+        params.assert_exhausted()?;
+        Ok(weight)
+    })()
+    .context("parsing /Storage block #0 header")?;
 
-    let entries: Result<Vec<_>> = blocks[1..]
-        .iter()
-        .map(|b| crate::embedded_object::parse_embedded_object(&b.data))
-        .collect();
-    let entries = entries?;
-    if entries.len() != weight {
+    // Validate framing/count before decompressing any resource.
+    let actual = blocks.len() - 1;
+    if actual != weight {
         return Err(AltiumFormatError::RecordCountMismatch {
-            section: "Storage".to_owned(),
+            section: "/Storage (Weight in block #0)".to_owned(),
             expected: weight,
-            actual: entries.len(),
+            actual,
         });
     }
-    let images = entries
-        .into_iter()
-        .map(|e| SchLibEmbeddedImage {
-            file_name: e.id,
-            data: e.inner_data,
+    for (index, block) in blocks.iter().enumerate().skip(1) {
+        if block.format != BlockFormat::Binary {
+            return Err(AltiumFormatError::InvalidParamValue {
+                key: STORAGE.to_owned(),
+                detail: format!("/Storage block #{index} resource entry must be binary"),
+            });
+        }
+    }
+    blocks[1..]
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let entry = crate::embedded_object::parse_embedded_object(&block.data)
+                .with_context(|| format!("parsing /Storage block #{} resource", index + 1))?;
+            Ok(SchLibEmbeddedImage {
+                file_name: entry.id,
+                data: entry.inner_data,
+            })
         })
-        .collect();
-    Ok(images)
+        .collect()
 }
 
 // ── LibAdditional + per-component Additional ───────────────────────────────
@@ -1591,14 +1614,14 @@ fn serialize_file_header(header: &SchLibHeader) -> Vec<u8> {
 fn serialize_storage_stream(images: &[SchLibEmbeddedImage]) -> Result<Vec<u8>> {
     if images.is_empty() {
         let mut params = ParameterCollection::new();
-        params.insert(HEADER, "Icon storage".to_owned());
+        params.insert(HEADER, SCH_ICON_STORAGE_HEADER.to_owned());
         return Ok(write_text_block(&params.to_bytes()));
     }
     let entries: Vec<(String, Vec<u8>)> = images
         .iter()
         .map(|img| (img.file_name.clone(), img.data.clone()))
         .collect();
-    serialize_embedded_object_stream("Icon storage", &entries)
+    serialize_embedded_object_stream(SCH_ICON_STORAGE_HEADER, &entries)
 }
 
 // Serializes the SectionKeys stream. Returns None if no keys needed.
@@ -2614,6 +2637,129 @@ fn validate_schlib_invariants(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn storage_test_header(weight: Option<usize>) -> Vec<u8> {
+        let mut params = ParameterCollection::new();
+        params.insert(HEADER, SCH_ICON_STORAGE_HEADER.to_owned());
+        if let Some(weight) = weight {
+            params.insert(WEIGHT, weight.to_string());
+        }
+        write_text_block(&params.to_bytes())
+    }
+
+    #[test]
+    fn storage_boundary_preserves_empty_headers_and_ordered_entries() {
+        for weight in [None, Some(0)] {
+            assert!(
+                parse_storage_stream(&storage_test_header(weight))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let sentinel = write_text_block(b"|RECORD=0|HEADER=Icon storage|Weight=0|\0");
+        assert!(parse_storage_stream(&sentinel).unwrap().is_empty());
+        // Original import resolves repeated names; the boundary must not discard
+        // or reject them before that resource-reference policy is implemented.
+        let images = vec![
+            SchLibEmbeddedImage {
+                file_name: "same.png".into(),
+                data: vec![1, 2],
+            },
+            SchLibEmbeddedImage {
+                file_name: "same.png".into(),
+                data: vec![3, 4],
+            },
+        ];
+        let stream = serialize_storage_stream(&images).unwrap();
+        let parsed = parse_storage_stream(&stream).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].file_name, "same.png");
+        assert_eq!(parsed[1].file_name, "same.png");
+        assert_eq!(parsed[0].data, vec![1, 2]);
+        assert_eq!(parsed[1].data, vec![3, 4]);
+    }
+
+    #[test]
+    fn storage_boundary_rejects_wrong_or_unconsumed_header() {
+        for payload in [
+            b"|HEADER=Wrong storage|Weight=0|\0".as_slice(),
+            b"|HEADER=Icon storage|Weight=0|Unexpected=1|\0".as_slice(),
+            b"|Weight=0|\0".as_slice(),
+            b"|RECORD=1|HEADER=Icon storage|Weight=0|\0".as_slice(),
+        ] {
+            let error = parse_storage_stream(&write_text_block(payload))
+                .err()
+                .expect("invalid Storage must fail")
+                .to_string();
+            assert!(error.contains("/Storage block #0 header"), "{error}");
+        }
+        let binary_header = crate::block_stream::write_binary_block(b"header");
+        let error = parse_storage_stream(&binary_header)
+            .err()
+            .expect("invalid Storage must fail")
+            .to_string();
+        assert!(error.contains("block #0 header must be text"), "{error}");
+        assert!(
+            parse_storage_stream(&[])
+                .err()
+                .expect("invalid Storage must fail")
+                .to_string()
+                .contains("empty /Storage")
+        );
+    }
+
+    #[test]
+    fn storage_boundary_checks_count_and_formats_before_decoding() {
+        for weight in [None, Some(0), Some(2)] {
+            let mut stream = storage_test_header(weight);
+            // Deliberately invalid compressed envelope must not win over count.
+            stream.extend(crate::block_stream::write_binary_block(b"invalid envelope"));
+            let error = parse_storage_stream(&stream)
+                .err()
+                .expect("invalid Storage must fail");
+            assert!(
+                matches!(error, AltiumFormatError::RecordCountMismatch { .. }),
+                "{error}"
+            );
+        }
+        let mut stream = storage_test_header(Some(2));
+        stream.extend(crate::block_stream::write_binary_block(b"invalid envelope"));
+        stream.extend(write_text_block(b"also invalid"));
+        let error = parse_storage_stream(&stream)
+            .err()
+            .expect("invalid Storage must fail")
+            .to_string();
+        assert!(
+            error.contains("block #2 resource entry must be binary"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn storage_boundary_reports_block_context_for_framing_and_envelopes() {
+        let mut framing = storage_test_header(Some(1));
+        framing.push(1);
+        let error = parse_storage_stream(&framing)
+            .err()
+            .expect("invalid Storage must fail")
+            .to_string();
+        assert!(error.contains("framing /Storage block #1"), "{error}");
+
+        let mut stream = storage_test_header(Some(1));
+        let mut envelope =
+            crate::embedded_object::serialize_embedded_object("broken.png", b"pixels").unwrap();
+        envelope.pop();
+        stream.extend(crate::block_stream::write_binary_block(&envelope));
+        let error = parse_storage_stream(&stream)
+            .err()
+            .expect("invalid Storage must fail")
+            .to_string();
+        assert!(
+            error.contains("parsing /Storage block #1 resource"),
+            "{error}"
+        );
+        assert!(error.contains("broken.png"), "{error}");
+    }
 
     #[cfg(feature = "test-fixtures")]
     fn data_path(filename: &str) -> std::path::PathBuf {

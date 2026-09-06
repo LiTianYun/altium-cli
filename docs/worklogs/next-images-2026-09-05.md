@@ -280,3 +280,100 @@ A source conversion should accept only exact matches and fail otherwise.
 The fresh original managed evidence closes the previously missing class-framing
 and pen-table evidence, but **does not complete typed image parsing, resource
 API work, codec metadata handling, or independent native roundtrip validation**.
+
+## Original embedded-envelope and Storage boundary follow-up
+
+Additional fresh decompilation of the same hashed `Altium.Sch.DataModel.dll`
+clarifies two different length fields. Temporary evidence files are
+`SchDataEmbeddedObject.cs`, `SchDataSerializer.cs`,
+`SchDataSerializerParam.cs`, `SchDataExporterBaseV5.cs` and
+`SchDataImporterBaseV5.cs` under `/tmp/altium-original-evidence/`.
+
+`SchDataEmbeddedObject.ExportToFile` writes DynamicString(Name) and Binary(Data).
+`SchDataSerializer.Export_DynamicString` delegates to WriteString: the encoded
+name byte count is checked with `Convert.ToByte`, then that many bytes are
+written. `WriteBinary` (`SchDataSerializer.cs:863`) zlib-compresses Data, obtains
+`Convert.ToInt32(compressed.Length)`, and writes that integer followed by the
+compressed content. `ReadBinary` (`SchDataSerializer.cs:1002`) reads the full
+signed integer and that many bytes before decompression. Parametric binary-mode
+overrides delegate to these methods. **The inner compressed-size word has no
+24-bit mask or high-byte flag semantics in this original implementation.**
+Negative lengths are invalid; representable inner lengths use the nonnegative
+signed-32-bit domain. The enclosing record size places a separate constraint.
+A native hardening fix must not turn inner lengths into flags or truncate them.
+
+The outer parametric record header is separate. `FlushCurrent`
+(`SchDataSerializerParam.cs:215`) writes text length with mode zero, or binary
+payload length OR `0x01000000`. `Export_Instruction` selects binary mode for
+`BINARY`. `GetNextLine` (`SchDataSerializerParam.cs:244`) normally splits mode
+from the high byte and masks the low 24 bits, but has a D0-envelope exception:
+it peeks the one-byte name length and full inner compressed length, adds
+`name_length + 6`, and preserves the complete outer integer when that equals
+this derived payload length. Thus some binary envelopes at or above 16 MiB have
+an explicitly recognized representation. The ordinary 24-bit record limit is
+**not** an original maximum for the inner size word. Supporting that larger
+outer-record case would be a separately tested block-reader change; an envelope
+hardening patch must not silently invent its representation.
+
+`SchDataExporterBaseV5.WriteExtendedWarehouseData` (`:215`) starts `Storage`,
+writes RECORD instruction zero, exact `HEADER=Icon storage`, `Weight=count`,
+and for each resource writes BINARY instruction 208 followed by its envelope.
+This proves the text-header and binary-entry modes as well as the header value.
+The original importer does not itself check every sentinel; reproducing its
+permissiveness is not required by this repository's fail-fast policy.
+
+Original reference processing also resolves the earlier bounded linkage caveat.
+`ProcessImportedExtendedWarehouse` (`SchDataImporterBaseV5.cs:112`) constructs
+case-insensitive keys: plain filename for orientation zero, or
+`FileName={filename}|Orientation={RotationBy90ToString(orientation)}` otherwise.
+It has a plain-filename fallback and keeps the first stored value per resolved
+orientation. The exporter (`SchDataExporterBaseV5.cs:113`) emits a plain-name
+resource plus rotated-name resources when applicable. Consequently the SMotlaq
+identifier with `Orientation=90 Degrees` is an established rotated resource
+alias, not evidence of a malformed/orphan resource. The initial exact-filename
+survey intentionally did not resolve this alias family. Future typed resource
+identity needs filename **and** the explicitly parsed orientation relationship;
+it must not split arbitrary names without the verified grammar.
+
+The original loops also tolerate duplicate Storage names rather than declaring
+them invalid. This evidence does not justify introducing unconditional duplicate
+name rejection in a framing-only hardening change. A future typed resource API
+must explicitly resolve ambiguity/collisions without silently discarding a
+second resource; that policy remains distinct from the existing ordered native
+Storage list and from source creation constraints.
+
+## Implemented boundary hardening and real-file check
+
+The envelope now validates the full signed inner length, requires zlib StreamEnd
+and exact compressed input consumption, and rejects unmappable or overlong
+Windows-1252 identifiers during save. Fixed-codec identifier decoding disables
+BOM sniffing so valid Windows-1252 byte sequences are not reinterpreted as UTF.
+The current shared block writer's outer-size limit is checked before output;
+the native oversized-block exception described above remains unsupported.
+
+Storage checks its exact header, optional RECORD=0 sentinel, declared count and
+binary entry formats before decompression. Errors include stream and block
+context, then resource identifier and payload offset once available. Duplicate
+entries are preserved in order. These changes do not decode the image payload.
+
+All 13 original image-bearing files in the table above validated both before and
+after the changes. For a real-file negative case, a copy of `ICs.SchLib` had only
+the first resource block's header changed from binary to text in `/Storage`;
+the envelope/pixels and CFB stream length were unchanged. The previous CLI
+accepted it. The rebuilt CLI exits 1 with:
+
+```text
+Error: parsing /Storage stream: Invalid parameter value for key 'Storage': /Storage block #1 resource entry must be binary
+```
+
+Temporary evidence: `/tmp/altium-image-validation-before.json`,
+`/tmp/altium-image-validation-after.json`,
+`/tmp/altium-image-wrong-block-format.SchLib`, and the corresponding
+`/tmp/altium-image-wrong-block-before.json` / `after.json` reports.
+
+Targeted envelope tests pass 18/18; Storage tests pass 4/4. Both implementations
+passed independent review. After repairing seven unrelated missing-file
+dependencies in CFB wrapper test setup, the full default core-library suite
+passes 385 tests, the legacy spec suite passes 168, and CLI compilation succeeds.
+Fixture-feature and property-test suites were not enabled. This confirms the
+bounded framing behavior, not complete native image semantics or roundtrips.
