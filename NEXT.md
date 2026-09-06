@@ -29,7 +29,8 @@ persistent object bindings. Recovery journals are never inputs to later planning
 
 The language front end, lossless CST, structured edits, and comment-preserving
 dump merge now live in `altium-spec-lang`, reexported by `altium-format-spec`.
-Imports and semantic intent compilation remain in the legacy crate. CLI plan still renders an ECO while apply recompiles
+Import resolution also lives in the language crate; semantic intent compilation
+remains in the legacy crate. CLI plan still renders an ECO while apply recompiles
 the spec and invokes a different executor; preview/apply agreement is not guaranteed.
 `altium-sync` contains a dependency scaffold only. There is
 no executable external state subsystem to migrate or delete.
@@ -270,7 +271,7 @@ plans and stages every affected artifact before any destination is committed.
 ## Implementation steps and gates
 
 Complete an independent agent completeness review after every numbered step;
-resolve findings before proceeding. Step 1 front-end extraction is implemented; imports and full intent semantics
+resolve findings before proceeding. Step 1 front-end/import extraction is implemented; full intent semantics
 remain outstanding. None of the numbered steps below is complete.
 
 1. **Language boundary and full SchLib intent.** Move/decouple CST, diagnostics,

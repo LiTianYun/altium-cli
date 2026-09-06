@@ -12,6 +12,7 @@ pub mod cst;
 pub mod diagnostic;
 pub mod eval;
 pub mod formatter;
+pub mod import;
 pub mod lexer;
 pub mod parser;
 pub mod trivia;
@@ -22,6 +23,7 @@ pub use eval::{
     eval_let_bindings, unit_to_internal,
 };
 pub use formatter::{FormatConfig, FormatResult, extract_top_level_trivia, format_spec};
+pub use import::{ResolvedSpec, resolve_imports};
 pub use trivia::{
     CommentToken, ItemTrivia, TriviaLine, TriviaMap, parse_with_trivia, scan_trivia_lines,
 };

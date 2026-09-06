@@ -7,7 +7,7 @@ diffed, and reconciled against binary `.SchLib`/`.PcbLib`/`.SchDoc`/`.PcbDoc`/`.
 files. You write a `*-spec` file, and the tooling compiles it, validates it,
 plans an Engineering Change Order (ECO) against an existing document, and applies
 it. The document-independent parser, lossless CST, formatter, and expression
-evaluator live in `crates/altium-spec-lang`. Imports, compilation, and legacy
+evaluator and import resolver live in `crates/altium-spec-lang`. Compilation and legacy
 document workflows remain in `crates/altium-format-spec`, which reexports the
 language APIs.
 

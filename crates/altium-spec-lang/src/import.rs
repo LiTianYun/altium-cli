@@ -16,26 +16,32 @@ use crate::parser::parse_spec;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-/// Resolved set of spec files with all imports flattened.
+/// Root AST and its direct imports after validating the complete import graph.
+///
+/// Transitive dependencies are validated but are not retained in this legacy
+/// view. It is not a captured input snapshot for saved-plan replay.
 #[derive(Debug)]
 pub struct ResolvedSpec {
     /// The root file's AST.
     pub root: SpecFile,
     /// Named imports: alias → (file_path, parsed SpecFile)
     pub named_imports: IndexMap<String, (PathBuf, SpecFile)>,
-    /// Bare imports in topological order (leaves first).
+    /// Direct bare imports in topological order (dependencies first), deduplicated.
     pub bare_imports: Vec<(PathBuf, SpecFile)>,
 }
 
 /// Resolve all imports starting from the given root file.
 ///
 /// Parses all referenced files, detects cycles, validates cross-domain rules,
-/// checks alias uniqueness and bare-import collisions, then builds a
+/// checks alias uniqueness, then builds a
 /// [`ResolvedSpec`].
 pub fn resolve_imports(root_path: &Path, root_ast: SpecFile) -> Result<ResolvedSpec, SpecError> {
-    let root_path = root_path
-        .canonicalize()
-        .map_err(|e| SpecError::no_span(SpecErrorCode::FileNotFound, format!("{e}")))?;
+    let root_path = root_path.canonicalize().map_err(|e| {
+        SpecError::no_span(
+            SpecErrorCode::FileNotFound,
+            format!("failed to resolve root spec '{}': {e}", root_path.display()),
+        )
+    })?;
 
     // Cache: canonical path -> parsed SpecFile
     let mut cache: HashMap<PathBuf, SpecFile> = HashMap::new();
@@ -52,7 +58,13 @@ pub fn resolve_imports(root_path: &Path, root_ast: SpecFile) -> Result<ResolvedS
     // Validate cross-domain rules.
     for (from_path, edges) in &graph {
         for edge in edges {
-            validate_cross_domain(from_path, &edge.to_path, edge.span)?;
+            validate_cross_domain(from_path, &edge.to_path, edge.span).map_err(|mut error| {
+                if from_path != &root_path {
+                    // SpecError spans are rendered against the root by callers.
+                    error.span = None;
+                }
+                error
+            })?;
         }
     }
 
@@ -71,7 +83,7 @@ pub fn resolve_imports(root_path: &Path, root_ast: SpecFile) -> Result<ResolvedS
                             prev_span.start,
                             prev_span.end,
                         ),
-                        Some(edge.span),
+                        (file_path == &root_path).then_some(edge.span),
                     ));
                 }
                 seen_aliases.insert(alias.clone(), edge.span);
@@ -81,16 +93,21 @@ pub fn resolve_imports(root_path: &Path, root_ast: SpecFile) -> Result<ResolvedS
 
     // Build named_imports and bare_imports from the root file's imports only.
     // Transitive imports are already parsed and cached.
-    let root_edges = graph.get(&root_path).cloned().unwrap_or_default();
+    let root_edges = graph.get(&root_path).ok_or_else(|| {
+        SpecError::no_span(
+            SpecErrorCode::FileNotFound,
+            format!(
+                "resolver invariant violated: no import graph for '{}'",
+                root_path.display()
+            ),
+        )
+    })?;
 
     let mut named_imports: IndexMap<String, (PathBuf, SpecFile)> = IndexMap::new();
     let mut bare_import_paths: Vec<PathBuf> = Vec::new();
 
-    for edge in &root_edges {
-        let spec_file = cache
-            .get(&edge.to_path)
-            .cloned()
-            .unwrap_or_else(|| SpecFile { items: vec![] });
+    for edge in root_edges {
+        let spec_file = cached_spec(&cache, &edge.to_path)?.clone();
         if let Some(ref alias) = edge.alias {
             named_imports.insert(alias.clone(), (edge.to_path.clone(), spec_file));
         } else {
@@ -107,18 +124,30 @@ pub fn resolve_imports(root_path: &Path, root_ast: SpecFile) -> Result<ResolvedS
         .into_iter()
         .filter(|p| *p != root_path && !named_paths.contains(p) && bare_import_paths.contains(p))
         .map(|p| {
-            let file = cache
-                .get(&p)
-                .cloned()
-                .unwrap_or_else(|| SpecFile { items: vec![] });
-            (p, file)
+            let file = cached_spec(&cache, &p)?.clone();
+            Ok((p, file))
         })
-        .collect();
+        .collect::<Result<_, SpecError>>()?;
 
     Ok(ResolvedSpec {
         root: root_ast,
         named_imports,
         bare_imports,
+    })
+}
+
+fn cached_spec<'a>(
+    cache: &'a HashMap<PathBuf, SpecFile>,
+    path: &Path,
+) -> Result<&'a SpecFile, SpecError> {
+    cache.get(path).ok_or_else(|| {
+        SpecError::no_span(
+            SpecErrorCode::FileNotFound,
+            format!(
+                "resolver invariant violated: parsed import '{}' is missing",
+                path.display()
+            ),
+        )
     })
 }
 
@@ -162,17 +191,20 @@ fn collect_imports(
         if Path::new(import_path_str.as_str()).is_absolute() {
             return Err(SpecError::new(
                 SpecErrorCode::FileNotFound,
-                format!("absolute import paths are not allowed: '{import_path_str}'"),
+                format!(
+                    "absolute import paths are not allowed: '{import_path_str}' (from '{}')",
+                    file_path.display()
+                ),
                 Some(import_span),
             ));
         }
 
         let resolved = resolve_import_path(file_path, import_path_str);
-        let canonical = resolved.canonicalize().map_err(|_| {
+        let canonical = resolved.canonicalize().map_err(|e| {
             SpecError::new(
                 SpecErrorCode::FileNotFound,
                 format!(
-                    "imported file not found: '{}' (from '{}')",
+                    "failed to resolve imported file '{}' (from '{}'): {e}",
                     resolved.display(),
                     file_path.display()
                 ),
@@ -192,19 +224,32 @@ fn collect_imports(
             let source = std::fs::read_to_string(&canonical).map_err(|e| {
                 SpecError::new(
                     SpecErrorCode::FileNotFound,
-                    format!("failed to read '{}': {e}", canonical.display()),
+                    format!(
+                        "failed to read import '{}' (from '{}'): {e}",
+                        canonical.display(),
+                        file_path.display()
+                    ),
                     Some(import_span),
                 )
             })?;
             let ast = parse_spec(&source).map_err(|e| {
                 SpecError::no_span(
                     SpecErrorCode::ParseError,
-                    format!("parse error in '{}': {e}", canonical.display()),
+                    format!(
+                        "parse error in import from '{}':\n{}",
+                        file_path.display(),
+                        e.render(&canonical.display().to_string(), &source)
+                    ),
                 )
             })?;
             cache.insert(canonical.clone(), ast.clone());
             // Recurse.
-            collect_imports(&canonical, &ast, cache, graph)?;
+            collect_imports(&canonical, &ast, cache, graph).map_err(|mut error| {
+                // This span belongs to a nested importer, not the root source
+                // used by the caller's renderer. The message retains its path.
+                error.span = None;
+                error
+            })?;
         }
     }
 
@@ -589,5 +634,219 @@ mod tests {
         let root_ast = spec_with_imports(vec![import_decl("nonexistent.schlib-spec", None)]);
         let err = resolve_imports(&root_path, root_ast).unwrap_err();
         assert_eq!(err.code, SpecErrorCode::FileNotFound);
+        assert_eq!(
+            err.span,
+            Some(zero_span()),
+            "direct import preserves root span"
+        );
+    }
+
+    fn write_spec(dir: &Path, name: &str, source: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, source).unwrap();
+        path
+    }
+
+    fn resolve_file(path: &Path) -> Result<ResolvedSpec, SpecError> {
+        let source = std::fs::read_to_string(path).unwrap();
+        resolve_imports(path, parse_spec(&source).unwrap())
+    }
+
+    #[test]
+    fn diamond_import_order_is_deterministic_and_canonical_paths_are_deduplicated() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shared = write_spec(tmp.path(), "shared.schlib-spec", "component Shared {}");
+        let left = write_spec(
+            tmp.path(),
+            "left.schlib-spec",
+            r#"import "shared.schlib-spec""#,
+        );
+        let right = write_spec(
+            tmp.path(),
+            "right.schlib-spec",
+            r#"import "./shared.schlib-spec""#,
+        );
+        let root = write_spec(
+            tmp.path(),
+            "root.schlib-spec",
+            r#"
+            import "left.schlib-spec"
+            import "right.schlib-spec"
+            import "shared.schlib-spec"
+            import "./shared.schlib-spec"
+        "#,
+        );
+        let expected = vec![
+            shared.canonicalize().unwrap(),
+            left.canonicalize().unwrap(),
+            right.canonicalize().unwrap(),
+        ];
+        for _ in 0..3 {
+            let resolved = resolve_file(&root).unwrap();
+            assert_eq!(
+                resolved
+                    .bare_imports
+                    .iter()
+                    .map(|(path, _)| path.clone())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn aliases_are_local_to_each_importing_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_spec(tmp.path(), "leaf.schlib-spec", "component Leaf {}");
+        write_spec(
+            tmp.path(),
+            "middle.schlib-spec",
+            r#"import "leaf.schlib-spec" as lib"#,
+        );
+        let root = write_spec(
+            tmp.path(),
+            "root.schlib-spec",
+            r#"import "middle.schlib-spec" as lib"#,
+        );
+        let resolved = resolve_file(&root).unwrap();
+        assert_eq!(
+            resolved
+                .named_imports
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["lib"]
+        );
+        assert!(
+            resolved.named_imports["lib"]
+                .0
+                .ends_with("middle.schlib-spec")
+        );
+        assert!(resolved.bare_imports.is_empty());
+    }
+
+    #[test]
+    fn duplicate_alias_in_transitive_file_reports_that_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_spec(tmp.path(), "leaf.schlib-spec", "");
+        write_spec(
+            tmp.path(),
+            "middle.schlib-spec",
+            r#"
+            import "leaf.schlib-spec" as lib
+            import "leaf.schlib-spec" as lib
+        "#,
+        );
+        let root = write_spec(
+            tmp.path(),
+            "root.schlib-spec",
+            r#"import "middle.schlib-spec""#,
+        );
+        let error = resolve_file(&root).unwrap_err();
+        assert_eq!(error.code, SpecErrorCode::DuplicateImportAlias);
+        assert!(
+            error.span.is_none(),
+            "nested alias span must not render in the root"
+        );
+        assert!(
+            error.message.contains("middle.schlib-spec"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn transitive_missing_import_reports_importer_and_target() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_spec(
+            tmp.path(),
+            "middle.schlib-spec",
+            r#"import "missing.schlib-spec""#,
+        );
+        let root = write_spec(
+            tmp.path(),
+            "root.schlib-spec",
+            r#"import "middle.schlib-spec" as lib"#,
+        );
+        let error = resolve_file(&root).unwrap_err();
+        assert_eq!(error.code, SpecErrorCode::FileNotFound);
+        assert!(
+            error.span.is_none(),
+            "nested import span must not render in the root"
+        );
+        assert!(
+            error.message.contains("middle.schlib-spec"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("missing.schlib-spec"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn imported_parse_error_renders_the_imported_source_location() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_spec(tmp.path(), "bad.schlib-spec", "\ncomponent Bad {\n  ???\n}");
+        let root = write_spec(
+            tmp.path(),
+            "root.schlib-spec",
+            r#"import "bad.schlib-spec""#,
+        );
+        let error = resolve_file(&root).unwrap_err();
+        assert_eq!(error.code, SpecErrorCode::ParseError);
+        assert!(
+            error.message.contains("bad.schlib-spec:3:"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("root.schlib-spec"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("???"), "{}", error.message);
+        assert!(
+            error.span.is_none(),
+            "imported span must not be interpreted in root source"
+        );
+    }
+
+    #[test]
+    fn imported_non_utf8_source_is_rejected_with_path_context() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("bad.schlib-spec"), [0xff]).unwrap();
+        let root = write_spec(
+            tmp.path(),
+            "root.schlib-spec",
+            r#"import "bad.schlib-spec""#,
+        );
+        let error = resolve_file(&root).unwrap_err();
+        assert_eq!(error.code, SpecErrorCode::FileNotFound);
+        assert!(
+            error.message.contains("bad.schlib-spec"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("root.schlib-spec"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn missing_root_has_path_context() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let error =
+            resolve_imports(&tmp.path().join("absent.schlib-spec"), empty_spec()).unwrap_err();
+        assert_eq!(error.code, SpecErrorCode::FileNotFound);
+        assert!(
+            error.message.contains("absent.schlib-spec"),
+            "{}",
+            error.message
+        );
     }
 }

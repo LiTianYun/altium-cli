@@ -32,8 +32,9 @@ the workflow cannot detect independent edits to both sides since a previous sync
 Implemented foundation: the lossless CST, AST/parser, diagnostics, formatter,
 expression evaluation, trivia, structured source edits, and comment-preserving
 dump merge now live in document-independent `altium-spec-lang`. Compatibility
-reexports preserve existing `altium-format-spec` callers. Imports and intent
-compilation still live in the legacy crate; full step 1 semantics are not yet
+reexports preserve existing `altium-format-spec` callers. Import graph resolution
+also lives in the language crate with contextual transitive errors. Intent
+compilation still lives in the legacy crate; full step 1 semantics are not yet
 implemented. `altium-sync` remains a dependency scaffold. No state subsystem
 existed to remove. Obsolete design notes and scaffold identity
 plans were removed, including the unused `altium-sync` random-ID dependency.
@@ -42,9 +43,13 @@ remain supported; they are not a cross-artifact identity database.
 
 Validation of the front-end extraction: 258 language and 176 legacy spec unit
 tests pass; `cargo check -p altium-format-spec --features altium-apply` passes.
-Independent review found no code blockers for this bounded migration; this does
+The subsequent import extraction passes 18 targeted resolver tests. Default CLI
+`cargo test` passes with zero runnable tests (downstream compilation only).
+Independent review found no code blockers for these bounded migrations; this does
 not complete the full intent gate. All five test-data repositories are cloned
-under ignored `data/` directories.
+under ignored `data/` directories. A [21-file CLI smoke run](docs/worklogs/next-corpus-2026-09-05.md)
+validated/saved 12 files, all with unresolved semantic CFB differences; 9 files
+rejected unsupported content. This is not a roundtrip acceptance gate.
 
 Current CLI behavior is unchanged: `plan` renders the legacy ECO and `apply`
 recompiles/runs the separate executor. Saved-plan execution, precondition checks,

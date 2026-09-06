@@ -15,10 +15,10 @@ remain typed data; report-only matching heuristics must never select mutations.
 
 ## Language ownership
 
-`ast`, `cst`, `diagnostic`, `eval`, `formatter`, `lexer`, `parser`, and `trivia`
+`ast`, `cst`, `diagnostic`, `eval`, `formatter`, `import`, `lexer`, `parser`, and `trivia`
 now live in `../altium-spec-lang/src/` and are reexported by this crate. The
 corresponding `src/` entries below describe those modules at their new location.
-Imports and semantic compilation remain here pending NEXT.md step 1.
+Semantic compilation remains here pending NEXT.md step 1.
 
 ## Index
 

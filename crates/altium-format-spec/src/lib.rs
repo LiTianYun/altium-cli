@@ -10,7 +10,7 @@ pub use altium_spec_lang::eval;
 #[cfg(feature = "altium-apply")]
 pub mod executor;
 pub use altium_spec_lang::formatter;
-pub mod import;
+pub use altium_spec_lang::import;
 pub use altium_spec_lang::lexer;
 pub mod model;
 pub use altium_spec_lang::parser;
