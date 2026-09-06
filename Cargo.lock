@@ -122,7 +122,7 @@ version = "0.2.0"
 dependencies = [
  "altium-format",
  "altium-format-types",
- "cstree",
+ "altium-spec-lang",
  "indexmap",
  "proptest",
  "rand 0.8.5",

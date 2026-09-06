@@ -6,7 +6,10 @@ boards, projects, and PCB placement intent — so they can be version-controlled
 diffed, and reconciled against binary `.SchLib`/`.PcbLib`/`.SchDoc`/`.PcbDoc`/`.PrjPcb`
 files. You write a `*-spec` file, and the tooling compiles it, validates it,
 plans an Engineering Change Order (ECO) against an existing document, and applies
-it. The implementation lives in the crate `crates/altium-format-spec`.
+it. The document-independent parser, lossless CST, formatter, and expression
+evaluator live in `crates/altium-spec-lang`. Imports, compilation, and legacy
+document workflows remain in `crates/altium-format-spec`, which reexports the
+language APIs.
 
 ## Navigation
 

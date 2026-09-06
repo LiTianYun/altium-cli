@@ -13,6 +13,13 @@ input preconditions, and directional patches. Do not introduce persistent sync
 state or embedded linking metadata. Existing native IDs and source annotations
 remain typed data; report-only matching heuristics must never select mutations.
 
+## Language ownership
+
+`ast`, `cst`, `diagnostic`, `eval`, `formatter`, `lexer`, `parser`, and `trivia`
+now live in `../altium-spec-lang/src/` and are reexported by this crate. The
+corresponding `src/` entries below describe those modules at their new location.
+Imports and semantic compilation remain here pending NEXT.md step 1.
+
 ## Index
 
 | File              | Contents (WHAT)                                                                   | Read When (WHEN)                                                        |

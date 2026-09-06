@@ -1,28 +1,27 @@
-//! # altium-spec-lang
+//! The document-independent Altium spec language front end.
 //!
-//! The language layer of the Altium spec toolchain: the lossless concrete syntax
-//! tree (CST), parser, formatter, the authored *intent* model, and the semantic
-//! compilation that resolves and normalizes intent for snapshot elaboration by
-//! `altium-sync`.
+//! Owns lossless syntax trees, AST parsing, source diagnostics, expression
+//! evaluation, trivia preservation, and canonical formatting. The legacy
+//! `altium-format-spec` crate reexports these modules for existing consumers.
 //!
-//! This crate is being populated as part of the clean-slate plan/apply rebuild
-//! (see `NEXT.md`). It has no dependency on document projection or planning;
-//! those live in `altium-sync`, which depends on this crate. Dependency
-//! direction: `altium-format-types → altium-spec-lang → altium-sync`.
-//!
-//! ## Migration status
-//!
-//! The lossless CST currently lives in `altium-format-spec::cst`. It is not yet
-//! self-contained: `cst::lexer` reuses the old `altium-format-spec::lexer`
-//! (`TokenKind`, `lex`) and `cst::parser` imports identifier classifiers from the
-//! old `altium-format-spec::ast` (`is_graphic_type`, `is_pcbdoc_block_type`,
-//! `is_pcbdoc_primitive_type`, `is_schdoc_object_type`). Moving the CST here
-//! requires first decoupling it from those modules (or relocating the lexer and
-//! `diagnostic` foundation with it). That decoupling is the next Foundation step.
-//!
-//! Planned modules (see `NEXT.md`):
-//! - `cst` — lossless syntax tree, lexer, structured parser, typed accessors, edits
-//! - `diagnostic` — spans, parse errors
-//! - `intent` — authored intent model (`Set | Inherit | Reset | Clear` field values)
-//! - `compile` — resolve imports → type-check → normalize authored intent
-//! - `format` — canonical formatter
+//! Authored intent and semantic compilation are still being migrated according
+//! to `NEXT.md`; document projection and planning belong to `altium-sync`.
+
+pub mod ast;
+pub mod cst;
+pub mod diagnostic;
+pub mod eval;
+pub mod formatter;
+pub mod lexer;
+pub mod parser;
+pub mod trivia;
+
+pub use cst::{DumpMergeError, merge_dump};
+pub use eval::{
+    EvalResult, ScopeStack, Severity, Shape, SpecError, SpecErrorCode, Value, eval_expr,
+    eval_let_bindings, unit_to_internal,
+};
+pub use formatter::{FormatConfig, FormatResult, extract_top_level_trivia, format_spec};
+pub use trivia::{
+    CommentToken, ItemTrivia, TriviaLine, TriviaMap, parse_with_trivia, scan_trivia_lines,
+};

@@ -1,24 +1,24 @@
 pub mod annotation;
-pub mod ast;
+pub use altium_spec_lang::ast;
 pub mod compiler;
-pub mod cst;
-pub mod diagnostic;
+pub use altium_spec_lang::cst;
+pub use altium_spec_lang::diagnostic;
 #[cfg(feature = "altium-apply")]
 pub mod dump;
 pub mod eco;
-pub mod eval;
+pub use altium_spec_lang::eval;
 #[cfg(feature = "altium-apply")]
 pub mod executor;
-pub mod formatter;
+pub use altium_spec_lang::formatter;
 pub mod import;
-pub mod lexer;
+pub use altium_spec_lang::lexer;
 pub mod model;
-pub mod parser;
+pub use altium_spec_lang::parser;
 #[cfg(feature = "altium-apply")]
 pub mod reconciler;
 pub mod resolver;
 pub mod sync;
-pub mod trivia;
+pub use altium_spec_lang::trivia;
 pub mod validator;
 
 // Public API re-exports

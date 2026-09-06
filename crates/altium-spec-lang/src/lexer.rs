@@ -390,7 +390,7 @@ pub fn lex(input: &str) -> Result<(Vec<Token>, Vec<CommentToken>), ParseError> {
 
 /// True if `s` lexes as a keyword token instead of an identifier.
 /// Keep in sync with the keyword match in `lex()`.
-pub(crate) fn is_keyword(s: &str) -> bool {
+pub fn is_keyword(s: &str) -> bool {
     matches!(
         s,
         "import"

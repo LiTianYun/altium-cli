@@ -1,3 +1,8 @@
+> Language ownership: AST/parser, lossless CST and edits, diagnostics, expression
+> evaluation, formatter and trivia live in `altium-spec-lang`; this crate
+> reexports their existing APIs. Imports and semantic compilation remain here
+> while NEXT.md step 1 is in progress.
+
 # altium-format-spec
 
 Spec DSL for declaratively describing Altium Designer documents. Covers symbol

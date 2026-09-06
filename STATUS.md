@@ -14,7 +14,7 @@ altium-format          (core: parsing, serialization, high-level API, rendering 
   ├→ altium-format-render-svg  (SVG rendering backend)
   └→ altium-format-render-png  (PNG rasterization via resvg)
 altium-format-spec     (declarative spec language for Altium documents — being replaced)
-altium-spec-lang       (scaffold: lossless CST, parser, intent model, compilation)
+altium-spec-lang       (lossless CST, parser, formatter, expression evaluation)
 altium-sync            (scaffold: snapshots, indexed patches, directional plan/apply)
 altium-cli             (CLI binary)
 ```
@@ -29,13 +29,22 @@ or new embedded binding metadata. Report heuristics may group likely edits/moves
 but cannot change execution. Without historical state, direction selects authority;
 the workflow cannot detect independent edits to both sides since a previous sync.
 
-Implemented foundation: the lossless CST, structured source edits, and
-comment-preserving dump updates remain in `altium-format-spec`. The two new
-crates are dependency scaffolds only; neither contains executable modules. No
-state subsystem existed to remove. Obsolete design notes and scaffold identity
+Implemented foundation: the lossless CST, AST/parser, diagnostics, formatter,
+expression evaluation, trivia, structured source edits, and comment-preserving
+dump merge now live in document-independent `altium-spec-lang`. Compatibility
+reexports preserve existing `altium-format-spec` callers. Imports and intent
+compilation still live in the legacy crate; full step 1 semantics are not yet
+implemented. `altium-sync` remains a dependency scaffold. No state subsystem
+existed to remove. Obsolete design notes and scaffold identity
 plans were removed, including the unused `altium-sync` random-ID dependency.
 Existing native Altium IDs, spec annotations, and ephemeral spec-to-spec sync
 remain supported; they are not a cross-artifact identity database.
+
+Validation of the front-end extraction: 258 language and 176 legacy spec unit
+tests pass; `cargo check -p altium-format-spec --features altium-apply` passes.
+Independent review found no code blockers for this bounded migration; this does
+not complete the full intent gate. All five test-data repositories are cloned
+under ignored `data/` directories.
 
 Current CLI behavior is unchanged: `plan` renders the legacy ECO and `apply`
 recompiles/runs the separate executor. Saved-plan execution, precondition checks,
