@@ -1091,3 +1091,48 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod collection_scope_edit_tests {
+    use super::*;
+    use crate::cst::BlockKind;
+
+    #[test]
+    fn collection_scope_is_editable_without_losing_source_trivia() {
+        let source = "// library scope\r\ncollection components { mode: partial }\r\ncomponent R {\r\n collection pins { mode: partial, delete: deny /* keep */ }\r\n pin 1 { length: reset }\r\n}\r\n";
+        let tree = SpecTree::parse(source).unwrap();
+        let blocks = tree.top_level_blocks();
+        assert_eq!(blocks[0].kind(), BlockKind::Collection);
+        let children = blocks[1].child_blocks();
+        assert_eq!(children[0].kind(), BlockKind::Collection);
+        let edited = apply_edits(
+            &tree,
+            &[SpecEdit::SetProperty {
+                id: children[0].id().clone(),
+                key: PropertyKey::new("mode").unwrap(),
+                value: ExprSource::parse("complete").unwrap(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            edited.source(),
+            source.replace(
+                "collection pins { mode: partial",
+                "collection pins { mode: complete"
+            )
+        );
+        let edited = apply_edits(
+            &tree,
+            &[SpecEdit::SetProperty {
+                id: children[1].id().clone(),
+                key: PropertyKey::new("length").unwrap(),
+                value: ExprSource::parse("inherit").unwrap(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            edited.source(),
+            source.replace("length: reset", "length: inherit")
+        );
+    }
+}

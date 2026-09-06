@@ -108,6 +108,7 @@ impl std::error::Error for SpecError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpecErrorCode {
+    SourceChanged,
     UndefinedBinding,
     TypeMismatch,
     CircularBinding,
@@ -665,6 +666,11 @@ pub fn eval_expr(expr: &Spanned<Expr>, scope: &ScopeStack) -> EvalResult<Value> 
         Expr::Color(r, g, b) => Ok(Value::Color(*r, *g, *b)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::Null => Ok(Value::Null),
+        Expr::Inherit | Expr::Reset => Err(SpecError::at(
+            SpecErrorCode::TypeMismatch,
+            "contextual property operation cannot be evaluated as a value",
+            span,
+        )),
 
         // ── Template strings ───────────────────────────────────────────────
         Expr::Template(parts) => eval_template(parts, scope, span),

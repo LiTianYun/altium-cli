@@ -33,9 +33,12 @@ Implemented foundation: the lossless CST, AST/parser, diagnostics, formatter,
 expression evaluation, trivia, structured source edits, and comment-preserving
 dump merge now live in document-independent `altium-spec-lang`. Compatibility
 reexports preserve existing `altium-format-spec` callers. Import graph resolution
-also lives in the language crate with contextual transitive errors. Intent
-compilation still lives in the legacy crate; full step 1 semantics are not yet
-implemented. `altium-sync` remains a dependency scaffold. No state subsystem
+also lives in the language crate with contextual transitive errors. The new
+immutable capture API retains exact root/transitive text, ASTs, canonical paths,
+ordered edges, and dependency order, and rechecks content/path resolutions.
+[Collection/contextual-operation syntax](docs/spec-lang/language/snapshot-intent.md)
+is parsed and preserved by the CST; legacy commands explicitly reject collection
+scope instead of ignoring it. Full step 1 intent semantics are not yet implemented. `altium-sync` remains a dependency scaffold. No state subsystem
 existed to remove. Obsolete design notes and scaffold identity
 plans were removed, including the unused `altium-sync` random-ID dependency.
 Existing native Altium IDs, spec annotations, and ephemeral spec-to-spec sync
@@ -51,7 +54,11 @@ under ignored `data/` directories. A [21-file CLI smoke run](docs/worklogs/next-
 validated/saved 12 files, all with unresolved semantic CFB differences; 9 files
 rejected unsupported content. This is not a roundtrip acceptance gate.
 
-Current CLI behavior is unchanged: `plan` renders the legacy ECO and `apply`
+Syntax/capture validation: 286 language tests and 168 legacy spec tests pass.
+Independent reviews covered captured source provenance, contextual operations,
+CST edits, and legacy rejection guards; findings were fixed before commit.
+
+Current CLI execution architecture is unchanged: `plan` renders the legacy ECO and `apply`
 recompiles/runs the separate executor. Saved-plan execution, precondition checks,
 typed snapshot patches, and recovery transactions are not implemented. The
 plan/apply checkmarks below indicate legacy command availability, not these

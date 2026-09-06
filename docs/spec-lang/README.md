@@ -24,6 +24,7 @@ language APIs.
 
 | Page | Description |
 | --- | --- |
+| [Snapshot intent syntax](language/snapshot-intent.md) | New front-end forms and capture API; legacy execution rejects collection scope. |
 | [Syntax](language/syntax.md) | Lexical structure: tokens, identifiers, comments, blocks, annotations. |
 | [Types and values](language/types-and-values.md) | Literal kinds: strings, dimensions, colors, tuples, arrays, objects. |
 | [Expressions](language/expressions.md) | Operators, references, paths, function calls, spreads. |

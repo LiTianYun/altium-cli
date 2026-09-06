@@ -148,6 +148,7 @@ pub enum SyntaxKind {
     // Top-level item declarations.
     Import,
     LetBinding,
+    Collection,
     Component,
     Footprint,
     SwapGroup,

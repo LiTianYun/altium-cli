@@ -60,6 +60,14 @@ use altium_format_types::project::{
     CrossRefSheetStyle, ErrorLevel, FlattenMode, SortLocation, SortOrder, VariationKind,
 };
 
+fn legacy_collection_error(span: crate::diagnostic::Span) -> SpecError {
+    SpecError::at(
+        SpecErrorCode::TypeMismatch,
+        "collection scope requires snapshot-bound planning; legacy plan/apply cannot execute it",
+        span,
+    )
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Compile a parsed spec file into a typed [`SpecModel`].
@@ -286,6 +294,34 @@ impl SpecCompiler {
     }
 
     fn compile(&mut self, file: &SpecFile) -> Result<SpecModel, SpecError> {
+        for item in &file.items {
+            match &item.node {
+                SpecItem::Collection(_) => return Err(legacy_collection_error(item.span)),
+                SpecItem::Component(component) => {
+                    for child in &component.body {
+                        match &child.node {
+                            ComponentItem::Collection(_) => {
+                                return Err(legacy_collection_error(child.span));
+                            }
+                            ComponentItem::Part(part) => {
+                                for child in &part.body {
+                                    if matches!(child.node, PartItem::Collection(_)) {
+                                        return Err(legacy_collection_error(child.span));
+                                    }
+                                }
+                            }
+                            ComponentItem::FootprintMap(map) => {
+                                if let Some(scope) = map.collections.first() {
+                                    return Err(legacy_collection_error(scope.span));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         // Root scope for file-level let bindings.
         self.scope.push();
 
@@ -498,6 +534,7 @@ impl SpecCompiler {
 
         for item in &decl.body {
             match &item.node {
+                ComponentItem::Collection(_) => return Err(legacy_collection_error(item.span)),
                 ComponentItem::Pin(_) => {
                     // Already compiled above via resolve_anchor_pins.
                 }
@@ -598,6 +635,7 @@ impl SpecCompiler {
 
         for item in &file.items {
             match &item.node {
+                SpecItem::Collection(_) => return Err(legacy_collection_error(item.span)),
                 SpecItem::Sheet(sheet_decl) => {
                     sheet_annotation =
                         self.compile_opt_annotation(sheet_decl.annotation.as_ref())?;
@@ -954,6 +992,7 @@ A, B, C, D, E, Letter, Legal, Tabloid, OrcadA, OrcadB, OrcadC, OrcadD, or OrcadE
                 ComponentItem::Alias(_) => "alias",
                 ComponentItem::SwapGroup(_) => "swap_group",
                 ComponentItem::PadNet { .. } => "pad_net",
+                ComponentItem::Collection(_) => "collection",
             };
             return Err(SpecError::new(
                 SpecErrorCode::AltiumFormat,
@@ -1605,6 +1644,7 @@ A, B, C, D, E, Letter, Legal, Tabloid, OrcadA, OrcadB, OrcadC, OrcadD, or OrcadE
                     }
                     graphics.push(spec);
                 }
+                PartItem::Collection(_) => return Err(legacy_collection_error(item.span)),
                 PartItem::Pin(_) | PartItem::LetBinding(_) | PartItem::Property(_) => {}
             }
         }
@@ -1657,6 +1697,21 @@ A, B, C, D, E, Letter, Legal, Tabloid, OrcadA, OrcadB, OrcadC, OrcadD, or OrcadE
         &mut self,
         decl: &FootprintMapDecl,
     ) -> Result<FootprintMapSpec, SpecError> {
+        if let Some(collection) = decl.collections.first() {
+            return Err(legacy_collection_error(collection.span));
+        }
+        let description = decl
+            .description
+            .as_ref()
+            .map(|expr| match eval_expr(expr, &self.scope)? {
+                Value::String(value) => Ok(value),
+                _ => Err(SpecError::at(
+                    SpecErrorCode::TypeMismatch,
+                    "footprint description must be a string in the legacy compiler",
+                    expr.span,
+                )),
+            })
+            .transpose()?;
         let model_name = match &decl.name.node {
             AstFootprintRef::Name(n) => n.as_str(),
             AstFootprintRef::DollarPath(dp) => {
@@ -1686,7 +1741,7 @@ A, B, C, D, E, Letter, Legal, Tabloid, OrcadA, OrcadB, OrcadC, OrcadD, or OrcadE
                     model_name,
                     maps: vec![],
                     source: None,
-                    description: decl.description.as_ref().map(|d| d.node.clone()),
+                    description,
                 })
             }
             Some(pairs) => {
@@ -1704,7 +1759,7 @@ A, B, C, D, E, Letter, Legal, Tabloid, OrcadA, OrcadB, OrcadC, OrcadD, or OrcadE
                     model_name,
                     maps,
                     source: None,
-                    description: decl.description.as_ref().map(|d| d.node.clone()),
+                    description,
                 })
             }
         }
@@ -6305,6 +6360,55 @@ mod tests {
         match compile_spec(&file, SpecDomain::PcbLib)? {
             SpecModel::PcbLib(p) => Ok(p),
             other => panic!("expected PcbLib, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn legacy_schlib_rejects_snapshot_collection_scope() {
+        for source in [
+            "collection components { mode: complete, delete: allow }",
+            "component R { collection pins { mode: complete, delete: allow } }",
+            "component R { part 1 { collection graphics { mode: complete, delete: allow } } }",
+            "component R { footprint F { collection maps { mode: complete, delete: allow } } }",
+        ] {
+            let error = match compile_schlib(source) {
+                Ok(_) => panic!("legacy compiler accepted snapshot collection scope: {source}"),
+                Err(error) => error,
+            };
+            assert!(
+                error.message.contains("snapshot-bound"),
+                "{source}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_domains_cannot_ignore_component_collection_scope() {
+        let ast = parse_spec("component U1 { collection pins { mode: complete, delete: allow } }")
+            .unwrap();
+        for domain in [
+            SpecDomain::SchLib,
+            SpecDomain::PcbLib,
+            SpecDomain::SchDoc,
+            SpecDomain::PcbDoc,
+            SpecDomain::PrjPcb,
+        ] {
+            let error = match compile_spec(&ast, domain) {
+                Ok(_) => panic!("legacy domain ignored component collection scope"),
+                Err(error) => error,
+            };
+            assert!(error.message.contains("snapshot-bound"), "{error}");
+        }
+    }
+
+    #[test]
+    fn legacy_schlib_rejects_contextual_field_operations() {
+        for source in [
+            "component R { description: reset }",
+            "component R { pin 1 { length: inherit } }",
+            "component R { footprint F { description: reset } }",
+        ] {
+            assert!(compile_schlib(source).is_err(), "legacy accepted {source}");
         }
     }
 

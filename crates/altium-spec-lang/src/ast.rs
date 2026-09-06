@@ -38,6 +38,7 @@ pub struct SpecFile {
 /// Top-level items in a spec file.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SpecItem {
+    Collection(CollectionDecl),
     Import(ImportDecl),
     LetBinding(LetBinding),
     Component(ComponentDecl),
@@ -93,6 +94,7 @@ pub struct ComponentDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComponentItem {
+    Collection(CollectionDecl),
     Property(Property),
     LetBinding(LetBinding),
     Part(PartBlock),
@@ -138,6 +140,7 @@ pub struct PartBlock {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PartItem {
+    Collection(CollectionDecl),
     LetBinding(LetBinding),
     Pin(PinDecl),
     Graphic(GraphicDecl),
@@ -170,12 +173,13 @@ pub struct AliasDecl {
 /// footprint REF { $pin: $ref.pad, ... }      — explicit remapping
 #[derive(Debug, Clone, PartialEq)]
 pub struct FootprintMapDecl {
+    pub collections: Vec<Spanned<CollectionDecl>>,
     pub name: Spanned<FootprintRef>,
     /// `None` = implicit 1:1 mapping (pin N → pad N for all pads).
     /// `Some(pairs)` = explicit pin:pad remapping.
     pub maps: Option<Vec<Spanned<PinPadPair>>>,
     /// Footprint model description (`description: "..."` in the body).
-    pub description: Option<Spanned<String>>,
+    pub description: Option<Spanned<Expr>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -620,6 +624,9 @@ pub enum Expr {
     Color(u8, u8, u8),
     Bool(bool),
     Null,
+    /// Contextual property operations; never ordinary evaluated values.
+    Inherit,
+    Reset,
 
     // References
     Ident(String),
@@ -786,4 +793,32 @@ pub fn is_pcbdoc_primitive_type(s: &str) -> bool {
 
 pub fn is_pcbdoc_block_type(s: &str) -> bool {
     PCBDOC_BLOCK_TYPES.contains(&s)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CollectionKind {
+    Components,
+    Parts,
+    Pins,
+    Parameters,
+    Aliases,
+    Footprints,
+    Graphics,
+    Maps,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionMode {
+    Partial,
+    Complete,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionDelete {
+    Deny,
+    Allow,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionDecl {
+    pub kind: Spanned<CollectionKind>,
+    pub mode: Spanned<CollectionMode>,
+    pub delete: Spanned<CollectionDelete>,
 }

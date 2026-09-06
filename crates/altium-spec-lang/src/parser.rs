@@ -2,7 +2,8 @@ use crate::diagnostic::{BinOp, ParseError, ParseErrorCode, Span, Spanned};
 
 use super::ast::{
     AliasDecl, AnnotationBlockDecl, AnnotationKey, BlockAnnotation, BoardDecl, BoardItem, CallArg,
-    ClassDecl, ComparisonRuleDecl, ComponentDecl, ComponentItem, ConstraintDecl, ConstraintKind,
+    ClassDecl, CollectionDecl, CollectionDelete, CollectionKind, CollectionMode,
+    ComparisonRuleDecl, ComponentDecl, ComponentItem, ConstraintDecl, ConstraintKind,
     DifferentialPairDecl, DocumentBlockDecl, EntityName, EntryDecl, ErcLevelEntryDecl,
     ErcMatrixEntryDecl, Expr, FontBlockDecl, FontDecl, FootprintDecl, FootprintItem,
     FootprintMapDecl, FootprintRef, GraphicDecl, GridDecl, ImportDecl, LetBinding,
@@ -328,7 +329,11 @@ impl<'a> SpecParser<'a> {
         let mut items = Vec::new();
         self.skip_newlines();
         while !self.at_eof() {
-            items.push(self.parse_spec_item()?);
+            let item = self.parse_spec_item()?;
+            if let SpecItem::Collection(decl) = &item.node {
+                if items.iter().any(|prior: &Spanned<SpecItem>| matches!(&prior.node, SpecItem::Collection(other) if other.kind.node == decl.kind.node)) { return Err(self.err("duplicate collection declaration")); }
+            }
+            items.push(item);
             self.skip_separators();
         }
         Ok(SpecFile { items })
@@ -336,6 +341,14 @@ impl<'a> SpecParser<'a> {
 
     fn parse_spec_item(&mut self) -> Result<Spanned<SpecItem>, ParseError> {
         let start = self.current_span();
+        if matches!(self.current_kind(), TokenKind::Ident(s) if s == "collection") {
+            use CollectionKind::*;
+            let decl = self.parse_collection(&[Components])?;
+            return Ok(Spanned::new(
+                SpecItem::Collection(decl),
+                start.merge(self.prev_span()),
+            ));
+        }
 
         // Handle: import
         if self.at(&TokenKind::Import) {
@@ -607,6 +620,9 @@ impl<'a> SpecParser<'a> {
         self.skip_newlines();
         while !self.at(&TokenKind::RBrace) && !self.at_eof() {
             let item = self.parse_component_item()?;
+            if let ComponentItem::Collection(decl) = &item.node {
+                if items.iter().any(|prior: &Spanned<ComponentItem>| matches!(&prior.node, ComponentItem::Collection(other) if other.kind.node == decl.kind.node)) { return Err(self.err("duplicate collection declaration")); }
+            }
             items.push(item);
             self.skip_separators();
         }
@@ -615,6 +631,15 @@ impl<'a> SpecParser<'a> {
 
     fn parse_component_item(&mut self) -> Result<Spanned<ComponentItem>, ParseError> {
         let start = self.current_span();
+        if matches!(self.current_kind(), TokenKind::Ident(s) if s == "collection") {
+            use CollectionKind::*;
+            let decl =
+                self.parse_collection(&[Parts, Pins, Parameters, Aliases, Footprints, Graphics])?;
+            return Ok(Spanned::new(
+                ComponentItem::Collection(decl),
+                start.merge(self.prev_span()),
+            ));
+        }
 
         // part block
         if self.at(&TokenKind::Part) {
@@ -884,6 +909,9 @@ impl<'a> SpecParser<'a> {
         self.skip_newlines();
         while !self.at(&TokenKind::RBrace) && !self.at_eof() {
             let item = self.parse_part_item()?;
+            if let PartItem::Collection(decl) = &item.node {
+                if items.iter().any(|prior: &Spanned<PartItem>| matches!(&prior.node, PartItem::Collection(other) if other.kind.node == decl.kind.node)) { return Err(self.err("duplicate collection declaration")); }
+            }
             items.push(item);
             self.skip_separators();
         }
@@ -892,6 +920,14 @@ impl<'a> SpecParser<'a> {
 
     fn parse_part_item(&mut self) -> Result<Spanned<PartItem>, ParseError> {
         let start = self.current_span();
+        if matches!(self.current_kind(), TokenKind::Ident(s) if s == "collection") {
+            use CollectionKind::*;
+            let decl = self.parse_collection(&[Pins, Graphics])?;
+            return Ok(Spanned::new(
+                PartItem::Collection(decl),
+                start.merge(self.prev_span()),
+            ));
+        }
 
         if self.at(&TokenKind::Pin) {
             let decl = self.parse_pin(None)?;
@@ -1034,6 +1070,7 @@ impl<'a> SpecParser<'a> {
         if !self.at(&TokenKind::LBrace) {
             return Ok(FootprintMapDecl {
                 name,
+                collections: Vec::new(),
                 maps: None,
                 description: None,
             });
@@ -1042,20 +1079,26 @@ impl<'a> SpecParser<'a> {
         // Explicit body: optional `description:` plus pin:pad remapping pairs.
         self.bump(); // consume '{'
         let mut pairs = Vec::new();
+        let mut collections = Vec::new();
         let mut description = None;
         self.skip_newlines();
         while !self.at(&TokenKind::RBrace) && !self.at_eof() {
+            if matches!(self.current_kind(), TokenKind::Ident(s) if s == "collection") {
+                let start = self.current_span();
+                let decl = self.parse_collection(&[CollectionKind::Maps])?;
+                if !collections.is_empty() {
+                    return Err(self.err("duplicate maps collection declaration"));
+                }
+                collections.push(Spanned::new(decl, start.merge(self.prev_span())));
+                self.skip_separators();
+                continue;
+            }
             if let TokenKind::Ident(id) = self.current_kind() {
                 if id == "description" {
-                    self.bump();
-                    self.expect(&TokenKind::Colon, "expected ':' after 'description'")?;
-                    self.skip_newlines();
-                    let span = self.current_span();
-                    let TokenKind::String(text) = self.current_kind().clone() else {
-                        return Err(self.err("expected string literal after 'description:'"));
-                    };
-                    self.bump();
-                    description = Some(Spanned::new(text, span));
+                    if description.is_some() {
+                        return Err(self.err("duplicate footprint description"));
+                    }
+                    description = Some(self.parse_property()?.value);
                     self.skip_separators();
                     continue;
                 }
@@ -1078,6 +1121,7 @@ impl<'a> SpecParser<'a> {
         self.expect(&TokenKind::RBrace, "expected '}' to close footprint body")?;
         Ok(FootprintMapDecl {
             name,
+            collections,
             maps: Some(pairs),
             description,
         })
@@ -2539,8 +2583,92 @@ impl<'a> SpecParser<'a> {
             .ok_or_else(|| self.err("expected property key (identifier or keyword)"))?;
         self.expect(&TokenKind::Colon, "expected ':' after property key")?;
         self.skip_newlines();
-        let value = self.parse_expr()?;
+        let value = match self.current_kind() {
+            TokenKind::Ident(op) if op == "inherit" || op == "reset" => {
+                let value = Spanned::new(
+                    if op == "inherit" {
+                        Expr::Inherit
+                    } else {
+                        Expr::Reset
+                    },
+                    self.current_span(),
+                );
+                self.bump();
+                value
+            }
+            _ => self.parse_expr()?,
+        };
         Ok(Property { key, value })
+    }
+
+    fn parse_collection(
+        &mut self,
+        allowed: &[CollectionKind],
+    ) -> Result<CollectionDecl, ParseError> {
+        self.bump();
+        let name = self.expect_ident("expected collection name")?;
+        use CollectionKind::*;
+        let kind = match name.node.as_str() {
+            "components" => Components,
+            "parts" => Parts,
+            "pins" => Pins,
+            "parameters" => Parameters,
+            "aliases" => Aliases,
+            "footprints" => Footprints,
+            "graphics" => Graphics,
+            "maps" => Maps,
+            _ => return Err(self.err("unknown collection name")),
+        };
+        if !allowed.contains(&kind) {
+            return Err(self.err("collection is not valid at this owner"));
+        }
+        self.expect(&TokenKind::LBrace, "expected '{' after collection name")?;
+        let mut mode = None;
+        let mut delete = None;
+        self.skip_separators();
+        while !self.at(&TokenKind::RBrace) && !self.at_eof() {
+            let key = self.expect_ident("expected collection metadata key")?;
+            self.expect(
+                &TokenKind::Colon,
+                "expected ':' after collection metadata key",
+            )?;
+            let value = self.expect_ident("expected collection metadata value")?;
+            match key.node.as_str() {
+                "mode" if mode.is_none() => {
+                    mode = Some(Spanned::new(
+                        match value.node.as_str() {
+                            "partial" => CollectionMode::Partial,
+                            "complete" => CollectionMode::Complete,
+                            _ => return Err(self.err("mode must be partial or complete")),
+                        },
+                        value.span,
+                    ))
+                }
+                "delete" if delete.is_none() => {
+                    delete = Some(Spanned::new(
+                        match value.node.as_str() {
+                            "deny" => CollectionDelete::Deny,
+                            "allow" => CollectionDelete::Allow,
+                            _ => return Err(self.err("delete must be deny or allow")),
+                        },
+                        value.span,
+                    ))
+                }
+                _ => return Err(self.err("unknown or duplicate collection metadata key")),
+            }
+            self.skip_separators();
+        }
+        self.expect(&TokenKind::RBrace, "expected '}' after collection metadata")?;
+        let mode = mode.unwrap_or(Spanned::new(CollectionMode::Partial, name.span));
+        let delete = delete.unwrap_or(Spanned::new(CollectionDelete::Deny, name.span));
+        if delete.node == CollectionDelete::Allow && mode.node != CollectionMode::Complete {
+            return Err(self.err("delete: allow requires mode: complete"));
+        }
+        Ok(CollectionDecl {
+            kind: Spanned::new(kind, name.span),
+            mode,
+            delete,
+        })
     }
 
     // ── Entity name ────────────────────────────────────────────────────────
@@ -2611,14 +2739,9 @@ impl<'a> SpecParser<'a> {
         // Keywords (pin, pad, map, etc.) are valid property keys inside objects.
         // IDENT "=" is a let binding without `let`.
         if self.peek_ahead(1).same_variant(&TokenKind::Colon) {
-            if let Some(key) = self.try_eat_property_key() {
-                self.expect(&TokenKind::Colon, "expected ':' after property key")?;
-                self.skip_newlines();
-                let value = self.parse_expr()?;
-                let end = self.prev_span();
-                let prop = Property { key, value };
-                return Ok(Spanned::new(ObjectItem::Property(prop), start.merge(end)));
-            }
+            let prop = self.parse_property()?;
+            let end = self.prev_span();
+            return Ok(Spanned::new(ObjectItem::Property(prop), start.merge(end)));
         }
 
         if let TokenKind::Ident(_) = self.current_kind() {
@@ -2727,7 +2850,67 @@ impl<'a> SpecParser<'a> {
     // ── Expression (Pratt parser) ─────────────────────────────────────────
 
     fn parse_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
-        self.parse_pratt_expr(0)
+        let expr = self.parse_pratt_expr(0)?;
+        self.validate_value_expression(&expr)?;
+        Ok(expr)
+    }
+
+    fn validate_value_expression(&self, expr: &Spanned<Expr>) -> Result<(), ParseError> {
+        match &expr.node {
+            Expr::Inherit | Expr::Reset => {
+                return Err(ParseError::new(
+                    ParseErrorCode::E1001,
+                    "inherit/reset are only valid as direct property operations",
+                    expr.span,
+                ));
+            }
+            Expr::Object(object) => {
+                for item in &object.items {
+                    let value = match &item.node {
+                        ObjectItem::Property(property) => &property.value,
+                        ObjectItem::LetBinding(binding) => &binding.value,
+                        ObjectItem::Spread(value) => value,
+                    };
+                    self.validate_value_expression(value)?;
+                }
+            }
+            Expr::Template(parts) => {
+                for part in parts {
+                    if let crate::lexer::TemplatePart::Expr(tokens) = part {
+                        let mut tokens = tokens.clone();
+                        tokens.push(Token {
+                            kind: TokenKind::Eof,
+                            span: expr.span,
+                        });
+                        let mut parser = SpecParser::new(self.source, tokens);
+                        parser.parse_expr()?;
+                        parser.skip_newlines();
+                        if !parser.at_eof() {
+                            return Err(parser.err("unexpected trailing interpolation expression"));
+                        }
+                    }
+                }
+            }
+            Expr::Path(value, _) | Expr::UnaryNeg(value) => {
+                self.validate_value_expression(value)?
+            }
+            Expr::Index(left, right) | Expr::BinOp(left, _, right) | Expr::Tuple(left, right) => {
+                self.validate_value_expression(left)?;
+                self.validate_value_expression(right)?;
+            }
+            Expr::Array(values) => {
+                for value in values {
+                    self.validate_value_expression(value)?;
+                }
+            }
+            Expr::Call { args, .. } => {
+                for arg in args {
+                    self.validate_value_expression(&arg.value)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Parse function call arguments: `( [arg, ...] )`
@@ -2975,6 +3158,9 @@ impl<'a> SpecParser<'a> {
                 Ok(Spanned::new(Expr::Ident("separate".to_string()), start))
             }
 
+            TokenKind::Ident(ref s) if s == "inherit" || s == "reset" => {
+                Err(self.err("inherit/reset are only valid as direct property operations"))
+            }
             // bare IDENT — let binding ref or enum value, possibly with path tail
             TokenKind::Ident(name) => {
                 self.bump();
@@ -4567,5 +4753,89 @@ placement {
         } else {
             panic!("expected LetBinding");
         }
+    }
+}
+
+#[cfg(test)]
+mod snapshot_syntax_tests {
+    use super::*;
+
+    #[test]
+    fn collection_scope_and_operations_are_typed_and_lossless() {
+        let source = "// scope\r\ncollection components { mode: partial, delete: deny }\r\ncomponent R {\r\n // pin scope\r\n collection pins { mode: complete, delete: allow }\r\n description: null\r\n pin 1 { name: inherit, length: reset }\r\n part 2 { collection graphics {} }\r\n footprint DIP { collection maps { mode: complete, delete: allow }, description: reset, pin 1: pad 2 }\r\n}\r\n";
+        let ast = parse_spec(source).unwrap();
+        assert!(matches!(ast.items[0].node, SpecItem::Collection(_)));
+        let SpecItem::Component(component) = &ast.items[1].node else {
+            panic!("component")
+        };
+        let ComponentItem::Pin(pin) = &component.body[2].node else {
+            panic!("pin")
+        };
+        let ObjectItem::Property(name) = &pin.body.node.items[0].node else {
+            panic!("name")
+        };
+        assert_eq!(name.value.node, Expr::Inherit);
+        assert_eq!(
+            &source[name.value.span.start as usize..name.value.span.end as usize],
+            "inherit"
+        );
+        let tree = crate::cst::parse_structured(source).unwrap();
+        assert_eq!(tree.text(), source);
+        let formatted = crate::formatter::format_spec(source, &Default::default())
+            .unwrap()
+            .output;
+        assert!(formatted.contains("description: reset"));
+        assert!(formatted.contains("collection maps { mode: complete, delete: allow }"));
+        parse_spec(&formatted).unwrap();
+        assert_eq!(
+            crate::formatter::format_spec(&formatted, &Default::default())
+                .unwrap()
+                .output,
+            formatted
+        );
+    }
+
+    #[test]
+    fn invalid_scope_metadata_errors_in_ast_and_cst() {
+        for source in [
+            "collection components { delete: allow }",
+            "collection components { mode: complete, mode: partial }",
+            "collection components { delete: yes }",
+            "collection components { mode: total }",
+            "collection components { extra: deny }",
+            "collection pins {}",
+            "collection components {} collection components {}",
+            "component R { collection pins {} collection pins {} }",
+            "component R { collection maps {} }",
+            "component R { part 1 { collection parameters {} } }",
+            "component R { footprint F { collection pins {} } }",
+            "component R { footprint F { collection maps {} collection maps {} } }",
+        ] {
+            assert!(parse_spec(source).is_err(), "AST accepted {source}");
+            assert!(
+                crate::cst::parse_structured(source).is_err(),
+                "CST accepted {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn contextual_operations_are_not_expression_values() {
+        for source in [
+            "let x = `value {inherit}`",
+            "let x = `value {reset}`",
+            "let x = inherit",
+            "let x = reset",
+            "let x = { value: reset }",
+            "component R { description: inherit + 1 }",
+            "component R { description: [reset] }",
+            "component R { description: (inherit) }",
+            "component R { description: { value: reset } }",
+            "component R { pin 1 { ...{ length: reset } } }",
+        ] {
+            assert!(parse_spec(source).is_err(), "accepted {source}");
+        }
+        parse_spec(r#"let obj = { reset: "ok" } component R { description: $obj.reset }"#).unwrap();
+        parse_spec("let x = null component R { description: x pin 1 { name: \"inherit\", hidden_net_name: \"reset\" } }").unwrap();
     }
 }

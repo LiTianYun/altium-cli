@@ -72,6 +72,7 @@ impl fmt::Display for SourceId {
 pub enum BlockKind {
     Import,
     LetBinding,
+    Collection,
     Component,
     Footprint,
     SwapGroup,
@@ -136,6 +137,7 @@ impl BlockKind {
         Some(match kind {
             K::Import => Self::Import,
             K::LetBinding => Self::LetBinding,
+            K::Collection => Self::Collection,
             K::Component => Self::Component,
             K::Footprint => Self::Footprint,
             K::SwapGroup => Self::SwapGroup,

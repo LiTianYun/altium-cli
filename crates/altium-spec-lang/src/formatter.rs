@@ -318,6 +318,8 @@ impl<'a> Printer<'a> {
                 self.push(&format!("#{:02X}{:02X}{:02X}", r, g, b));
             }
             Expr::Bool(b) => self.push(if *b { "true" } else { "false" }),
+            Expr::Inherit => self.push("inherit"),
+            Expr::Reset => self.push("reset"),
             Expr::Null => self.push("null"),
             Expr::Ident(s) => self.push(s),
             Expr::DollarIdent(s) => {
@@ -549,6 +551,7 @@ impl<'a> Printer<'a> {
     fn fmt_spec_item(&mut self, item: &SpecItem) {
         match item {
             SpecItem::Import(decl) => self.fmt_import(decl),
+            SpecItem::Collection(c) => self.fmt_collection(c),
             SpecItem::LetBinding(lb) => self.fmt_let_binding(lb),
             SpecItem::Component(decl) => self.fmt_component(decl),
             SpecItem::Footprint(decl) => self.fmt_footprint(decl),
@@ -604,6 +607,7 @@ impl<'a> Printer<'a> {
     fn fmt_component_item(&mut self, item: &ComponentItem) {
         match item {
             ComponentItem::Property(p) => self.fmt_property(p),
+            ComponentItem::Collection(c) => self.fmt_collection(c),
             ComponentItem::LetBinding(lb) => self.fmt_let_binding(lb),
             ComponentItem::Part(part) => self.fmt_part_block(part),
             ComponentItem::PinConnection(pc) => self.fmt_pin_connection(pc),
@@ -645,6 +649,7 @@ impl<'a> Printer<'a> {
 
     fn fmt_part_item(&mut self, item: &PartItem) {
         match item {
+            PartItem::Collection(c) => self.fmt_collection(c),
             PartItem::LetBinding(lb) => self.fmt_let_binding(lb),
             PartItem::Pin(pin) => self.fmt_pin_decl(pin),
             PartItem::Graphic(g) => self.fmt_graphic_decl(g),
@@ -694,6 +699,31 @@ impl<'a> Printer<'a> {
         self.fmt_entity_name(&alias.name.node);
     }
 
+    fn fmt_collection(&mut self, decl: &CollectionDecl) {
+        self.push("collection ");
+        self.push(match decl.kind.node {
+            CollectionKind::Components => "components",
+            CollectionKind::Parts => "parts",
+            CollectionKind::Pins => "pins",
+            CollectionKind::Parameters => "parameters",
+            CollectionKind::Aliases => "aliases",
+            CollectionKind::Footprints => "footprints",
+            CollectionKind::Graphics => "graphics",
+            CollectionKind::Maps => "maps",
+        });
+        self.push(" { mode: ");
+        self.push(match decl.mode.node {
+            CollectionMode::Partial => "partial",
+            CollectionMode::Complete => "complete",
+        });
+        self.push(", delete: ");
+        self.push(match decl.delete.node {
+            CollectionDelete::Deny => "deny",
+            CollectionDelete::Allow => "allow",
+        });
+        self.push(" }");
+    }
+
     fn fmt_footprint_map(&mut self, fm: &FootprintMapDecl) {
         self.push("footprint ");
         self.fmt_footprint_ref(&fm.name.node);
@@ -703,6 +733,16 @@ impl<'a> Printer<'a> {
             }
             Some(pairs) => {
                 self.push(" {");
+                for decl in &fm.collections {
+                    self.push(" ");
+                    self.fmt_collection(&decl.node);
+                    self.push(",");
+                }
+                if let Some(description) = &fm.description {
+                    self.push(" description: ");
+                    self.fmt_expr(&description.node, false);
+                    self.push(",");
+                }
                 for (i, pair) in pairs.iter().enumerate() {
                     if i > 0 {
                         self.push(",");

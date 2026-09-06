@@ -27,6 +27,7 @@ use crate::diagnostic::{ParseError, ParseErrorCode, Span};
 
 /// Parse `source` into a lossless, structured CST.
 pub fn parse_structured(source: &str) -> Result<ResolvedNode, ParseError> {
+    crate::parser::parse_spec(source)?;
     let toks = lex_lossless(source)?;
     let mut p = Parser::new(source, toks);
     p.builder.start_node(K::Root);
@@ -241,6 +242,9 @@ impl<'a> Parser<'a> {
 
     fn parse_spec_item(&mut self) -> Result<(), ParseError> {
         let cp = self.builder.checkpoint();
+        if self.at_ident("collection") {
+            return self.block(cp, K::Collection, Self::parse_collection);
+        }
 
         // import (never annotated)
         if self.at(K::ImportKw) {
@@ -465,6 +469,9 @@ impl<'a> Parser<'a> {
 
     fn parse_component_item(&mut self) -> Result<(), ParseError> {
         let cp = self.builder.checkpoint();
+        if self.at_ident("collection") {
+            return self.block(cp, K::Collection, Self::parse_collection);
+        }
         match self.cur() {
             Some(K::PartKw) => {
                 self.builder.start_node_at(cp, K::Part);
@@ -561,6 +568,9 @@ impl<'a> Parser<'a> {
 
     fn parse_part_item(&mut self) -> Result<(), ParseError> {
         let cp = self.builder.checkpoint();
+        if self.at_ident("collection") {
+            return self.block(cp, K::Collection, Self::parse_collection);
+        }
         match self.cur() {
             Some(K::PinKw) => {
                 self.builder.start_node_at(cp, K::Pin);
@@ -616,6 +626,12 @@ impl<'a> Parser<'a> {
 
     // ── Footprint map (inside component) ──────────────────────────────────────
 
+    fn parse_collection(&mut self) -> Result<(), ParseError> {
+        self.bump();
+        self.parse_name()?;
+        self.parse_object()
+    }
+
     fn parse_footprint_map_decl(&mut self) -> Result<(), ParseError> {
         self.expect(K::FootprintKw, "expected 'footprint'")?;
         if self.at(K::DollarIdent) {
@@ -633,7 +649,10 @@ impl<'a> Parser<'a> {
             if self.at(K::RBrace) || self.at_eof() {
                 break;
             }
-            if self.at_ident("description") {
+            if self.at_ident("collection") {
+                let cp = self.builder.checkpoint();
+                self.block(cp, K::Collection, Self::parse_collection)?;
+            } else if self.at_ident("description") {
                 self.parse_property()?;
             } else {
                 self.builder.start_node(K::PinPadPair);

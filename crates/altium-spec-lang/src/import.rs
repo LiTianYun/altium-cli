@@ -1,8 +1,9 @@
 //! Import resolver for the Altium spec language.
 //!
 //! Loads all files referenced by `import` declarations, detects cycles,
-//! validates cross-domain rules, and builds a [`ResolvedSpec`] ready for
-//! the compiler.
+//! validates cross-domain rules, and builds a [`CapturedSourceGraph`] for
+//! compilation from immutable source contents. [`ResolvedSpec`] retains the
+//! legacy direct-import API for existing callers.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,320 @@ use crate::eval::{SpecError, SpecErrorCode};
 use crate::parser::parse_spec;
 
 // ── Public types ──────────────────────────────────────────────────────────────
+
+/// One captured import declaration. Edges retain source declaration order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedImport {
+    /// Canonical destination path, used to index the captured graph.
+    path: PathBuf,
+    /// Original relative spelling, retained to check path resolution changes.
+    declared_path: String,
+    alias: Option<String>,
+    /// Span in the importing source, never in the graph's root by implication.
+    span: Span,
+}
+
+/// Exact UTF-8 source and the AST parsed from that same captured contents.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedSource {
+    source: String,
+    ast: SpecFile,
+    imports: Vec<CapturedImport>,
+}
+
+/// A self-contained source graph for semantic compilation without filesystem reads.
+///
+/// Every canonical path occurs once. Sources are in depth-first discovery order;
+/// `topological_order` is dependency-first, with siblings visited in declaration
+/// order and the root last. Repeated edges remain visible, but shared dependencies
+/// occur only once in either ordering. No hashing or document parsing occurs here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedSourceGraph {
+    root_path: PathBuf,
+    sources: IndexMap<PathBuf, CapturedSource>,
+    topological_order: Vec<PathBuf>,
+    requested_root_path: PathBuf,
+}
+
+impl CapturedImport {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn declared_path(&self) -> &str {
+        &self.declared_path
+    }
+    pub fn alias(&self) -> Option<&str> {
+        self.alias.as_deref()
+    }
+    pub fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl CapturedSource {
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+    pub fn ast(&self) -> &SpecFile {
+        &self.ast
+    }
+    pub fn imports(&self) -> &[CapturedImport] {
+        &self.imports
+    }
+}
+
+impl CapturedSourceGraph {
+    pub fn root_path(&self) -> &Path {
+        &self.root_path
+    }
+    pub fn sources(&self) -> &IndexMap<PathBuf, CapturedSource> {
+        &self.sources
+    }
+    pub fn topological_order(&self) -> &[PathBuf] {
+        &self.topological_order
+    }
+
+    /// Check exact contents and original path resolutions without changing the
+    /// capture. This detects observed races, not an atomic filesystem snapshot:
+    /// planning/apply must still bind and recheck all inputs before committing.
+    pub fn verify_unchanged(&self) -> Result<(), SpecError> {
+        verify_captured_path(&self.requested_root_path, &self.root_path)?;
+        for (path, captured) in &self.sources {
+            let current = std::fs::read_to_string(path).map_err(|error| {
+                SpecError::no_span(
+                    SpecErrorCode::SourceChanged,
+                    format!(
+                        "cannot verify captured source '{}': {error}; recapture inputs",
+                        path.display()
+                    ),
+                )
+            })?;
+            if current != captured.source {
+                return Err(SpecError::no_span(
+                    SpecErrorCode::SourceChanged,
+                    format!(
+                        "captured source '{}' changed; recapture inputs",
+                        path.display()
+                    ),
+                ));
+            }
+            for edge in &captured.imports {
+                let requested = resolve_import_path(path, &edge.declared_path);
+                verify_captured_path(&requested, &edge.path).map_err(|mut error| {
+                    error.message = format!(
+                        "checking import in '{}' at {}..{}: {}",
+                        path.display(),
+                        edge.span.start,
+                        edge.span.end,
+                        error.message
+                    );
+                    error
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn verify_captured_path(requested: &Path, expected: &Path) -> Result<(), SpecError> {
+    let current = requested.canonicalize().map_err(|error| {
+        SpecError::no_span(
+            SpecErrorCode::SourceChanged,
+            format!(
+                "captured path '{}' no longer resolves: {error}; recapture inputs",
+                requested.display()
+            ),
+        )
+    })?;
+    if current != expected {
+        return Err(SpecError::no_span(
+            SpecErrorCode::SourceChanged,
+            format!(
+                "captured path '{}' now resolves to '{}' instead of '{}'; recapture inputs",
+                requested.display(),
+                current.display(),
+                expected.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Capture root and transitive sources, parsing each canonical file exactly once.
+///
+/// Unlike `resolve_imports`, this accepts no separately parsed root AST: root and
+/// imports must all be parsed from the contents retained for hashing and replay.
+/// A final reread compares contents and path resolutions; it never refreshes ASTs.
+/// All known spec domains may import each other, matching the language resolver;
+/// unknown extensions, duplicate local aliases, missing files, and cycles error.
+pub fn capture_imports(root_path: &Path) -> Result<CapturedSourceGraph, SpecError> {
+    let requested_root_path = if root_path.is_absolute() {
+        root_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                SpecError::no_span(
+                    SpecErrorCode::FileNotFound,
+                    format!(
+                        "resolving root spec '{}': cannot read working directory: {error}",
+                        root_path.display()
+                    ),
+                )
+            })?
+            .join(root_path)
+    };
+    let root_path = requested_root_path.canonicalize().map_err(|error| {
+        SpecError::no_span(
+            SpecErrorCode::FileNotFound,
+            format!(
+                "failed to resolve root spec '{}': {error}",
+                requested_root_path.display()
+            ),
+        )
+    })?;
+    if file_domain(&root_path) == FileDomain::Unknown {
+        return Err(SpecError::no_span(
+            SpecErrorCode::CrossDomainViolation,
+            format!("unsupported root spec extension: '{}'", root_path.display()),
+        ));
+    }
+    let mut sources = IndexMap::new();
+    capture_source(&root_path, &mut sources)?;
+    let graph = sources
+        .iter()
+        .map(|(path, source)| {
+            (
+                path.clone(),
+                source
+                    .imports
+                    .iter()
+                    .map(|edge| ImportEdge {
+                        to_path: edge.path.clone(),
+                        alias: edge.alias.clone(),
+                        span: edge.span,
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    let topological_order = topo_sort(&root_path, &graph)?;
+    let capture = CapturedSourceGraph {
+        root_path,
+        sources,
+        topological_order,
+        requested_root_path,
+    };
+    capture.verify_unchanged()?;
+    Ok(capture)
+}
+
+fn capture_source(
+    path: &Path,
+    sources: &mut IndexMap<PathBuf, CapturedSource>,
+) -> Result<(), SpecError> {
+    if sources.contains_key(path) {
+        return Ok(());
+    }
+    let source = std::fs::read_to_string(path).map_err(|error| {
+        SpecError::no_span(
+            SpecErrorCode::FileNotFound,
+            format!("reading UTF-8 spec '{}': {error}", path.display()),
+        )
+    })?;
+    let ast = parse_spec(&source).map_err(|error| {
+        SpecError::no_span(
+            SpecErrorCode::ParseError,
+            error.render(&path.display().to_string(), &source),
+        )
+    })?;
+    let mut imports = Vec::new();
+    let mut aliases = HashMap::new();
+    for item in &ast.items {
+        let SpecItem::Import(decl) = &item.node else {
+            continue;
+        };
+        let span = decl.path.span;
+        let alias = decl.alias.as_ref().map(|alias| alias.node.clone());
+        if let Some(alias) = &alias {
+            if let Some(previous) = aliases.insert(alias.clone(), span) {
+                return Err(SpecError::no_span(
+                    SpecErrorCode::DuplicateImportAlias,
+                    format!(
+                        "duplicate import alias '{alias}' in '{}' at {}..{} (first defined at {}..{})",
+                        path.display(),
+                        span.start,
+                        span.end,
+                        previous.start,
+                        previous.end
+                    ),
+                ));
+            }
+        }
+        if Path::new(&decl.path.node).is_absolute() {
+            return Err(SpecError::no_span(
+                SpecErrorCode::FileNotFound,
+                format!(
+                    "absolute import '{}' in '{}' at {}..{} is forbidden",
+                    decl.path.node,
+                    path.display(),
+                    span.start,
+                    span.end
+                ),
+            ));
+        }
+        let requested = resolve_import_path(path, &decl.path.node);
+        let canonical = requested.canonicalize().map_err(|error| {
+            SpecError::no_span(
+                SpecErrorCode::FileNotFound,
+                format!(
+                    "resolving import '{}' from '{}' at {}..{}: {error}",
+                    requested.display(),
+                    path.display(),
+                    span.start,
+                    span.end
+                ),
+            )
+        })?;
+        validate_cross_domain(path, &canonical, span).map_err(|mut error| {
+            error.span = None;
+            error.message = format!("{} (import at {}..{})", error.message, span.start, span.end);
+            error
+        })?;
+        imports.push(CapturedImport {
+            path: canonical,
+            declared_path: decl.path.node.clone(),
+            alias,
+            span,
+        });
+    }
+    // Insert before walking edges, allowing cycle detection to use the complete
+    // graph without recursively reopening an ancestor or a shared dependency.
+    let paths: Vec<_> = imports
+        .iter()
+        .map(|edge| (edge.path.clone(), edge.span))
+        .collect();
+    sources.insert(
+        path.to_path_buf(),
+        CapturedSource {
+            source,
+            ast,
+            imports,
+        },
+    );
+    for (destination, span) in paths {
+        capture_source(&destination, sources).map_err(|mut error| {
+            error.message = format!(
+                "import from '{}' at {}..{}: {}",
+                path.display(),
+                span.start,
+                span.end,
+                error.message
+            );
+            error
+        })?;
+    }
+    Ok(())
+}
 
 /// Root AST and its direct imports after validating the complete import graph.
 ///
@@ -326,7 +641,16 @@ fn dfs(
 
     if let Some(edges) = graph.get(node) {
         for edge in edges {
-            dfs(&edge.to_path, graph, colors, order, stack)?;
+            dfs(&edge.to_path, graph, colors, order, stack).map_err(|mut error| {
+                error.message = format!(
+                    "import from '{}' at {}..{}: {}",
+                    node.display(),
+                    edge.span.start,
+                    edge.span.end,
+                    error.message
+                );
+                error
+            })?;
         }
     }
 
@@ -848,5 +1172,211 @@ mod tests {
             "{}",
             error.message
         );
+    }
+
+    #[test]
+    fn capture_retains_transitive_sources_edges_and_deterministic_order() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let leaf_text = "// retained comment\r\ncomponent Leaf {}\r\n";
+        let leaf = write_spec(tmp.path(), "leaf.schlib-spec", leaf_text);
+        let middle = write_spec(
+            tmp.path(),
+            "middle.schlib-spec",
+            "import \"leaf.schlib-spec\" as nested",
+        );
+        let root = write_spec(
+            tmp.path(),
+            "root.schlib-spec",
+            "import \"middle.schlib-spec\" as lib\nimport \"./leaf.schlib-spec\"\nimport \"leaf.schlib-spec\"",
+        );
+        let first = capture_imports(&root).unwrap();
+        let second = capture_imports(&root).unwrap();
+        assert_eq!(
+            first, second,
+            "same captured graph must have deterministic ordering"
+        );
+        assert_eq!(
+            first.topological_order,
+            vec![leaf.clone(), middle.clone(), root.clone()]
+        );
+        assert_eq!(
+            first.sources.keys().collect::<Vec<_>>(),
+            vec![&root, &middle, &leaf]
+        );
+        assert_eq!(
+            first.sources[&leaf].source, leaf_text,
+            "retain exact CRLF and comments"
+        );
+        assert_eq!(first.sources[&leaf].ast, parse_spec(leaf_text).unwrap());
+        let root_edges = &first.sources[&root].imports;
+        assert_eq!(root_edges.len(), 3, "retain repeated import declarations");
+        assert_eq!(root_edges[0].alias.as_deref(), Some("lib"));
+        assert_eq!(root_edges[1].declared_path, "./leaf.schlib-spec");
+        assert_eq!(root_edges[1].path, root_edges[2].path);
+        assert_eq!(
+            first.sources[&middle].imports[0].alias.as_deref(),
+            Some("nested")
+        );
+        std::fs::remove_file(&leaf).unwrap();
+        assert_eq!(
+            first.sources[&leaf].ast,
+            parse_spec(leaf_text).unwrap(),
+            "capture remains usable without reopening imports"
+        );
+    }
+
+    #[test]
+    fn capture_verification_detects_exact_source_edits_and_newly_missing_inputs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let leaf = write_spec(tmp.path(), "leaf.schlib-spec", "component Leaf {}");
+        let root = write_spec(
+            tmp.path(),
+            "root.schlib-spec",
+            "import \"leaf.schlib-spec\"",
+        );
+        let graph = capture_imports(&root).unwrap();
+        std::fs::write(&leaf, "component Leaf {}\n").unwrap();
+        let error = graph.verify_unchanged().unwrap_err();
+        assert_eq!(error.code, SpecErrorCode::SourceChanged);
+        assert!(error.message.contains("leaf.schlib-spec"), "{error}");
+        std::fs::write(&leaf, &graph.sources[&leaf].source).unwrap();
+        graph.verify_unchanged().unwrap();
+        std::fs::write(&root, "// edit\nimport \"leaf.schlib-spec\"").unwrap();
+        let error = graph.verify_unchanged().unwrap_err();
+        assert_eq!(error.code, SpecErrorCode::SourceChanged);
+        assert!(error.message.contains("root.schlib-spec"), "{error}");
+        std::fs::write(&root, &graph.sources[&root].source).unwrap();
+        std::fs::remove_file(&leaf).unwrap();
+        assert_eq!(
+            graph.verify_unchanged().unwrap_err().code,
+            SpecErrorCode::SourceChanged
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_verification_detects_retargeted_import_and_root_symlinks() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let first = write_spec(tmp.path(), "first.schlib-spec", "");
+        let second = write_spec(tmp.path(), "second.schlib-spec", "");
+        let link = tmp.path().join("link.schlib-spec");
+        symlink(&first, &link).unwrap();
+        let root = write_spec(
+            tmp.path(),
+            "root.schlib-spec",
+            "import \"link.schlib-spec\"",
+        );
+        let graph = capture_imports(&root).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        symlink(&second, &link).unwrap();
+        let error = graph.verify_unchanged().unwrap_err();
+        assert_eq!(error.code, SpecErrorCode::SourceChanged);
+        assert!(error.message.contains("link.schlib-spec"), "{error}");
+        let root_graph = capture_imports(&link).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        symlink(&first, &link).unwrap();
+        assert_eq!(
+            root_graph.verify_unchanged().unwrap_err().code,
+            SpecErrorCode::SourceChanged
+        );
+    }
+
+    #[test]
+    fn capture_rejects_transitive_alias_duplicates_cycles_and_unknown_domains() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_spec(tmp.path(), "leaf.schlib-spec", "");
+        let middle = write_spec(
+            tmp.path(),
+            "middle.schlib-spec",
+            "import \"leaf.schlib-spec\" as x\nimport \"leaf.schlib-spec\" as x",
+        );
+        let root = write_spec(
+            tmp.path(),
+            "root.schlib-spec",
+            "import \"middle.schlib-spec\"",
+        );
+        let error = capture_imports(&root).unwrap_err();
+        assert_eq!(error.code, SpecErrorCode::DuplicateImportAlias);
+        assert!(error.message.contains("middle.schlib-spec"), "{error}");
+        assert!(error.message.contains("root.schlib-spec"), "{error}");
+        assert!(
+            error.span.is_none(),
+            "nested locations are rendered in their own source"
+        );
+        std::fs::write(&middle, "import \"leaf.schlib-spec\"").unwrap();
+        std::fs::write(
+            tmp.path().join("leaf.schlib-spec"),
+            "import \"middle.schlib-spec\"",
+        )
+        .unwrap();
+        let cycle = capture_imports(&root).unwrap_err();
+        assert_eq!(cycle.code, SpecErrorCode::CircularImport);
+        assert!(cycle.message.contains("import from '"), "{cycle}");
+        assert!(cycle.message.contains(" at 7.."), "{cycle}");
+        assert!(cycle.message.contains("root.schlib-spec"), "{cycle}");
+        assert!(cycle.message.contains("middle.schlib-spec"), "{cycle}");
+        assert!(cycle.message.contains("leaf.schlib-spec"), "{cycle}");
+        write_spec(tmp.path(), "unknown.txt", "");
+        std::fs::write(&middle, "import \"unknown.txt\"").unwrap();
+        assert_eq!(
+            capture_imports(&root).unwrap_err().code,
+            SpecErrorCode::CrossDomainViolation
+        );
+        assert_eq!(
+            capture_imports(&tmp.path().join("unknown.txt"))
+                .unwrap_err()
+                .code,
+            SpecErrorCode::CrossDomainViolation
+        );
+    }
+
+    #[test]
+    fn capture_rejects_missing_non_utf8_and_malformed_sources_with_chain_context() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = write_spec(
+            tmp.path(),
+            "root.schlib-spec",
+            "import \"middle.schlib-spec\"",
+        );
+        write_spec(
+            tmp.path(),
+            "middle.schlib-spec",
+            "import \"leaf.schlib-spec\"",
+        );
+        let leaf = tmp.path().join("leaf.schlib-spec");
+        let missing = capture_imports(&root).unwrap_err();
+        assert_eq!(missing.code, SpecErrorCode::FileNotFound);
+        for name in ["root.schlib-spec", "middle.schlib-spec", "leaf.schlib-spec"] {
+            assert!(missing.message.contains(name), "{missing}");
+        }
+        std::fs::write(&leaf, [0xff]).unwrap();
+        let invalid = capture_imports(&root).unwrap_err();
+        assert_eq!(invalid.code, SpecErrorCode::FileNotFound);
+        assert!(invalid.message.contains("UTF-8"), "{invalid}");
+        std::fs::write(&leaf, "component Broken { ??? }").unwrap();
+        let invalid = capture_imports(&root).unwrap_err();
+        assert_eq!(invalid.code, SpecErrorCode::ParseError);
+        assert!(invalid.message.contains("leaf.schlib-spec:1:"), "{invalid}");
+        assert!(invalid.message.contains("???"), "{invalid}");
+    }
+
+    #[test]
+    fn capture_accepts_known_cross_domain_imports_and_local_alias_reuse() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let leaf = write_spec(tmp.path(), "leaf.pcblib-spec", "footprint Pad {}");
+        write_spec(
+            tmp.path(),
+            "middle.schlib-spec",
+            "import \"leaf.pcblib-spec\" as lib",
+        );
+        let root = write_spec(
+            tmp.path(),
+            "root.schlib-spec",
+            "import \"middle.schlib-spec\" as lib",
+        );
+        let graph = capture_imports(&root).unwrap();
+        assert_eq!(graph.sources.len(), 3);
+        assert_eq!(graph.topological_order[0], leaf);
     }
 }
