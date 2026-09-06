@@ -41,9 +41,20 @@ pub enum GraphicKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontReference(pub u32);
 
+/// An authored native image-bundle path; no asset contents are read by the language.
+/// Relative paths belong to the file containing the image declaration, even when
+/// the string or object supplying `source` was imported from another file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageAssetSource {
+    pub path: String,
+    /// Canonical declaring spec path in captured compilation. AST-only compilation
+    /// leaves this unknown; callers must supply an explicit origin before capture.
+    pub declaring_source: Option<std::path::PathBuf>,
+}
+
 macro_rules! graphic_fields {
     ($($field:ident: $ty:ty),* $(,)?) => {
-        /// Native-facing typed fields. Unsupported fields remain absent and the
+        /// Typed native fields and authored asset references. Unsupported fields remain absent and the
         /// compiler rejects authoring them for an inapplicable graphic kind.
         #[derive(Debug, Clone, PartialEq, Default)]
         pub struct GraphicFields { $(pub $field: FieldIntent<$ty>,)* }
@@ -79,6 +90,7 @@ graphic_fields! {
     text: String,
     font_id: FontReference,
     file_name: String,
+    source: Option<ImageAssetSource>,
     orientation: RotationBy90,
     justification: TextJustification,
     alignment: HorizontalAlign,
@@ -194,6 +206,8 @@ impl GraphicKind {
             // Clearing the filename is field intent, not proof that an embedded
             // image has a resolvable resource. Image assets are a separate gate.
             policy!(file_name, String::new, clear);
+            // Removing an authored path never grants resource-deletion scope.
+            policy!(source, || None, clear);
             policy!(is_solid, || false);
             policy!(keep_aspect, || true);
             policy!(embed_image, || true);
@@ -276,6 +290,7 @@ pub(super) fn compile_graphic(
     field!(font_id, |value, span| positive_integer(value, span)
         .map(|v| FontReference(v as u32)));
     field!(file_name, string);
+    field!(source, image_asset_source);
     field!(orientation, rotation);
     field!(justification, justification);
     field!(alignment, alignment);
@@ -287,11 +302,85 @@ pub(super) fn compile_graphic(
     field!(keep_aspect, boolean);
     field!(embed_image, boolean);
     props.finish(&format!("{} graphic", decl.graphic_type.node))?;
-    Ok(GraphicIntent {
+    let intent = GraphicIntent {
         auto_size,
         kind: crate::diagnostic::Spanned::new(kind, decl.graphic_type.span),
         fields,
-    })
+    };
+    // Only reject a conflict whose values are both authored and known. Omitted
+    // embed_image may resolve from a target and must not be replaced by defaults.
+    if let (FieldIntent::Set(source), FieldIntent::Set(embed)) =
+        (&intent.fields.source, &intent.fields.embed_image)
+    {
+        intent.validate_effective_asset_source(source.node.as_ref(), embed.node)?;
+    }
+    Ok(intent)
+}
+
+impl GraphicIntent {
+    /// Validate already resolved asset/embedded values after target/base/default
+    /// elaboration. This does not resolve names, read assets, or delete resources.
+    pub fn validate_effective_asset_source(
+        &self,
+        source: Option<&ImageAssetSource>,
+        embed_image: bool,
+    ) -> Result<(), SpecError> {
+        if source.is_some() && (self.kind.node != GraphicKind::Image || !embed_image) {
+            return Err(SpecError::new(
+                crate::SpecErrorCode::TypeMismatch,
+                "image source requires an embedded image; it conflicts with embed_image:false",
+                self.fields.source.span(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn image_asset_source(value: Value, span: Span) -> Result<Option<ImageAssetSource>, SpecError> {
+    let path = string(value, span)?;
+    if path.is_empty() || path.contains('\0') {
+        return Err(super::compile::error(
+            "image source must be a nonempty path without NUL characters",
+            span,
+        ));
+    }
+    if std::path::Path::new(&path)
+        .extension()
+        .and_then(|value| value.to_str())
+        != Some("altium-image")
+    {
+        return Err(super::compile::error(
+            "image source requires a .altium-image native bundle; standalone PNG/JPEG/SVG conversion is not supported",
+            span,
+        ));
+    }
+    Ok(Some(ImageAssetSource {
+        path,
+        declaring_source: None,
+    }))
+}
+
+/// Captured compilation owns the image declaration's source origin. Imported
+/// expression values never change that origin. Apply to component and part owners.
+pub(super) fn attach_image_source_origins(
+    intent: &mut super::SchLibIntent,
+    source: &std::path::Path,
+) {
+    for component in &mut intent.components.items {
+        for graphic in component.graphics.items.iter_mut().chain(
+            component
+                .parts
+                .items
+                .iter_mut()
+                .flat_map(|part| part.graphics.items.iter_mut()),
+        ) {
+            if let FieldIntent::Set(value) = &mut graphic.fields.source {
+                if let Some(asset) = &mut value.node {
+                    asset.declaring_source = Some(source.to_path_buf());
+                }
+            }
+        }
+    }
 }
 
 fn enum_name(value: Value, span: Span) -> Result<String, SpecError> {
@@ -417,6 +506,96 @@ mod tests {
             .items
             .remove(0))
     }
+    #[test]
+    fn image_asset_source_preserves_operations_without_resource_deletion() {
+        let set = graphic(r#"image {source:"assets/logo.altium-image"}"#).unwrap();
+        let FieldIntent::Set(value) = &set.fields.source else {
+            panic!("authored asset Set required")
+        };
+        let asset = value.node.as_ref().unwrap();
+        assert_eq!(asset.path, "assets/logo.altium-image");
+        assert_eq!(
+            asset.declaring_source, None,
+            "AST-only compile must not guess cwd"
+        );
+        assert!(matches!(set.fields.file_name, FieldIntent::Absent));
+        assert!(matches!(set.fields.embed_image, FieldIntent::Absent));
+        assert!(
+            set.validate_effective_asset_source(Some(asset), false)
+                .is_err()
+        );
+        assert!(
+            set.validate_effective_asset_source(Some(asset), true)
+                .is_ok()
+        );
+        let target = Some(ImageAssetSource {
+            path: "target.altium-image".into(),
+            declaring_source: None,
+        });
+        let base = Some(ImageAssetSource {
+            path: "base.altium-image".into(),
+            declaring_source: None,
+        });
+        let policy = GraphicKind::Image.field_policies().source.unwrap();
+        for (body, expected) in [
+            ("", target.clone()),
+            ("source:inherit", base.clone()),
+            ("source:reset", None),
+            ("source:null", None),
+        ] {
+            let graphic = graphic(&format!("image {{{body}}}")).unwrap();
+            assert_eq!(
+                policy
+                    .instance(&graphic.fields.source, Some(&target), Some(&base))
+                    .unwrap(),
+                expected
+            );
+            match body {
+                "" => assert!(matches!(graphic.fields.source, FieldIntent::Absent)),
+                "source:inherit" => {
+                    assert!(matches!(graphic.fields.source, FieldIntent::Inherit(_)))
+                }
+                "source:reset" => assert!(matches!(graphic.fields.source, FieldIntent::Reset(_))),
+                _ => assert!(matches!(graphic.fields.source, FieldIntent::Clear(_))),
+            }
+            assert!(graphic.validate_effective_asset_source(None, false).is_ok());
+        }
+    }
+
+    #[test]
+    fn image_asset_source_rejects_wrong_kinds_inputs_and_known_external_conflicts() {
+        for source in [
+            r#"rectangle {source:"logo.altium-image"}"#,
+            r#"image {source:"logo.png"}"#,
+            r#"image {source:"logo.jpg"}"#,
+            r#"image {source:"logo.svg"}"#,
+            r#"image {source:""}"#,
+            "image {source:42}",
+            r#"image {source:"logo.altium-image",embed_image:false}"#,
+            r#"image {...{source:"logo.altium-image",embed_image:false}}"#,
+            r#"image {image_data:"legacy"}"#,
+        ] {
+            assert!(
+                graphic(source).is_err(),
+                "must reject invalid asset source: {source}"
+            );
+        }
+        assert!(
+            image_asset_source(Value::String("bad\0.altium-image".into()), Span::new(0, 1))
+                .is_err()
+        );
+        for source in [
+            "image {source:null,embed_image:false}",
+            "image {source:reset,embed_image:false}",
+            "image {source:inherit,embed_image:false}",
+        ] {
+            assert!(
+                graphic(source).is_ok(),
+                "unresolved/removal source does not imply a resource replacement: {source}"
+            );
+        }
+    }
+
     #[test]
     fn registered_defaults_match_current_rust_creation_policies_without_authoring_fields() {
         let rectangle = graphic("rectangle {}").unwrap();

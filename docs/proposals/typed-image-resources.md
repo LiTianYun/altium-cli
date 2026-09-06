@@ -1,7 +1,9 @@
 # Imported image assets
 
 Revised direction following the user's 2026-09-05 instruction to defer image
-codecs and treat image contents as opaque imported assets. Not implemented.
+codecs and treat image contents as opaque imported assets. Asset-reference intent,
+ordered native resource APIs, and immutable input capture are implemented; the
+integrated dump/planner/apply workflow remains outstanding.
 This supersedes the shared codec/type proposal previously at this path.
 
 ## Boundary
@@ -28,10 +30,10 @@ hard-error. This exception does not permit opaque routing or other native data.
 - Keep the resource name and the explicit asset path in the spec. Keep placement,
   display flags, embedded/external behavior, and native reference/alias handling
   typed and separate. Never derive resource identity from a basename or hash.
-- Proposed source property: `image { source: "assets/logo.altium-image" ... }`.
-  Exact grammar and shared-resource declaration syntax remain implementation
-  details to settle with the existing graphic/collection grammar. This is not
-  supported syntax today. Do not overload legacy `image_data` silently.
+- The new intent compiler accepts `image { source: "assets/logo.altium-image" }`
+  alongside placement and `file_name` properties. Shared-resource elaboration
+  remains to be implemented. Legacy CLI execution rejects this new property;
+  it does not silently overload `image_data`.
 - Initially import only these native bundles, obtained by dump from a document
   Altium has already embedded. Preserve the complete body byte-for-byte; never
   replace an original with its preview or normalize image encoding.
@@ -46,7 +48,10 @@ hard-error. This exception does not permit opaque routing or other native data.
 ## Planning and transactions
 
 Resolve explicit paths relative to the declaring source, consistent with other
-artifact imports. Capture exact bytes and content hashes during planning; bind
+artifact imports. The containing image declaration determines the path base;
+imported string/let/spread values do not carry an alternate path base. Captured
+compilation retains that declaration's canonical file path; AST-only compilation
+requires an explicit origin before asset capture. Capture exact bytes and content hashes during planning; bind
 them into the input manifest and include the payload in the self-contained saved
 plan. Apply checks preconditions and executes captured bytes, never refreshed
 asset contents. Byte hashes report changes without pretending to compare pixels.

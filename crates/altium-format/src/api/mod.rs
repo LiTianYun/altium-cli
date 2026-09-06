@@ -48,6 +48,7 @@ pub use schlib_types::{
     // Graphic enum and variants
     Graphic,
     ImageGraphic,
+    ImageResource,
     LabelGraphic,
     LineGraphic,
     Parameter,

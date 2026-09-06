@@ -48,7 +48,15 @@ Keep STATUS.md updated with the state of the codebase whenever you implement som
 
 ## CARDINAL RULE: NEVER RETAIN OPAQUE FORMAT DATA
 
-This rule is non-negotiable and overrides convenience during implementation:
+This rule overrides convenience during implementation, with one explicit
+user-authorized exception (2026-09-05): complete encoded image asset bodies may
+be retained and imported as opaque bytes. Preserve both preview and original;
+do not require image codecs. Storage framing, compression envelopes, resource
+names, placement, and references remain typed and validated. This exception does
+not apply to routing or any other unknown format data. See `NEXT.md` and
+`docs/proposals/typed-image-resources.md` for the exact image asset boundary.
+
+Outside that image asset boundary:
 
 - NEVER add "opaque"/"raw" retention fields for format sections or sidecars
   (examples of forbidden patterns: `opaque_sidecars`, `raw_*`, `unknown_bytes`,

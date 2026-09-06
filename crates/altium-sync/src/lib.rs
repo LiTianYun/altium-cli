@@ -21,3 +21,5 @@
 //! - `planner` — directional diff and managed-scope validation
 //! - `apply` — checked execution, staging, reopen validation, and journal recovery
 //! - `render` — exact patch reporting and optional display-only pairing/grouping
+
+pub mod image_asset;

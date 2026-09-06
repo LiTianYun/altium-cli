@@ -52,6 +52,32 @@ pub fn compile_schlib_with_scope(
     file: &SpecFile,
     mut scope: ScopeStack,
 ) -> Result<SchLibIntent, SpecError> {
+    // Definitions, aliases and expression bindings share a source namespace in
+    // captured compilation. Validate the same contract for standalone callers,
+    // before evaluating expressions, and report declaration order consistently.
+    let mut declared = BTreeMap::new();
+    for item in &file.items {
+        let (name, name_span, alias) = match &item.node {
+            SpecItem::LetBinding(binding) => (binding.name.node.clone(), binding.name.span, None),
+            SpecItem::Component(component) => (
+                component.name.node.as_str(),
+                component.name.span,
+                component.binding.as_ref(),
+            ),
+            SpecItem::SwapGroup(group) => (
+                group.name.node.as_str(),
+                group.name.span,
+                group.binding.as_ref(),
+            ),
+            _ => continue,
+        };
+        unique(&mut declared, name.clone(), name_span)?;
+        if let Some(alias) = alias {
+            if alias.node != name {
+                unique(&mut declared, alias.node.clone(), alias.span)?;
+            }
+        }
+    }
     scope.push();
     let mut bindings = BTreeMap::new();
     // Swap groups are lexically scoped named bindings, not native collections.
@@ -131,7 +157,7 @@ pub(super) fn bind_swap(
     // Group properties currently have no native meaning; never silently ignore.
     let props = Properties::object(&group.body, scope)?;
     props.finish("swap_group")?;
-    let name = group.name.node.as_str();
+    let name = named(&group.name)?.node;
     let binding = group
         .binding
         .as_ref()
@@ -553,17 +579,23 @@ fn path_expr(path: &DollarPath, span: Span) -> Spanned<Expr> {
     expr
 }
 fn ref_string(value: Value, span: Span) -> Result<String, SpecError> {
-    match value {
-        Value::String(value) => Ok(value),
-        Value::Integer(value) => Ok(value.to_string()),
-        Value::ImportRef { name, .. } => Ok(name),
-
-        _ => Err(error(
-            "reference must resolve to an existing named entity",
-            span,
-        )),
+    let identifier = match value {
+        Value::String(value) => value,
+        Value::Integer(value) => value.to_string(),
+        Value::ImportRef { name, .. } => name,
+        _ => {
+            return Err(error(
+                "reference must resolve to an existing named entity",
+                span,
+            ));
+        }
+    };
+    if identifier.is_empty() {
+        return Err(error("pin/pad identifier cannot be empty", span));
     }
+    Ok(identifier)
 }
+
 fn footprint(decl: &FootprintMapDecl, scope: &ScopeStack) -> Result<FootprintIntent, SpecError> {
     let (model_name, source) = match &decl.name.node {
         FootprintRef::Name(name) => (name.as_str(), None),
@@ -930,5 +962,100 @@ fn component_kind(value: Value, span: Span) -> Result<ComponentKind, SpecError> 
         "standard_no_bom" | "standardnobom" => Ok(ComponentKind::StandardNoBom),
         "jumper" => Ok(ComponentKind::Jumper),
         _ => Err(error(format!("unknown component kind '{name}'"), span)),
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+    use crate::{import::capture_imports, parser::parse_spec};
+    use std::io::Write;
+
+    #[test]
+    fn standalone_and_captured_top_level_names_reject_the_same_collisions() {
+        for source in [
+            "let R=1\ncomponent R {}",
+            "component R {}\nlet R=1",
+            "same=component R {}\nsame=component S {}",
+            "component R {}\nR=component S {}",
+            "swap_group R {}\ncomponent R {}",
+            "group_binding=swap_group R {}\ngroup_binding=component S {}",
+        ] {
+            let ast = parse_spec(source).expect("valid collision syntax");
+            let standalone = compile_schlib(&ast).expect_err("standalone namespace collision");
+            assert_eq!(
+                standalone.code,
+                SpecErrorCode::DuplicateEntity,
+                "{source}: {standalone}"
+            );
+            let mut file = tempfile::Builder::new()
+                .suffix(".schlib-spec")
+                .tempfile()
+                .unwrap();
+            file.write_all(source.as_bytes()).unwrap();
+            let graph = capture_imports(file.path()).unwrap();
+            let captured = super::super::compile_captured_schlib(&graph)
+                .expect_err("captured namespace collision");
+            assert_eq!(
+                captured.code,
+                SpecErrorCode::DuplicateEntity,
+                "{source}: {captured}"
+            );
+        }
+        // An explicitly repeated own name is one binding, not a collision.
+        let valid = parse_spec("R=component R {}\nG=swap_group G {}").unwrap();
+        assert!(compile_schlib(&valid).is_ok());
+    }
+
+    #[test]
+    fn empty_named_swap_groups_reject_but_empty_native_field_is_authored_set() {
+        for source in [
+            r#"swap_group "" {}"#,
+            r#"g=swap_group "" {}"#,
+            r#"component R {swap_group "" {}}"#,
+            r#"component R {g=swap_group "" {}}"#,
+        ] {
+            let ast = parse_spec(source).unwrap();
+            let error =
+                compile_schlib(&ast).expect_err("named swap group requires nonempty identity");
+            assert!(
+                error
+                    .message
+                    .contains("required identifier cannot be empty"),
+                "{error}"
+            );
+            let span = error.span.unwrap();
+            assert_eq!(&source[span.start as usize..span.end as usize], "\"\"");
+        }
+        let ast = parse_spec(r#"component R {pin 1 {swap_group:""}}"#).unwrap();
+        let intent = compile_schlib(&ast).unwrap();
+        assert!(
+            matches!(&intent.components.items[0].pins.items[0].swap_group, FieldIntent::Set(value) if value.node.is_empty())
+        );
+    }
+
+    #[test]
+    fn evaluated_pin_and_pad_references_reject_empty_identifiers_with_source_spans() {
+        for mapping in ["$empty:$valid", "$valid:$empty"] {
+            let source = format!(
+                "let empty=\"\"\nlet valid=\"1\"\ncomponent R {{footprint F {{{mapping}}}}}"
+            );
+            let ast = parse_spec(&source).unwrap();
+            let error = compile_schlib(&ast).expect_err("empty evaluated reference");
+            assert!(
+                error.message.contains("identifier cannot be empty"),
+                "{error}"
+            );
+            let span = error.span.expect("reference span");
+            assert_eq!(&source[span.start as usize..span.end as usize], "$empty");
+        }
+        let ast = parse_spec(
+            "let pin_name=\"1\"\nlet pad_name=2\ncomponent R {footprint F {$pin_name:$pad_name}}",
+        )
+        .unwrap();
+        let result = compile_schlib(&ast).unwrap();
+        let mapping = &result.components.items[0].footprints.items[0].maps.items[0];
+        assert_eq!(mapping.pin.node, "1");
+        assert_eq!(mapping.pad.node, "2");
     }
 }

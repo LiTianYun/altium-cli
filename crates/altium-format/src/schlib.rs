@@ -2104,12 +2104,120 @@ impl SchLib {
         // 6. Aliases
         for alias in &self.aliases {
             let alias_key = resolve_component_key(&alias.alias_name, &section_keys);
-            cfb.create_storage(&format!("/{alias_key}"))?;
+            // Native libraries can declare a self-alias whose Redirection shares
+            // the component's storage with Data. The storage was created above;
+            // still serialize the parsed redirection rather than dropping it.
+            let shares_component_storage = alias.alias_name == alias.canonical_name
+                && self.header.components.iter().any(|component| {
+                    component.lib_ref == alias.canonical_name
+                        && resolve_component_key(&component.lib_ref, &section_keys) == alias_key
+                });
+            if !shares_component_storage {
+                cfb.create_storage(&format!("/{alias_key}"))
+                    .with_context(|| format!("creating storage for alias '{}'", alias.alias_name))?;
+            }
             let redir_data = serialize_redirection_stream(&alias.canonical_name);
-            cfb.write_stream(&format!("/{alias_key}/{REDIRECTION}"), &redir_data)?;
+            cfb.write_stream(&format!("/{alias_key}/{REDIRECTION}"), &redir_data)
+                .with_context(|| format!("writing Redirection for alias '{}'", alias.alias_name))?;
         }
 
         cfb.save_to_file(path)?;
+        Ok(())
+    }
+
+    /// Enumerates image resources in document order without copying their bodies.
+    ///
+    /// Duplicate names remain distinct. Indices are positions in the current
+    /// document, not persistent identities; insert/remove shifts later positions.
+    pub fn image_resources(
+        &self,
+    ) -> impl ExactSizeIterator<Item = crate::api::ImageResource<'_>> + DoubleEndedIterator {
+        self.embedded_images
+            .iter()
+            .map(|image| crate::api::ImageResource {
+                name: &image.file_name,
+                payload: &image.data,
+            })
+    }
+
+    /// Inserts a complete image asset at `index` (including append at length).
+    ///
+    /// Validates native serialization constraints before changing the document.
+    /// Does not deduplicate names or interpret codec contents. This low-level
+    /// operation does not resolve image-record references or aliases: a caller
+    /// applying several edits must validate the final aggregate before commit.
+    /// `validate_invariants` currently does not validate image references.
+    pub fn insert_image_resource(
+        &mut self,
+        index: usize,
+        name: String,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        let count = self.embedded_images.len();
+        if index > count {
+            return Err(AltiumFormatError::InvalidParamValue {
+                key: STORAGE.to_owned(),
+                detail: format!(
+                    "inserting image resource '{name}' at index {index}: index exceeds resource count {count}"
+                ),
+            });
+        }
+        crate::embedded_object::validate_embedded_object(&name, &payload)
+            .with_context(|| format!("inserting image resource '{name}' at index {index}"))?;
+        self.embedded_images.insert(
+            index,
+            SchLibEmbeddedImage {
+                file_name: name,
+                data: payload,
+            },
+        );
+        Ok(())
+    }
+
+    /// Replaces exactly one resource slot, preserving every other slot and body.
+    ///
+    /// Name lookup/upsert is intentionally absent because names can be duplicated
+    /// and image references can use case-insensitive or rotated aliases. Native
+    /// serialization constraints are checked before mutation. Reference validation
+    /// belongs to the final aggregate, allowing multi-operation transactions.
+    pub fn replace_image_resource(
+        &mut self,
+        index: usize,
+        name: String,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        let count = self.embedded_images.len();
+        let image = self.embedded_images.get_mut(index).ok_or_else(|| AltiumFormatError::InvalidParamValue {
+            key: STORAGE.to_owned(),
+            detail: format!("replacing image resource '{name}' at index {index}: no resource at index (count {count})"),
+        })?;
+        crate::embedded_object::validate_embedded_object(&name, &payload).with_context(|| {
+            format!(
+                "replacing image resource '{}' at index {index} with '{name}'",
+                image.file_name
+            )
+        })?;
+        *image = SchLibEmbeddedImage {
+            file_name: name,
+            data: payload,
+        };
+        Ok(())
+    }
+
+    /// Removes exactly one indexed resource; never performs implicit collection
+    /// or reference updates. The caller must validate remaining embedded-image
+    /// references and aliases after completing its aggregate transaction.
+    pub fn remove_image_resource(&mut self, index: usize) -> Result<()> {
+        if index >= self.embedded_images.len() {
+            return Err(AltiumFormatError::InvalidParamValue {
+                key: STORAGE.to_owned(),
+                detail: format!(
+                    "removing image resource at index {index}: no resource at index (count {})",
+                    self.embedded_images.len()
+                ),
+            });
+        }
+        self.embedded_images.remove(index);
         Ok(())
     }
 
@@ -2637,6 +2745,176 @@ fn validate_schlib_invariants(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_alias_preserves_redirection_in_component_storage_after_save_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first.SchLib");
+        let second = temp.path().join("second.SchLib");
+        let mut lib = SchLib::new_blank_ad26().unwrap();
+        let name = lib.header.components[0].lib_ref.clone();
+        lib.header.components[0].aliases.push(name.clone());
+        lib.aliases.push(SchLibAlias {
+            alias_name: name.clone(),
+            canonical_name: name.clone(),
+        });
+        lib.header.weight = compute_weight(&lib.header, &lib.components);
+        lib.validate_invariants().unwrap();
+        lib.save(&first).unwrap();
+        let reopened = SchLib::open(&first).unwrap();
+        reopened.validate_invariants().unwrap();
+        assert_eq!(reopened.header.components[0].aliases, vec![name.clone()]);
+        assert_eq!(reopened.aliases[0].alias_name, name);
+        assert_eq!(reopened.aliases[0].canonical_name, name);
+        let mut cfb = CfbDocument::open(&first).unwrap();
+        let redirection = cfb.read_stream(&format!("/{name}/{REDIRECTION}")).unwrap();
+        assert_eq!(parse_redirection_stream(&redirection).unwrap(), name);
+        reopened.save(&second).unwrap();
+        crate::test_utils::assert_cfb_files_semantic_eq(&first, &second);
+    }
+
+    fn resource_snapshot(lib: &SchLib) -> Vec<(String, Vec<u8>)> {
+        lib.image_resources()
+            .map(|resource| (resource.name.to_owned(), resource.payload.to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn image_resource_api_preserves_exact_bodies_duplicates_and_order_after_save_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let first_path = directory.path().join("first.SchLib");
+        let second_path = directory.path().join("second.SchLib");
+        let third_path = directory.path().join("third.SchLib");
+        let mut lib = SchLib::new_blank_ad26().unwrap();
+        // Deliberately uninterpreted complete asset bodies: the resource API
+        // promises byte preservation, not validation of their image codecs.
+        let bodies = [
+            b"BM preview\0\xff\x0bTdxPNGImage\x89PNG\r\n\x1a\noriginal".to_vec(),
+            b"BM alternate\0\x09TMetafile\x01\x00metafile body".to_vec(),
+            vec![0, 255, 128, 13, 10, 0, 9],
+            b"BM rotated preview and original".to_vec(),
+        ];
+        lib.insert_image_resource(0, "same.png".into(), bodies[0].clone())
+            .unwrap();
+        lib.insert_image_resource(1, "same.png".into(), bodies[1].clone())
+            .unwrap();
+        lib.insert_image_resource(1, "café.png".into(), bodies[2].clone())
+            .unwrap();
+        lib.insert_image_resource(
+            3,
+            "FileName=same.png|Orientation=90 Degrees".into(),
+            bodies[3].clone(),
+        )
+        .unwrap();
+        assert_eq!(lib.image_resources().len(), 4);
+        let before = resource_snapshot(&lib);
+        lib.validate_invariants().unwrap();
+        lib.save(&first_path).unwrap();
+        let mut reopened = SchLib::open(&first_path).unwrap();
+        reopened.validate_invariants().unwrap();
+        assert_eq!(resource_snapshot(&reopened), before);
+        assert_eq!(before[0], ("same.png".into(), bodies[0].clone()));
+        assert_eq!(before[2], ("same.png".into(), bodies[1].clone()));
+        reopened
+            .insert_image_resource(1, "inserted".into(), vec![7, 0, 8])
+            .unwrap();
+        reopened
+            .replace_image_resource(3, "same.png".into(), vec![9, 0, 10])
+            .unwrap();
+        reopened.remove_image_resource(2).unwrap();
+        let expected = vec![
+            before[0].clone(),
+            ("inserted".into(), vec![7, 0, 8]),
+            ("same.png".into(), vec![9, 0, 10]),
+            before[3].clone(),
+        ];
+        assert_eq!(resource_snapshot(&reopened), expected);
+        reopened.validate_invariants().unwrap();
+        reopened.save(&second_path).unwrap();
+        let final_lib = SchLib::open(&second_path).unwrap();
+        final_lib.validate_invariants().unwrap();
+        assert_eq!(resource_snapshot(&final_lib), expected);
+        final_lib.save(&third_path).unwrap();
+        crate::test_utils::assert_cfb_files_semantic_eq(&second_path, &third_path);
+    }
+
+    #[test]
+    fn image_resource_api_rejected_edits_are_contextual_and_atomic() {
+        let mut lib = SchLib::new_blank_ad26().unwrap();
+        lib.insert_image_resource(0, "original".into(), vec![1, 0, 2])
+            .unwrap();
+        let before = resource_snapshot(&lib);
+        for (name, expected) in [
+            ("unrepresentable_日".to_owned(), "Windows-1252"),
+            ("x".repeat(256), "maximum"),
+        ] {
+            let error = lib
+                .insert_image_resource(0, name.clone(), vec![4])
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("inserting image resource")
+                    && error.contains("index 0")
+                    && error.contains(expected),
+                "{error}"
+            );
+            assert_eq!(resource_snapshot(&lib), before);
+            let error = lib
+                .replace_image_resource(0, name, vec![4])
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("replacing image resource 'original'") && error.contains(expected),
+                "{error}"
+            );
+            assert_eq!(resource_snapshot(&lib), before);
+        }
+        for index in [2, usize::MAX] {
+            assert!(
+                lib.insert_image_resource(index, "new".into(), vec![3])
+                    .unwrap_err()
+                    .to_string()
+                    .contains(&format!("index {index}"))
+            );
+            assert!(
+                lib.replace_image_resource(index, "new".into(), vec![3])
+                    .is_err()
+            );
+            assert!(lib.remove_image_resource(index).is_err());
+            assert_eq!(resource_snapshot(&lib), before);
+        }
+        // Replace/remove do not accept the append-only insertion position.
+        assert!(lib.replace_image_resource(1, "new".into(), vec![]).is_err());
+        assert!(lib.remove_image_resource(1).is_err());
+        lib.remove_image_resource(0).unwrap();
+        assert_eq!(lib.image_resources().len(), 0);
+    }
+
+    #[test]
+    fn image_resource_api_does_not_weaken_native_outer_framing_on_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("corrupt.SchLib");
+        let mut lib = SchLib::new_blank_ad26().unwrap();
+        lib.insert_image_resource(0, "asset.png".into(), vec![1, 2, 3])
+            .unwrap();
+        lib.save(&path).unwrap();
+        let mut container = CfbDocument::open(&path).unwrap();
+        let mut storage = container.read_stream("/Storage").unwrap();
+        let blocks = parse_blocks(&storage).unwrap();
+        let entry_offset = 4 + blocks[0].data.len();
+        // Switch only the resource entry's block-format flag to text.
+        storage[entry_offset + 3] = altium_format_types::constants::parsing::BLOCK_FLAG_TEXT;
+        container.write_stream("/Storage", &storage).unwrap();
+        container.save_to_file(&path).unwrap();
+        let error = SchLib::open(&path)
+            .err()
+            .expect("malformed resource frame must fail")
+            .to_string();
+        assert!(
+            error.contains("/Storage") && error.contains("block #1") && error.contains("binary"),
+            "{error}"
+        );
+    }
 
     fn storage_test_header(weight: Option<usize>) -> Vec<u8> {
         let mut params = ParameterCollection::new();

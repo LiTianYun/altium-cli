@@ -151,7 +151,11 @@ pub fn compile_captured_schlib(graph: &CapturedSourceGraph) -> Result<CompiledSc
                 let intent = if is_pcb {
                     None
                 } else {
-                    Some(compile_schlib_with_scope(source.ast(), scope)?)
+                    Some({
+                        let mut intent = compile_schlib_with_scope(source.ast(), scope)?;
+                        super::graphics::attach_image_source_origins(&mut intent, path);
+                        intent
+                    })
                 };
                 Ok((exposed, intent))
             };

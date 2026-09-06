@@ -209,6 +209,22 @@ impl<'a> SpecParser<'a> {
                     ));
                 }
             };
+            let previous = match &annotation_key {
+                AnnotationKey::Id => id.as_ref().map(|value| value.span),
+                AnnotationKey::Stable => stable.as_ref().map(|value| value.span),
+                AnnotationKey::Group => group.as_ref().map(|value| value.span),
+                AnnotationKey::SourceId => source_id.as_ref().map(|value| value.span),
+            };
+            if let Some(previous) = previous {
+                return Err(ParseError::new(
+                    ParseErrorCode::E1002,
+                    format!(
+                        "duplicate annotation key '{}'; first value authored at {}..{}",
+                        key_str.node, previous.start, previous.end
+                    ),
+                    key_str.span,
+                ));
+            }
             self.expect(&TokenKind::Eq, "expected '=' after annotation key")?;
             self.skip_newlines();
             match annotation_key {
@@ -4325,6 +4341,38 @@ placement {
             assert_eq!(c.body.len(), 1);
         } else {
             panic!("expected Component");
+        }
+    }
+
+    #[test]
+    fn test_annotation_duplicate_keys_reject_silent_metadata_overwrite() {
+        for (key, first, second) in [
+            ("id", "\"first\"", "\"second\""),
+            ("stable", "true", "false"),
+            ("group", "\"first\"", "\"second\""),
+            ("source_id", "\"first\"", "\"second\""),
+        ] {
+            for later in [first, second] {
+                let source =
+                    format!("#[annotation({key}={first},\r\n {key}={later})] component R {{}}");
+                let error =
+                    parse_spec(&source).expect_err("duplicate annotation metadata must fail");
+                assert!(
+                    error
+                        .message
+                        .contains(&format!("duplicate annotation key '{key}'")),
+                    "{error:?}"
+                );
+                assert!(
+                    error.message.contains("first value authored at"),
+                    "{error:?}"
+                );
+                let offset = source.rfind(key).unwrap();
+                assert_eq!(
+                    error.span,
+                    Span::new(offset as u32, (offset + key.len()) as u32)
+                );
+            }
         }
     }
 

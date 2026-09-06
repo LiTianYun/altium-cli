@@ -827,3 +827,117 @@ fn axis_spreads_and_pair_resolution_keep_declared_precedence() {
         point(0.0, 0.0)
     );
 }
+
+#[test]
+fn captured_image_paths_belong_to_containing_declarations_not_imported_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let definitions = dir.path().join("definitions");
+    std::fs::create_dir(&definitions).unwrap();
+    let library = definitions.join("library.schlib-spec");
+    let root = dir.path().join("root.schlib-spec");
+    std::fs::write(
+        &library,
+        r#"
+        let asset_path = "assets/shared.altium-image"
+        let defaults = {source: asset_path}
+        component Imported {
+            image {source:asset_path}
+            part 1 { image {...defaults} }
+        }
+    "#,
+    )
+    .unwrap();
+    std::fs::write(
+        &root,
+        r#"
+        import "definitions/library.schlib-spec" as library
+        component Root {
+            image {source:library.asset_path}
+            part 1 {image {...library.defaults}}
+        }
+    "#,
+    )
+    .unwrap();
+    let captured = capture_imports(&root).unwrap();
+    // Neither compilation nor origin attachment reads asset files or refreshed specs.
+    std::fs::remove_file(&library).unwrap();
+    let result = compile_captured_schlib(&captured).unwrap();
+    let imported_path = captured
+        .root_path()
+        .parent()
+        .unwrap()
+        .join("definitions/library.schlib-spec");
+    let imported = result.imported_libraries.get(&imported_path).unwrap();
+    for (intent, origin) in [
+        (&result.root, captured.root_path()),
+        (imported, imported_path.as_path()),
+    ] {
+        let component = &intent.components.items[0];
+        for graphic in [
+            &component.graphics.items[0],
+            &component.parts.items[0].graphics.items[0],
+        ] {
+            let FieldIntent::Set(value) = &graphic.fields.source else {
+                panic!("asset Set required")
+            };
+            let asset = value.node.as_ref().unwrap();
+            assert_eq!(asset.path, "assets/shared.altium-image");
+            assert_eq!(asset.declaring_source.as_deref(), Some(origin));
+            assert!(matches!(graphic.fields.embed_image, FieldIntent::Absent));
+        }
+    }
+}
+
+#[test]
+fn image_asset_source_cst_and_formatter_preserve_paths_and_operations() {
+    let source = r#"// imported image bundle
+component R {
+    // Preserve this authored path and its escaped quotes.
+    image { source: "assets/logo \"alternate\".altium-image" }
+    image { source: inherit }
+    image { source: reset }
+    image { source: null }
+    image {}
+}
+"#
+    .replace('\n', "\r\n");
+    let tree = crate::cst::parse_structured(&source).unwrap();
+    assert_eq!(
+        tree.text(),
+        source.as_str(),
+        "CST retains all comments and CRLF bytes"
+    );
+    let formatted = crate::formatter::format_spec(&source, &Default::default())
+        .unwrap()
+        .output;
+    assert!(formatted.contains("// imported image bundle"));
+    for text in [&source, &formatted] {
+        let intent = compile(text).unwrap();
+        let graphics = &intent.components.items[0].graphics.items;
+        assert_eq!(graphics.len(), 5);
+        let FieldIntent::Set(value) = &graphics[0].fields.source else {
+            panic!("source path must remain authored Set")
+        };
+        let asset = value.node.as_ref().unwrap();
+        assert_eq!(asset.path, "assets/logo \"alternate\".altium-image");
+        assert!(
+            asset.declaring_source.is_none(),
+            "formatting never invents an asset origin"
+        );
+        assert!(matches!(graphics[1].fields.source, FieldIntent::Inherit(_)));
+        assert!(matches!(graphics[2].fields.source, FieldIntent::Reset(_)));
+        assert!(matches!(graphics[3].fields.source, FieldIntent::Clear(_)));
+        assert!(matches!(graphics[4].fields.source, FieldIntent::Absent));
+        for graphic in graphics {
+            assert!(matches!(graphic.fields.file_name, FieldIntent::Absent));
+            assert!(matches!(graphic.fields.embed_image, FieldIntent::Absent));
+        }
+    }
+    assert_eq!(
+        crate::formatter::format_spec(&formatted, &Default::default())
+            .unwrap()
+            .output,
+        formatted,
+        "formatting remains idempotent"
+    );
+}

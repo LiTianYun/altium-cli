@@ -14,6 +14,19 @@ use altium_format_types::sch::{
 
 use crate::param_value::SchAngle;
 
+/// An immutable view of one ordered SchLib image resource.
+///
+/// `payload` is the complete decompressed Altium image bundle, including any
+/// preview and appended original graphic. Image bundles are user-authorized
+/// opaque assets: this API does not decode, validate, or normalize their codecs.
+/// Names and payloads are separate from image placement and reference resolution.
+/// Duplicate names remain separate entries and enumeration preserves their order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageResource<'a> {
+    pub name: &'a str,
+    pub payload: &'a [u8],
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 
 /// A schematic library component.

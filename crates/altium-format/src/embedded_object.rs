@@ -216,6 +216,16 @@ pub(crate) fn serialize_embedded_object(id: &str, inner_data: &[u8]) -> Result<V
     Ok(w.finish())
 }
 
+/// Validate identifier encoding and complete compressed-envelope representability
+/// without exposing native envelope bytes to the public resource API.
+/// Compression is temporary; callers retain the original asset body unchanged.
+pub(crate) fn validate_embedded_object(id: &str, inner_data: &[u8]) -> Result<()> {
+    let envelope = serialize_embedded_object(id, inner_data)?;
+    checked_embedded_block_header(envelope.len())
+        .with_context(|| format!("validating embedded object '{id}' outer framing"))?;
+    Ok(())
+}
+
 // AD26 SchDataSerializer.WriteBinary/ReadBinary use full signed 32-bit lengths.
 fn checked_compressed_size(size: usize) -> Result<i32> {
     i32::try_from(size).map_err(|_| {

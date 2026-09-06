@@ -40,8 +40,9 @@ ordered edges, and dependency order, and rechecks content/path resolutions.
 is parsed and preserved by the CST; legacy commands explicitly reject collection
 scope instead of ignoring it. The typed SchLib intent core now preserves field operations/spans, collection
 scope, typed definition references, imported source provenance, and nested spread
-origins. It compiles captured transitive values without reopening imports. Full
-step 1 remains open for image asset-reference intent and its completeness review.
+origins. It compiles captured transitive values without reopening imports.
+Step 1 is complete under the revised image asset-reference scope, following
+independent completeness review. Steps 2 through 9 remain outstanding.
 Full image codecs were removed from the gate by the user's 2026-09-05 scope change.
 Graphic field policies now cover all 13 kinds against the existing typed Rust
 API/creation defaults, including optional arc endpoints and named PenWidth values.
@@ -78,8 +79,23 @@ serialization contract and the 0/10/30/50mil pen-width table. Graphic intent acc
 only exact physical widths after checked Coord conversion; renderer and intent
 share the verified constants. Endpoint sizes remain named-only because they use
 a separate semantic table. The [revised image import design](docs/proposals/typed-image-resources.md)
-supersedes the shared codec proposal. Native bundle import/export, asset-reference
-intent, and saved-plan asset capture remain unimplemented; no codec crate is needed.
+supersedes the shared codec proposal. Image-only `source` intent now retains
+Set/Absent/Inherit/Reset/Clear and the containing declaration's canonical source
+path. Compilation performs no asset I/O. The native API exposes ordered borrowed
+resources and explicit indexed insert/replace/remove, checking serialization
+constraints before mutation and preserving duplicates and complete asset bodies.
+`altium-sync::image_asset` captures exact bytes plus BLAKE3 hashes, and checks
+content and canonical-path preconditions without refreshing captured data.
+These are building blocks: integrated dump/import, reference validation, saved
+plan serialization, and transactional application remain unimplemented.
+Final validation: 362 language, 396 core, 168 legacy spec and 3 sync tests pass.
+The CLI builds at the final code state.
+All 58 image bodies across 13 real SchLib libraries preserve exact ordered names
+and bytes through export/capture/replacement/native save/reopen. A real self-alias
+save failure was fixed by sharing the component storage while retaining its
+Redirection stream; the malformed outer-framing negative example still errors.
+These checks do not establish whole-document semantic convergence or image codec
+validity. See the [closure worklog](docs/worklogs/next-image-assets-2026-09-05.md).
 Verified physical-width validation: 354 language tests and 168 legacy spec tests
 pass; CLI compilation passes. The bounded conversion/rendering change passed
 independent review. No fixture-feature or property tests were run.

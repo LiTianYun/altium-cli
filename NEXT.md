@@ -32,15 +32,18 @@ dump merge now live in `altium-spec-lang`, reexported by `altium-format-spec`.
 Import resolution and immutable transitive source capture also live in the
 language crate. Collection scope and contextual operations parse into explicit
 AST/CST forms. The typed SchLib intent core compiles captured imports and retains
-field operations, collection scope, source provenance, and spread origins. Full
-step 1 is still open for image asset-reference intent and its completeness review;
-image codecs are no longer a gate. See the [revised image import design](docs/proposals/typed-image-resources.md).
+field operations, collection scope, source provenance, and spread origins.
+Step 1 is complete under the revised image asset-reference scope, with an
+independent completeness review and 362 passing language tests. Image codecs
+are no longer a gate. See the [image import design](docs/proposals/typed-image-resources.md)
+and [closure evidence](docs/worklogs/next-image-assets-2026-09-05.md).
 Graphic field defaults/clear policies now match the current typed Rust API. Captured footprint
 imports now export generated pad names. Independent pin axes and owner-local auto-size constraints
 now resolve over effective target/base geometry. Physical line widths map exactly
 to the original AD26 0/10/30/50mil table. CLI plan still renders an ECO while apply recompiles
 the spec and invokes a different executor; preview/apply agreement is not guaranteed.
-`altium-sync` contains a dependency scaffold only. There is
+`altium-sync` now captures image asset bytes, hashes and path preconditions, but
+has no snapshot planner or transaction executor yet. There is
 no executable external state subsystem to migrate or delete.
 
 The recorded SchLib / Altium 26.2 GUI-save experiment (2026-06-21) found:
@@ -295,10 +298,12 @@ plans and stages every affected artifact before any destination is committed.
 ## Implementation steps and gates
 
 Complete an independent agent completeness review after every numbered step;
-resolve findings before proceeding. Step 1 front-end/import extraction is implemented; full intent semantics
-remain outstanding. None of the numbered steps below is complete.
+resolve findings before proceeding. Step 1 is complete under the image asset
+scope revision; steps 2 through 9 remain outstanding. Step 2 starts with complete
+format-owned typed snapshots; existing high-level Component reconstruction is
+not a lossless replacement path.
 
-1. **Language boundary and full SchLib intent.** Move/decouple CST, diagnostics,
+1. **Language boundary and full SchLib intent — complete.** Move/decouple CST, diagnostics,
    parser, and formatter into `altium-spec-lang`; port imports and SchLib intent
    passes. Specify absence, overrides, and collection scope. Gate: existing source
    preservation tests plus deterministic examples for imports, defaults,

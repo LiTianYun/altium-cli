@@ -71,10 +71,21 @@ check equal results:
 cargo run -p altium-spec-lang --example check_schlib_intent -- design.schlib-spec
 ```
 
-This is a front-end API, not the replacement CLI planner. Full step 1 still needs
-image asset-reference intent under the revised import design in `NEXT.md`, not
-full image codecs. Asset import syntax is not implemented yet.
-Unsupported image_data fails explicitly. Later steps must verify ownership,
+This is a front-end API, not the replacement CLI planner. Image declarations now
+accept `source: "assets/logo.altium-image"` as a typed optional asset reference.
+Set retains the path, Absent preserves the target, Inherit selects the base, and
+Clear/Reset removes the authored source reference without deleting any resource.
+Known `source` plus `embed_image:false` is rejected; effective target/base values
+must be checked again during elaboration. Standalone PNG/JPEG conversion is deferred.
+
+Captured compilation anchors paths to the file containing the image declaration,
+including declarations in imported libraries. Imported string/object values do
+not change this anchor. AST-only compilation retains an unknown origin, which the
+caller must explicitly supply before capture. Compilation never reads asset files.
+The sync layer can capture exact asset bytes and hashes and detect changed input
+contents or path resolutions. Integrated asset dump/import and saved-plan execution
+are still outstanding. Legacy CLI execution rejects `source`; unsupported
+`image_data` also fails in the new intent compiler. Later steps must verify ownership,
 materialize/project equality, scope enforcement, and native serialization.
 
 Pin coordinates retain either a paired `at`/`location` operation or independent
