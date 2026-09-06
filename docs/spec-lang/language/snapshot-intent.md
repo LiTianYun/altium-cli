@@ -72,9 +72,29 @@ cargo run -p altium-spec-lang --example check_schlib_intent -- design.schlib-spe
 ```
 
 This is a front-end API, not the replacement CLI planner. Full step 1 still needs
-retained anchor dependencies, generated footprint-pad imports, graphic default and
-clear policies, and typed image-resource support. Unsupported image_data and
+independent x/y field intent, complete auto-size constraints, generated footprint-pad
+imports, graphic default and clear policies, and typed image-resource support. Unsupported image_data and
 generated pad references fail explicitly. Graphic fields are intent, not proof of
 a native mapping: line-width enum conversion and fields without a native counterpart
 must be resolved before materialization. Later steps must verify ownership,
 materialize/project equality, scope enforcement, and native serialization.
+
+## Retained layout dependencies
+
+Anchored pins retain typed source-owner/ordinal references, edge, sequencing,
+gap, side, and offset. Bound box graphics retain auto-size directives. These are
+source references, not native object identities. Compiling an anchor does not
+turn an absent pin length/location or box corner into a Set operation.
+
+`evaluate_layout` receives effective pin and box geometry after a planner has
+resolved target/base/default values. A preserved 60mil pin therefore uses 60mil
+for placement even when its source omits length; creation may use the 25mil
+definition default. Parts inherit component graphic bindings with ordinary lexical
+shadowing. Source ranges, cycles, overflows, and contradictory placements error.
+
+The current auto-size formula covers the existing edge-chain cases; it is not a
+general constraint solver for arbitrary centered/branching layouts. Unsupported
+containment fails with source context. Parts treat inherited component boxes as
+fixed effective geometry; they do not resize a shared box from part-local pins.
+Full layout acceptance still requires those constraints and integration with
+snapshot scope.

@@ -1,11 +1,13 @@
 //! Typed authored SchLib intent. Defaults are resolved only after write scope and
 //! destination context are known; an absent field is never an implicit write.
 
+mod anchors;
 mod compile;
 mod fields;
 mod graphics;
 mod imports;
 
+pub use anchors::*;
 pub use compile::{compile_schlib, compile_schlib_with_scope};
 pub use fields::*;
 pub use graphics::*;
@@ -130,6 +132,8 @@ pub struct PartIntent {
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinIntent {
+    /// Authored layout dependencies are evaluated against effective target values.
+    pub placement: Option<PinPlacementIntent>,
     /// Desired designator; pins align positionally, not by this name.
     pub designator: Spanned<String>,
     pub name: FieldIntent<String>,

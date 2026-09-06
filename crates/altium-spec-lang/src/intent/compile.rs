@@ -167,6 +167,13 @@ fn component(decl: &ComponentDecl, parent: &ScopeStack) -> Result<ComponentInten
             bind_let(binding, &mut scope, &mut bindings)?;
         }
     }
+    for item in &decl.body {
+        if let ComponentItem::Graphic(graphic) = &item.node {
+            if let Some(binding) = &graphic.binding {
+                unique(&mut bindings, binding.node.clone(), binding.span)?;
+            }
+        }
+    }
     bind_pins(
         decl.body.iter().filter_map(|item| {
             if let ComponentItem::Pin(pin) = &item.node {
@@ -204,6 +211,35 @@ fn component(decl: &ComponentDecl, parent: &ScopeStack) -> Result<ComponentInten
         parts: Collection::default(),
     };
     props.finish("component")?;
+    let (pins, graphics, graphic_bindings) = compile_children(
+        LayoutOwner::Component,
+        &decl
+            .body
+            .iter()
+            .filter_map(|item| {
+                if let ComponentItem::Pin(pin) = &item.node {
+                    Some(pin)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>(),
+        &decl
+            .body
+            .iter()
+            .filter_map(|item| {
+                if let ComponentItem::Graphic(graphic) = &item.node {
+                    Some(graphic)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>(),
+        &super::anchors::GraphicBindings::new(),
+        &scope,
+    )?;
+    result.pins.items = pins;
+    result.graphics.items = graphics;
     let (mut params, mut aliases, mut footprints, mut parts) = (
         BTreeMap::new(),
         BTreeMap::new(),
@@ -212,7 +248,7 @@ fn component(decl: &ComponentDecl, parent: &ScopeStack) -> Result<ComponentInten
     );
     for item in &decl.body {
         match &item.node {
-            ComponentItem::Pin(decl) => result.pins.items.push(pin(decl, &scope)?),
+            ComponentItem::Pin(_) | ComponentItem::Graphic(_) => {}
             ComponentItem::Parameter(decl) => {
                 unique(&mut params, decl.name.node.as_str(), decl.name.span)?;
                 result.parameters.items.push(parameter(decl, &scope)?);
@@ -231,13 +267,12 @@ fn component(decl: &ComponentDecl, parent: &ScopeStack) -> Result<ComponentInten
                 )?;
                 result.footprints.items.push(value);
             }
-            ComponentItem::Graphic(decl) => result
-                .graphics
-                .items
-                .push(super::graphics::compile_graphic(decl, &scope)?),
             ComponentItem::Part(decl) => {
                 unique(&mut parts, decl.number.node, decl.number.span)?;
-                result.parts.items.push(part(decl, &scope)?);
+                result
+                    .parts
+                    .items
+                    .push(part(decl, &scope, &graphic_bindings)?);
             }
             ComponentItem::Collection(decl) => {
                 let target = match decl.kind.node {
@@ -325,7 +360,11 @@ fn bind_pins<'a>(
     }
     Ok(())
 }
-fn part(decl: &PartBlock, parent: &ScopeStack) -> Result<PartIntent, SpecError> {
+fn part(
+    decl: &PartBlock,
+    parent: &ScopeStack,
+    inherited: &super::anchors::GraphicBindings,
+) -> Result<PartIntent, SpecError> {
     let number = PartNumber::new(decl.number.node)
         .ok_or_else(|| error("part number must be positive", decl.number.span))?;
     let mut scope = parent.clone();
@@ -334,6 +373,13 @@ fn part(decl: &PartBlock, parent: &ScopeStack) -> Result<PartIntent, SpecError> 
     for item in &decl.body {
         if let PartItem::LetBinding(binding) = &item.node {
             bind_let(binding, &mut scope, &mut bindings)?;
+        }
+    }
+    for item in &decl.body {
+        if let PartItem::Graphic(graphic) = &item.node {
+            if let Some(binding) = &graphic.binding {
+                unique(&mut bindings, binding.node.clone(), binding.span)?;
+            }
         }
     }
     bind_pins(
@@ -364,13 +410,38 @@ fn part(decl: &PartBlock, parent: &ScopeStack) -> Result<PartIntent, SpecError> 
         graphics: Collection::default(),
     };
     props.finish("part")?;
+    let (pins, graphics, _) = compile_children(
+        LayoutOwner::Part(number),
+        &decl
+            .body
+            .iter()
+            .filter_map(|item| {
+                if let PartItem::Pin(pin) = &item.node {
+                    Some(pin)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>(),
+        &decl
+            .body
+            .iter()
+            .filter_map(|item| {
+                if let PartItem::Graphic(graphic) = &item.node {
+                    Some(graphic)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>(),
+        inherited,
+        &scope,
+    )?;
+    result.pins.items = pins;
+    result.graphics.items = graphics;
     for item in &decl.body {
         match &item.node {
-            PartItem::Pin(decl) => result.pins.items.push(pin(decl, &scope)?),
-            PartItem::Graphic(decl) => result
-                .graphics
-                .items
-                .push(super::graphics::compile_graphic(decl, &scope)?),
+            PartItem::Pin(_) | PartItem::Graphic(_) => {}
             PartItem::Collection(decl) => {
                 let target = match decl.kind.node {
                     CollectionKind::Pins => &mut result.pins.scope,
@@ -384,9 +455,57 @@ fn part(decl: &PartBlock, parent: &ScopeStack) -> Result<PartIntent, SpecError> 
     }
     Ok(result)
 }
-fn pin(decl: &PinDecl, scope: &ScopeStack) -> Result<PinIntent, SpecError> {
+fn compile_children(
+    owner: LayoutOwner,
+    pins: &[&PinDecl],
+    graphics: &[&GraphicDecl],
+    inherited: &super::anchors::GraphicBindings,
+    scope: &ScopeStack,
+) -> Result<
+    (
+        Vec<PinIntent>,
+        Vec<GraphicIntent>,
+        super::anchors::GraphicBindings,
+    ),
+    SpecError,
+> {
+    let layout = super::anchors::compile_layout(owner, pins, graphics, inherited, scope)?;
+    if layout.pins.len() != layout.placements.len()
+        || layout.graphics.len() != layout.auto_sizes.len()
+    {
+        return Err(SpecError::no_span(
+            SpecErrorCode::TypeMismatch,
+            "layout compilation changed source collection cardinality",
+        ));
+    }
+    let pins = layout
+        .pins
+        .iter()
+        .zip(layout.placements)
+        .map(|(decl, placement)| pin(decl, scope, placement))
+        .collect::<Result<Vec<_>, SpecError>>()?;
+    let graphics = layout
+        .graphics
+        .iter()
+        .zip(layout.auto_sizes)
+        .map(|(decl, auto_size)| super::graphics::compile_graphic(decl, scope, auto_size))
+        .collect::<Result<Vec<_>, SpecError>>()?;
+    Ok((pins, graphics, layout.bindings))
+}
+
+fn pin(
+    decl: &PinDecl,
+    scope: &ScopeStack,
+    placement: Option<PinPlacementIntent>,
+) -> Result<PinIntent, SpecError> {
     let mut props = Properties::object(&decl.body, scope)?;
+    if placement.is_some() {
+        // Already parsed into typed placement by compile_layout; only the native
+        // field pass is filtered. No authored property is silently discarded.
+        props.consume_layout(&["on", "after", "before", "at", "gap", "side", "offset"]);
+    }
     let result = PinIntent {
+        placement,
         designator: named(&decl.name)?,
         name: props.take("name", &[], PIN_NAME, string)?,
         electrical: props.take("electrical", &[], PIN_ELECTRICAL, electrical)?,
@@ -683,6 +802,13 @@ impl Properties {
             }
         }
     }
+    /// Called only after the layout pass has represented these properties in
+    /// typed PinPlacementIntent or AutoSizeIntent.
+    pub(super) fn consume_layout(&mut self, keys: &[&str]) {
+        for key in keys {
+            self.values.shift_remove(*key);
+        }
+    }
     pub(super) fn finish(self, owner: &str) -> Result<(), SpecError> {
         if let Some((key, (_, _, span, _))) = self.values.first() {
             return Err(SpecError::at(
@@ -733,10 +859,7 @@ pub(super) fn boolean(value: Value, span: Span) -> Result<bool, SpecError> {
     }
 }
 pub(super) fn coord(value: Value, span: Span) -> Result<Coord, SpecError> {
-    match value {
-        Value::Dim(value) => Ok(Coord::from_internal(value)),
-        _ => Err(error("expected dimensional coordinate", span)),
-    }
+    value.to_dim(Some(span)).map(Coord::from_internal)
 }
 pub(super) fn point(value: Value, span: Span) -> Result<CoordPoint, SpecError> {
     match value {

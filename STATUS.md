@@ -41,8 +41,12 @@ is parsed and preserved by the CST; legacy commands explicitly reject collection
 scope instead of ignoring it. The typed SchLib intent core now preserves field operations/spans, collection
 scope, typed definition references, imported source provenance, and nested spread
 origins. It compiles captured transitive values without reopening imports. Full
-step 1 remains open: retained anchor dependencies, generated footprint-pad imports,
-graphic default/clear policies, and typed image resources. `altium-sync` remains a dependency scaffold. No state subsystem
+step 1 remains open: independent x/y field intent, complete auto-size constraints,
+generated footprint-pad imports, graphic default/clear policies, and typed image
+resources. Anchored pins/auto-sized boxes now retain typed dependencies; the layout
+evaluator uses effective target/base/default geometry without erasing absence.
+Coordinate literals and dimensional float conversions now reject nonfinite/overflow
+values; signed-minimum division, negation, and abs return errors instead of panics. `altium-sync` remains a dependency scaffold. No state subsystem
 existed to remove. Obsolete design notes and scaffold identity
 plans were removed, including the unused `altium-sync` random-ID dependency.
 Existing native Altium IDs, spec annotations, and ephemeral spec-to-spec sync
@@ -68,6 +72,14 @@ Core findings were fixed before commit. The [five-library captured-intent check]
 spans the SchLib corpus by size and compiles identical intent twice per capture.
 It covers 7,260 components, 41,528 pins, and 27,464 graphics; this is front-end
 coverage, not binary preservation or a completed step 1 gate.
+
+Retained-layout/numeric validation: 331 language tests, 168 legacy spec tests,
+and the CLI compile check pass. Independent module/integration/numeric reviews
+passed after shadowing, containment, and signed-minimum arithmetic fixes. The
+five-library captured corpus still passes deterministically. A formerly accepted
+`length: 999999999999mil` now returns a source-located ArithmeticOverflow error.
+Auto-size is a bounded edge-chain evaluator: unsupported containment errors, and
+part layouts treat inherited component boxes as fixed effective geometry.
 
 Current CLI execution architecture is unchanged: `plan` renders the legacy ECO and `apply`
 recompiles/runs the separate executor. Saved-plan execution, precondition checks,

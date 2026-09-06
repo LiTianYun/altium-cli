@@ -54,6 +54,7 @@ pub struct GraphicFields {
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphicIntent {
+    pub auto_size: Option<super::AutoSizeIntent>,
     pub kind: crate::diagnostic::Spanned<GraphicKind>,
     pub fields: GraphicFields,
 }
@@ -61,6 +62,7 @@ pub struct GraphicIntent {
 pub(super) fn compile_graphic(
     decl: &GraphicDecl,
     scope: &ScopeStack,
+    auto_size: Option<super::AutoSizeIntent>,
 ) -> Result<GraphicIntent, SpecError> {
     use GraphicKind::*;
     let kind = match decl.graphic_type.node.as_str() {
@@ -85,6 +87,10 @@ pub(super) fn compile_graphic(
         }
     };
     let mut props = Properties::object(&decl.body, scope)?;
+    if auto_size.is_some() {
+        // The layout compiler has already parsed these into typed authored intent.
+        props.consume_layout(&["padding", "min_width", "min_height"]);
+    }
     let mut fields = GraphicFields::default();
     // No default/clear policy has been accepted for graphic fields yet. Explicit
     // values are supported; reset/inherit/clear produce a contextual hard error.
@@ -160,6 +166,7 @@ pub(super) fn compile_graphic(
     }
     props.finish(&format!("{} graphic", decl.graphic_type.node))?;
     Ok(GraphicIntent {
+        auto_size,
         kind: crate::diagnostic::Spanned::new(kind, decl.graphic_type.span),
         fields,
     })

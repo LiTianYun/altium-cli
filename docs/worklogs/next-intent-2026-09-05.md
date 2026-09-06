@@ -30,3 +30,12 @@ It does not establish complete binary-to-intent projection, preservation of ever
 native field, materialize/project equality, saved-plan execution, or lossless
 roundtrips. The [earlier binary smoke check](next-corpus-2026-09-05.md) found
 unresolved semantic CFB differences; those remain open.
+
+The same capture/compile comparison was rerun after retained-layout integration
+and checked numeric conversions, with the same five counts. A separate oversized
+literal (`length: 999999999999mil`) changed from accepted/saturated output to an
+ArithmeticOverflow diagnostic at the source value. Final fixture-free checks:
+331 language tests, 168 legacy spec tests, and `cargo check -p altium-cli` pass.
+Layout tests exercise effective target length 60mil versus creation length 25mil,
+lexical shadowing, positional references, cycles, ranges, and containment errors.
+They do not execute document patches or prove full layout constraint solving.

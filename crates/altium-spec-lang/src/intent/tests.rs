@@ -483,3 +483,151 @@ fn imported_synonym_error_points_to_consuming_root_spread() {
         Some(Span::new(start, start + "imported.fields".len() as u32))
     );
 }
+
+#[test]
+fn compiled_anchor_intent_waits_for_effective_target_values() {
+    let intent = compile("component R { body = rectangle { from: (0mil, 0mil), to: (100mil, 100mil) } pin 1 { on: $body.left } }").unwrap();
+    let component = &intent.components.items[0];
+    let pin = &component.pins.items[0];
+    assert_eq!(pin.length, FieldIntent::Absent);
+    assert_eq!(pin.location, FieldIntent::Absent);
+    assert_eq!(pin.orientation, FieldIntent::Absent);
+    let placement = pin.placement.as_ref().unwrap();
+    assert_eq!(
+        placement.graphic.node,
+        GraphicSourceRef {
+            owner: LayoutOwner::Component,
+            index: 0
+        }
+    );
+    assert_eq!(placement.edge.node, AnchorEdge::Left);
+    let point = |x, y| {
+        altium_format_types::CoordPoint::new(Coord::from_mils_f64(x), Coord::from_mils_f64(y))
+    };
+    let geometry = Some(BoxGeometry {
+        from: point(0.0, 0.0),
+        to: point(100.0, 100.0),
+    });
+    for length in [25.0, 60.0] {
+        let evaluated = evaluate_layout(
+            LayoutOwner::Component,
+            &[pin.placement.clone()],
+            &[None],
+            &[EffectivePinGeometry {
+                length: Coord::from_mils_f64(length),
+                location: point(400.0, 300.0),
+                orientation: altium_format_types::RotationBy90::Rotate90,
+                orientation_is_authored: false,
+            }],
+            &[geometry],
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(evaluated.pins[0].unwrap().location, point(-length, 50.0));
+        assert_eq!(evaluated.graphics[0], None);
+    }
+}
+#[test]
+fn retained_layout_preserves_owner_scopes_and_unbound_absence() {
+    let intent = compile("component R { body = rectangle { padding: reset, min_width: 80mil } rectangle {} pin 1 { on: $body.left } part 1 { local = rectangle {} pin 2 { on: $local.right } pin 3 { on: $body.top } } }").unwrap();
+    let component = &intent.components.items[0];
+    assert!(matches!(
+        component.graphics.items[0]
+            .auto_size
+            .as_ref()
+            .unwrap()
+            .padding,
+        FieldIntent::Reset(_)
+    ));
+    assert_eq!(component.graphics.items[0].fields.from, FieldIntent::Absent);
+    assert_eq!(component.graphics.items[0].fields.to, FieldIntent::Absent);
+    assert_eq!(
+        component.graphics.items[1].auto_size, None,
+        "unbound empty graphic is an ordinary partial-scope graphic"
+    );
+    let part = &component.parts.items[0];
+    assert_eq!(
+        part.pins.items[0].placement.as_ref().unwrap().graphic.node,
+        GraphicSourceRef {
+            owner: LayoutOwner::Part(PartNumber::new(1).unwrap()),
+            index: 0
+        }
+    );
+    assert_eq!(
+        part.pins.items[1].placement.as_ref().unwrap().graphic.node,
+        GraphicSourceRef {
+            owner: LayoutOwner::Component,
+            index: 0
+        }
+    );
+}
+#[test]
+fn anchored_field_compilation_keeps_spread_provenance_and_strict_unknowns() {
+    let source = "let defaults = {name: \"A\", length: 40mil}\ncomponent R { body = rectangle {} pin 1 {...defaults, on: $body.left, name: \"B\", gap: reset} }";
+    let compiled = compile(source).unwrap();
+    let pin = &compiled.components.items[0].pins.items[0];
+    assert!(matches!(&pin.name, FieldIntent::Set(value) if value.node == "B"));
+    assert!(matches!(
+        pin.placement.as_ref().unwrap().gap,
+        FieldIntent::Reset(_)
+    ));
+    for source in [
+        "component R { body = rectangle {} pin 1 {on: $body.left, location: (0mil,0mil)} }",
+        "component R { body = rectangle {} pin 1 {on: $body.left, typo: true} }",
+        "component R { body = rectangle {} pin 1 {on: $body.left, gap: null} }",
+        "component R { body = rectangle {} p=pin 1 {on: $body.left, after:$p} }",
+        "component R { body = rectangle {} part 1 { body = line {} pin 1 {on:$body.left} } }",
+    ] {
+        assert!(compile(source).is_err(), "must reject {source}");
+    }
+}
+#[test]
+fn bare_numeric_pin_lengths_remain_mils() {
+    for value in ["25", "25.0", "25mil"] {
+        let pin = pin_for(&format!("length: {value}"));
+        assert!(
+            matches!(pin.length, FieldIntent::Set(value) if value.node == Coord::from_mils_f64(25.0))
+        );
+    }
+}
+#[test]
+fn layout_binding_namespace_rejects_owner_local_collisions() {
+    for source in [
+        "component R { body = rectangle {} body = pin 1 {on:$body.left} }",
+        "component R { let body=1\nbody=rectangle {} }",
+        "component R { swap_group body {} body=rectangle {} }",
+        "component R { part 1 { body=rectangle {} body=pin 1 {} } }",
+        "component R { part 1 { let body=1\nbody=rectangle {} } }",
+    ] {
+        assert!(
+            compile(source).is_err(),
+            "duplicate binding must reject {source}"
+        );
+    }
+    assert!(
+        compile(
+            "component R { body=rectangle {} part 1 { body=rectangle {} pin 1 {on:$body.left} } }"
+        )
+        .is_ok(),
+        "nested owner may intentionally shadow parent"
+    );
+}
+#[test]
+fn inherited_component_graphic_shadows_older_root_value_binding() {
+    let compiled =
+        compile("let body=1\ncomponent R {body=rectangle{} part 1 {pin 1 {on:$body.left}}}")
+            .unwrap();
+    let reference = compiled.components.items[0].parts.items[0].pins.items[0]
+        .placement
+        .as_ref()
+        .unwrap()
+        .graphic
+        .node;
+    assert_eq!(
+        reference,
+        GraphicSourceRef {
+            owner: LayoutOwner::Component,
+            index: 0
+        }
+    );
+}

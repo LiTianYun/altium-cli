@@ -67,7 +67,8 @@ to `float` (see [Expressions](expressions.md)).
 
 A dimension literal is normalized **at evaluation time** to a single `i32` count of Altium
 internal coordinate units and stored as `Value::Dim(i32)`. Altium uses **10,000 internal
-units per mil**. The conversion is `unit_to_internal` in `eval.rs`:
+units per mil**. The conversion is `unit_to_internal` in `eval.rs`, which returns
+a Result and rejects nonfinite or out-of-range rounded coordinates:
 
 | Unit | Literal | Internal units | Factor |
 | ---- | ------- | -------------- | ------ |
@@ -79,11 +80,12 @@ units per mil**. The conversion is `unit_to_internal` in `eval.rs`:
 
 ```
 100mil   →  Value::Dim(1_000_000)
-2.54mm   →  Value::Dim(1_000_000)   // ≈ 100 mil
+2.54mm   →  Value::Dim(1_000_001)   // ≈ 100 mil
 ```
 
 A **bare** number used where a dimension is needed defaults to mils: `Value::to_dim`
-multiplies an `Integer` by 10,000 (with overflow checking) and a `Float` by 10,000 rounded.
+multiplies an `Integer` by 10,000 and a `Float` by 10,000 rounded, with finite/range
+checks before integer conversion. Dimensional float arithmetic uses the same checks.
 So `length: 25` means 25 mil.
 
 `Value::Dim` displays back as a `…mil` string (`display()`), e.g. `Dim(1_000_000)` →

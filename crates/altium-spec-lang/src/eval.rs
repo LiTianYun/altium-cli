@@ -11,6 +11,7 @@
 use std::fmt;
 use std::fmt::Write as FmtWrite;
 
+use altium_format_types::Coord;
 use indexmap::IndexMap;
 
 use crate::ast::{CallArg, Expr, Object, ObjectItem, TemplatePart};
@@ -595,14 +596,14 @@ impl Value {
     pub fn to_dim(&self, span: Option<Span>) -> EvalResult<i32> {
         match self {
             Value::Dim(raw) => Ok(*raw),
-            Value::Integer(n) => Ok(n.checked_mul(10_000).ok_or_else(|| {
+            Value::Integer(n) => Ok(n.checked_mul(Coord::ONE_MIL.raw()).ok_or_else(|| {
                 SpecError::new(
                     SpecErrorCode::ArithmeticOverflow,
                     "integer overflow in mil conversion",
                     span,
                 )
             })?),
-            Value::Float(f) => Ok((*f * 10_000.0).round() as i32),
+            Value::Float(f) => checked_coordinate(*f * f64::from(Coord::ONE_MIL.raw()), span),
             other => Err(SpecError::new(
                 SpecErrorCode::TypeMismatch,
                 format!("expected dimension, got {}", other.kind_name()),
@@ -627,15 +628,40 @@ impl Value {
 
 // ── Unit conversion ───────────────────────────────────────────────────────────
 
-/// Convert a dimensional literal `(value, unit)` to Altium internal units.
-pub fn unit_to_internal(value: f64, unit: Unit) -> i32 {
-    match unit {
-        Unit::Mil => (value * 10_000.0).round() as i32,
-        Unit::Mm => (value * 393_701.0).round() as i32,
-        Unit::Inch => (value * 10_000_000.0).round() as i32,
-        Unit::Dxp => (value * 100_000.0).round() as i32,
-        Unit::Raw => value.round() as i32,
+/// Round a finite coordinate and reject values outside the signed internal-unit
+/// domain before casting. Rust's float-to-integer casts otherwise saturate and
+/// convert NaN to zero, hiding invalid authored geometry.
+fn checked_coordinate(value: f64, span: Option<Span>) -> EvalResult<i32> {
+    let rounded = value.round();
+    if !rounded.is_finite() || rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
+        return Err(SpecError::new(
+            SpecErrorCode::ArithmeticOverflow,
+            format!(
+                "coordinate {value} cannot be represented as a finite signed 32-bit internal-unit value"
+            ),
+            span,
+        ));
     }
+    Ok(rounded as i32)
+}
+
+/// Convert a dimensional literal `(value, unit)` to Altium internal units.
+/// Callers evaluating source expressions attach the literal's source span.
+pub fn unit_to_internal(value: f64, unit: Unit) -> EvalResult<i32> {
+    let scale = match unit {
+        Unit::Mil => f64::from(Coord::ONE_MIL.raw()),
+        Unit::Mm => f64::from(Coord::ONE_MM.raw()),
+        Unit::Inch => f64::from(Coord::ONE_INCH.raw()),
+        Unit::Dxp => f64::from(Coord::DXP_BASE_UNIT),
+        Unit::Raw => 1.0,
+    };
+    checked_coordinate(value * scale, None).map_err(|mut error| {
+        error.message = format!(
+            "converting dimensional literal {value} {unit:?}: {}",
+            error.message
+        );
+        error
+    })
 }
 
 // ── Scope ─────────────────────────────────────────────────────────────────────
@@ -713,6 +739,11 @@ impl ScopeStack {
         None
     }
 
+    /// Inspect only the current lexical owner when resolving layout shadowing.
+    pub(crate) fn lookup_current(&self, name: &str) -> Option<EvalResult<&Value>> {
+        self.scopes.last().and_then(|scope| scope.get(name))
+    }
+
     /// Look up a `$`-prefixed identifier (currently same as regular lookup;
     /// future: could resolve import namespaces separately).
     pub fn lookup_dollar(&self, name: &str) -> Option<EvalResult<&Value>> {
@@ -730,7 +761,14 @@ pub fn eval_expr(expr: &Spanned<Expr>, scope: &ScopeStack) -> EvalResult<Value> 
         Expr::String(s) => Ok(Value::String(s.clone())),
         Expr::Integer(n) => Ok(Value::Integer(*n)),
         Expr::Float(f) => Ok(Value::Float(*f)),
-        Expr::Dim(val, unit) => Ok(Value::Dim(unit_to_internal(*val, *unit))),
+        Expr::Dim(val, unit) => {
+            unit_to_internal(*val, *unit)
+                .map(Value::Dim)
+                .map_err(|mut error| {
+                    error.span = Some(span);
+                    error
+                })
+        }
         Expr::Color(r, g, b) => Ok(Value::Color(*r, *g, *b)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::Null => Ok(Value::Null),
@@ -786,6 +824,16 @@ pub fn eval_expr(expr: &Spanned<Expr>, scope: &ScopeStack) -> EvalResult<Value> 
         }
 
         Expr::UnaryNeg(inner_expr) => {
+            // A signed dimensional literal can represent i32::MIN even though
+            // its positive magnitude is outside the coordinate domain.
+            if let Expr::Dim(value, unit) = &inner_expr.node {
+                return unit_to_internal(-*value, *unit)
+                    .map(Value::Dim)
+                    .map_err(|mut error| {
+                        error.span = Some(span);
+                        error
+                    });
+            }
             let val = eval_expr(inner_expr, scope)?;
             eval_unary_neg(val, span)
         }
@@ -1037,7 +1085,7 @@ fn eval_binop(left: Value, op: BinOp, right: Value, span: Span) -> EvalResult<Va
             })?))
         }
         (Value::Dim(a), BinOp::Mul, Value::Float(b)) => {
-            Ok(Value::Dim((*a as f64 * b).round() as i32))
+            checked_coordinate(f64::from(*a) * b, Some(span)).map(Value::Dim)
         }
         // number * dim → dim
         (Value::Integer(a), BinOp::Mul, Value::Dim(b)) => {
@@ -1050,7 +1098,7 @@ fn eval_binop(left: Value, op: BinOp, right: Value, span: Span) -> EvalResult<Va
             })?))
         }
         (Value::Float(a), BinOp::Mul, Value::Dim(b)) => {
-            Ok(Value::Dim((*b as f64 * a).round() as i32))
+            checked_coordinate(f64::from(*b) * a, Some(span)).map(Value::Dim)
         }
         // dim / number → dim
         (Value::Dim(a), BinOp::Div, Value::Integer(b)) => {
@@ -1061,7 +1109,13 @@ fn eval_binop(left: Value, op: BinOp, right: Value, span: Span) -> EvalResult<Va
                     span,
                 ));
             }
-            Ok(Value::Dim(a / b))
+            a.checked_div(*b).map(Value::Dim).ok_or_else(|| {
+                SpecError::at(
+                    SpecErrorCode::ArithmeticOverflow,
+                    "overflow in dim / int",
+                    span,
+                )
+            })
         }
         (Value::Dim(a), BinOp::Div, Value::Float(b)) => {
             if *b == 0.0 {
@@ -1071,7 +1125,14 @@ fn eval_binop(left: Value, op: BinOp, right: Value, span: Span) -> EvalResult<Va
                     span,
                 ));
             }
-            Ok(Value::Dim((*a as f64 / b).round() as i32))
+            if !b.is_finite() {
+                return Err(SpecError::at(
+                    SpecErrorCode::ArithmeticOverflow,
+                    "dimension divisor must be finite",
+                    span,
+                ));
+            }
+            checked_coordinate(f64::from(*a) / b, Some(span)).map(Value::Dim)
         }
 
         // integer op integer → integer
@@ -1098,7 +1159,13 @@ fn eval_binop(left: Value, op: BinOp, right: Value, span: Span) -> EvalResult<Va
                     span,
                 ));
             }
-            Ok(Value::Integer(a / b))
+            a.checked_div(*b).map(Value::Integer).ok_or_else(|| {
+                SpecError::at(
+                    SpecErrorCode::ArithmeticOverflow,
+                    "overflow in integer division",
+                    span,
+                )
+            })
         }
 
         // float op float → float (and mixed int/float)
@@ -1157,9 +1224,21 @@ fn eval_binop(left: Value, op: BinOp, right: Value, span: Span) -> EvalResult<Va
 
 fn eval_unary_neg(val: Value, span: Span) -> EvalResult<Value> {
     match val {
-        Value::Integer(n) => Ok(Value::Integer(-n)),
+        Value::Integer(n) => n.checked_neg().map(Value::Integer).ok_or_else(|| {
+            SpecError::at(
+                SpecErrorCode::ArithmeticOverflow,
+                "overflow in integer negation",
+                span,
+            )
+        }),
         Value::Float(f) => Ok(Value::Float(-f)),
-        Value::Dim(raw) => Ok(Value::Dim(-raw)),
+        Value::Dim(raw) => raw.checked_neg().map(Value::Dim).ok_or_else(|| {
+            SpecError::at(
+                SpecErrorCode::ArithmeticOverflow,
+                "overflow in dimension negation",
+                span,
+            )
+        }),
         other => Err(SpecError::at(
             SpecErrorCode::UnaryOnNonNumeric,
             format!("unary negation not supported on {}", other.kind_name()),
@@ -1371,12 +1450,9 @@ fn positional_args(args: &[(Option<String>, Value)]) -> Vec<&Value> {
 }
 
 fn require_dim(val: &Value, arg_name: &str, fn_name: &str, span: Span) -> EvalResult<i32> {
-    val.to_dim(Some(span)).map_err(|_| {
-        SpecError::at(
-            SpecErrorCode::TypeMismatch,
-            format!("{fn_name}(): argument '{arg_name}' must be a dimension (e.g., 10mm, 100mil)"),
-            span,
-        )
+    val.to_dim(Some(span)).map_err(|mut error| {
+        error.message = format!("{fn_name}(): argument '{arg_name}': {}", error.message);
+        error
     })
 }
 
@@ -1802,8 +1878,20 @@ fn builtin_abs(args: &[(Option<String>, Value)], span: Span) -> EvalResult<Value
         ));
     }
     match pos[0] {
-        Value::Dim(v) => Ok(Value::Dim(v.abs())),
-        Value::Integer(v) => Ok(Value::Integer(v.abs())),
+        Value::Dim(v) => v.checked_abs().map(Value::Dim).ok_or_else(|| {
+            SpecError::at(
+                SpecErrorCode::ArithmeticOverflow,
+                "overflow in abs(dimension)",
+                span,
+            )
+        }),
+        Value::Integer(v) => v.checked_abs().map(Value::Integer).ok_or_else(|| {
+            SpecError::at(
+                SpecErrorCode::ArithmeticOverflow,
+                "overflow in abs(integer)",
+                span,
+            )
+        }),
         Value::Float(v) => Ok(Value::Float(v.abs())),
         _ => Err(SpecError::at(
             SpecErrorCode::TypeMismatch,
@@ -2104,25 +2192,25 @@ mod tests {
 
     #[test]
     fn unit_conversion_mil() {
-        assert_eq!(unit_to_internal(1.0, Unit::Mil), 10_000);
-        assert_eq!(unit_to_internal(100.0, Unit::Mil), 1_000_000);
+        assert_eq!(unit_to_internal(1.0, Unit::Mil).unwrap(), 10_000);
+        assert_eq!(unit_to_internal(100.0, Unit::Mil).unwrap(), 1_000_000);
     }
 
     #[test]
     fn unit_conversion_mm() {
-        assert_eq!(unit_to_internal(1.0, Unit::Mm), 393_701);
+        assert_eq!(unit_to_internal(1.0, Unit::Mm).unwrap(), 393_701);
         // 2.54mm = round(2.54 * 393_701) = round(1_000_000.54) = 1_000_001
-        assert_eq!(unit_to_internal(2.54, Unit::Mm), 1_000_001);
+        assert_eq!(unit_to_internal(2.54, Unit::Mm).unwrap(), 1_000_001);
     }
 
     #[test]
     fn unit_conversion_inch() {
-        assert_eq!(unit_to_internal(1.0, Unit::Inch), 10_000_000);
+        assert_eq!(unit_to_internal(1.0, Unit::Inch).unwrap(), 10_000_000);
     }
 
     #[test]
     fn unit_conversion_raw() {
-        assert_eq!(unit_to_internal(42.0, Unit::Raw), 42);
+        assert_eq!(unit_to_internal(42.0, Unit::Raw).unwrap(), 42);
     }
 
     // ── Array evaluation ───────────────────────────────────────────────────
@@ -2284,9 +2372,9 @@ mod tests {
                 assert_eq!(cx, 0);
                 assert_eq!(cy, 0);
                 // 100mm / 2 = 50mm = 50 * 393_701 internal units
-                let expected_hw = unit_to_internal(50.0, Unit::Mm);
+                let expected_hw = unit_to_internal(50.0, Unit::Mm).unwrap();
                 assert_eq!(hw, expected_hw);
-                let expected_hh = unit_to_internal(25.0, Unit::Mm);
+                let expected_hh = unit_to_internal(25.0, Unit::Mm).unwrap();
                 assert_eq!(hh, expected_hh);
             }
             other => panic!("expected Shape::Rect, got {:?}", other),
@@ -2318,8 +2406,8 @@ mod tests {
         let val = eval_expr(&expr, &scope).unwrap();
         match val {
             Value::Shape(Shape::Rect { cx, cy, .. }) => {
-                assert_eq!(cx, unit_to_internal(10.0, Unit::Mm));
-                assert_eq!(cy, unit_to_internal(20.0, Unit::Mm));
+                assert_eq!(cx, unit_to_internal(10.0, Unit::Mm).unwrap());
+                assert_eq!(cy, unit_to_internal(20.0, Unit::Mm).unwrap());
             }
             other => panic!("expected Shape::Rect, got {:?}", other),
         }
@@ -2335,10 +2423,10 @@ mod tests {
         let val = eval_expr(&expr, &scope).unwrap();
         match val {
             Value::Shape(Shape::Rect { cx, cy, hw, hh }) => {
-                assert_eq!(cx, unit_to_internal(50.0, Unit::Mm));
-                assert_eq!(cy, unit_to_internal(25.0, Unit::Mm));
-                assert_eq!(hw, unit_to_internal(50.0, Unit::Mm));
-                assert_eq!(hh, unit_to_internal(25.0, Unit::Mm));
+                assert_eq!(cx, unit_to_internal(50.0, Unit::Mm).unwrap());
+                assert_eq!(cy, unit_to_internal(25.0, Unit::Mm).unwrap());
+                assert_eq!(hw, unit_to_internal(50.0, Unit::Mm).unwrap());
+                assert_eq!(hh, unit_to_internal(25.0, Unit::Mm).unwrap());
             }
             other => panic!("expected Shape::Rect, got {:?}", other),
         }
@@ -2360,10 +2448,10 @@ mod tests {
         match val {
             Value::Shape(Shape::Rect { cx, cy, hw, hh }) => {
                 // Center should be at (50mm, 25mm), not (0, 0)
-                assert_eq!(cx, unit_to_internal(50.0, Unit::Mm));
-                assert_eq!(cy, unit_to_internal(25.0, Unit::Mm));
-                assert_eq!(hw, unit_to_internal(50.0, Unit::Mm));
-                assert_eq!(hh, unit_to_internal(25.0, Unit::Mm));
+                assert_eq!(cx, unit_to_internal(50.0, Unit::Mm).unwrap());
+                assert_eq!(cy, unit_to_internal(25.0, Unit::Mm).unwrap());
+                assert_eq!(hw, unit_to_internal(50.0, Unit::Mm).unwrap());
+                assert_eq!(hh, unit_to_internal(25.0, Unit::Mm).unwrap());
             }
             other => panic!("expected Shape::Rect, got {:?}", other),
         }
@@ -2403,7 +2491,7 @@ mod tests {
             Value::Shape(Shape::Circle { cx, cy, radius }) => {
                 assert_eq!(cx, 0);
                 assert_eq!(cy, 0);
-                assert_eq!(radius, unit_to_internal(5.0, Unit::Mm));
+                assert_eq!(radius, unit_to_internal(5.0, Unit::Mm).unwrap());
             }
             other => panic!("expected Shape::Circle, got {:?}", other),
         }
@@ -2427,9 +2515,9 @@ mod tests {
             }) => {
                 assert_eq!(cx, 0);
                 assert_eq!(cy, 0);
-                assert_eq!(hw, unit_to_internal(30.0, Unit::Mm));
-                assert_eq!(hh, unit_to_internal(20.0, Unit::Mm));
-                assert_eq!(radius, unit_to_internal(3.0, Unit::Mm));
+                assert_eq!(hw, unit_to_internal(30.0, Unit::Mm).unwrap());
+                assert_eq!(hh, unit_to_internal(20.0, Unit::Mm).unwrap());
+                assert_eq!(radius, unit_to_internal(3.0, Unit::Mm).unwrap());
             }
             other => panic!("expected Shape::RoundedRect, got {:?}", other),
         }
@@ -2457,8 +2545,8 @@ mod tests {
         match val {
             Value::Shape(Shape::Rect { hw, hh, .. }) => {
                 // Original hw = 50mm, after inset 5mm -> 45mm
-                assert_eq!(hw, unit_to_internal(45.0, Unit::Mm));
-                assert_eq!(hh, unit_to_internal(20.0, Unit::Mm));
+                assert_eq!(hw, unit_to_internal(45.0, Unit::Mm).unwrap());
+                assert_eq!(hh, unit_to_internal(20.0, Unit::Mm).unwrap());
             }
             other => panic!("expected Shape::Rect, got {:?}", other),
         }
@@ -2484,7 +2572,7 @@ mod tests {
         let val = eval_expr(&expr, &scope).unwrap();
         match val {
             Value::Shape(Shape::Circle { radius, .. }) => {
-                assert_eq!(radius, unit_to_internal(12.0, Unit::Mm));
+                assert_eq!(radius, unit_to_internal(12.0, Unit::Mm).unwrap());
             }
             other => panic!("expected Shape::Circle, got {:?}", other),
         }
@@ -2510,8 +2598,8 @@ mod tests {
         let val = eval_expr(&expr, &scope).unwrap();
         match val {
             Value::Shape(Shape::Rect { cx, cy, .. }) => {
-                assert_eq!(cx, unit_to_internal(10.0, Unit::Mm));
-                assert_eq!(cy, unit_to_internal(20.0, Unit::Mm));
+                assert_eq!(cx, unit_to_internal(10.0, Unit::Mm).unwrap());
+                assert_eq!(cy, unit_to_internal(20.0, Unit::Mm).unwrap());
             }
             other => panic!("expected Shape::Rect, got {:?}", other),
         }
@@ -2529,7 +2617,7 @@ mod tests {
             }],
         });
         let val = eval_expr(&expr, &scope).unwrap();
-        assert_eq!(val, Value::Dim(unit_to_internal(100.0, Unit::Mm)));
+        assert_eq!(val, Value::Dim(unit_to_internal(100.0, Unit::Mm).unwrap()));
     }
 
     #[test]
@@ -2544,7 +2632,7 @@ mod tests {
             }],
         });
         let val = eval_expr(&expr, &scope).unwrap();
-        assert_eq!(val, Value::Dim(unit_to_internal(50.0, Unit::Mm)));
+        assert_eq!(val, Value::Dim(unit_to_internal(50.0, Unit::Mm).unwrap()));
     }
 
     #[test]
@@ -2557,7 +2645,7 @@ mod tests {
             spanned("width".to_string()),
         ));
         let val = eval_expr(&expr, &scope).unwrap();
-        assert_eq!(val, Value::Dim(unit_to_internal(60.0, Unit::Mm)));
+        assert_eq!(val, Value::Dim(unit_to_internal(60.0, Unit::Mm).unwrap()));
     }
 
     #[test]
@@ -2565,7 +2653,7 @@ mod tests {
         let scope = make_scope();
         let expr = call("min", vec![dim(10.0, Unit::Mm), dim(5.0, Unit::Mm)]);
         let val = eval_expr(&expr, &scope).unwrap();
-        assert_eq!(val, Value::Dim(unit_to_internal(5.0, Unit::Mm)));
+        assert_eq!(val, Value::Dim(unit_to_internal(5.0, Unit::Mm).unwrap()));
     }
 
     #[test]
@@ -2588,7 +2676,7 @@ mod tests {
         );
         let val = eval_expr(&expr, &scope).unwrap();
         // 1mm clamped to [5mm, 10mm] = 5mm
-        assert_eq!(val, Value::Dim(unit_to_internal(5.0, Unit::Mm)));
+        assert_eq!(val, Value::Dim(unit_to_internal(5.0, Unit::Mm).unwrap()));
     }
 
     #[test]
@@ -2604,7 +2692,7 @@ mod tests {
             }],
         });
         let val = eval_expr(&expr, &scope).unwrap();
-        assert_eq!(val, Value::Dim(unit_to_internal(10.0, Unit::Mm)));
+        assert_eq!(val, Value::Dim(unit_to_internal(10.0, Unit::Mm).unwrap()));
     }
 
     #[test]
@@ -2754,5 +2842,175 @@ mod tests {
         let points = spanned(Expr::Array(vec![]));
         let expr = call("polygon", vec![points]);
         assert!(eval_expr(&expr, &scope).is_err());
+    }
+
+    #[test]
+    fn coordinate_conversions_reject_nonfinite_and_overflow_before_casting() {
+        for value in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            -f64::MAX,
+        ] {
+            for unit in [Unit::Mil, Unit::Mm, Unit::Inch, Unit::Dxp, Unit::Raw] {
+                let error = unit_to_internal(value, unit).unwrap_err();
+                assert_eq!(
+                    error.code,
+                    SpecErrorCode::ArithmeticOverflow,
+                    "{value} {unit:?}"
+                );
+            }
+            let location = Span::new(7, 19);
+            let error = Value::Float(value).to_dim(Some(location)).unwrap_err();
+            assert_eq!(error.code, SpecErrorCode::ArithmeticOverflow);
+            assert_eq!(error.span, Some(location));
+        }
+        let source = "component Overflow { pin 1 { length: 999999999999mil } }";
+        let ast = crate::parser::parse_spec(source).unwrap();
+        let crate::ast::SpecItem::Component(component) = &ast.items[0].node else {
+            panic!("component")
+        };
+        let crate::ast::ComponentItem::Pin(pin) = &component.body[0].node else {
+            panic!("pin")
+        };
+        let crate::ast::ObjectItem::Property(property) = &pin.body.node.items[0].node else {
+            panic!("property")
+        };
+        let error = eval_expr(&property.value, &make_scope()).unwrap_err();
+        assert_eq!(error.code, SpecErrorCode::ArithmeticOverflow);
+        assert_eq!(error.span, Some(property.value.span));
+        assert_eq!(
+            &source[property.value.span.start as usize..property.value.span.end as usize],
+            "999999999999mil"
+        );
+    }
+
+    #[test]
+    fn coordinate_rounding_accepts_exact_signed_boundaries_and_rejects_the_next_unit() {
+        for (value, expected) in [
+            (f64::from(i32::MAX), i32::MAX),
+            (f64::from(i32::MIN), i32::MIN),
+            (f64::from(i32::MAX) + 0.49, i32::MAX),
+            (f64::from(i32::MIN) - 0.49, i32::MIN),
+            (0.5, 1),
+            (-0.5, -1),
+        ] {
+            assert_eq!(unit_to_internal(value, Unit::Raw).unwrap(), expected);
+        }
+        for value in [f64::from(i32::MAX) + 0.5, f64::from(i32::MIN) - 0.5] {
+            assert_eq!(
+                unit_to_internal(value, Unit::Raw).unwrap_err().code,
+                SpecErrorCode::ArithmeticOverflow
+            );
+        }
+        assert_eq!(
+            unit_to_internal(1.0, Unit::Dxp).unwrap(),
+            Coord::DXP_BASE_UNIT
+        );
+        assert_eq!(
+            Value::Float(f64::from(i32::MAX) / f64::from(Coord::ONE_MIL.raw()))
+                .to_dim(None)
+                .unwrap(),
+            i32::MAX
+        );
+        assert_eq!(
+            Value::Float(f64::from(i32::MIN) / f64::from(Coord::ONE_MIL.raw()))
+                .to_dim(None)
+                .unwrap(),
+            i32::MIN
+        );
+        let expr = Spanned::new(
+            Expr::UnaryNeg(Box::new(Spanned::new(
+                Expr::Dim(-f64::from(i32::MIN), Unit::Raw),
+                Span::new(1, 14),
+            ))),
+            Span::new(0, 14),
+        );
+        assert_eq!(
+            eval_expr(&expr, &make_scope()).unwrap(),
+            Value::Dim(i32::MIN)
+        );
+    }
+
+    #[test]
+    fn dimensional_float_arithmetic_is_checked_in_both_operand_orders() {
+        let location = Span::new(21, 39);
+        for (left, op, right) in [
+            (Value::Dim(i32::MAX), BinOp::Mul, Value::Float(2.0)),
+            (Value::Float(2.0), BinOp::Mul, Value::Dim(i32::MAX)),
+            (Value::Dim(i32::MIN), BinOp::Div, Value::Float(-1.0)),
+            (Value::Dim(1), BinOp::Div, Value::Float(f64::MIN_POSITIVE)),
+            (Value::Dim(1), BinOp::Div, Value::Float(f64::INFINITY)),
+            (Value::Dim(0), BinOp::Mul, Value::Float(f64::INFINITY)),
+            (Value::Float(f64::NAN), BinOp::Mul, Value::Dim(1)),
+        ] {
+            let error = eval_binop(left, op, right, location).unwrap_err();
+            assert_eq!(error.code, SpecErrorCode::ArithmeticOverflow);
+            assert_eq!(error.span, Some(location));
+        }
+        assert_eq!(
+            eval_binop(
+                Value::Dim(i32::MAX),
+                BinOp::Mul,
+                Value::Float(1.0),
+                location
+            )
+            .unwrap(),
+            Value::Dim(i32::MAX)
+        );
+        assert_eq!(
+            eval_binop(
+                Value::Float(1.0),
+                BinOp::Mul,
+                Value::Dim(i32::MIN),
+                location
+            )
+            .unwrap(),
+            Value::Dim(i32::MIN)
+        );
+        assert_eq!(
+            eval_binop(Value::Dim(3), BinOp::Div, Value::Float(2.0), location).unwrap(),
+            Value::Dim(2)
+        );
+    }
+
+    #[test]
+    fn signed_integer_division_overflow_errors_instead_of_panicking() {
+        let location = Span::new(2, 9);
+        for left in [Value::Integer(i32::MIN), Value::Dim(i32::MIN)] {
+            let error =
+                eval_binop(left.clone(), BinOp::Div, Value::Integer(-1), location).unwrap_err();
+            assert_eq!(error.code, SpecErrorCode::ArithmeticOverflow);
+            assert_eq!(error.span, Some(location));
+            assert_eq!(
+                eval_binop(left, BinOp::Div, Value::Integer(0), location)
+                    .unwrap_err()
+                    .code,
+                SpecErrorCode::DivisionByZero
+            );
+        }
+        let error =
+            require_dim(&Value::Float(f64::INFINITY), "width", "rect", location).unwrap_err();
+        assert_eq!(error.code, SpecErrorCode::ArithmeticOverflow);
+        assert!(error.message.contains("rect(): argument 'width'"));
+        assert_eq!(error.span, Some(location));
+    }
+    #[test]
+    fn signed_minimum_composed_negation_and_absolute_value_return_contextual_errors() {
+        for source in [
+            "let x = -(-2147483648raw)",
+            "let x = -(-2147483647 - 1)",
+            "let x = abs(-2147483648raw)",
+            "let x = abs(-2147483647 - 1)",
+        ] {
+            let ast = crate::parser::parse_spec(source).unwrap();
+            let crate::ast::SpecItem::LetBinding(binding) = &ast.items[0].node else {
+                panic!("let")
+            };
+            let error = eval_expr(&binding.value, &make_scope()).unwrap_err();
+            assert_eq!(error.code, SpecErrorCode::ArithmeticOverflow, "{source}");
+            assert_eq!(error.span, Some(binding.value.span), "{source}");
+        }
     }
 }
