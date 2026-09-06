@@ -56,6 +56,9 @@ pub struct PinPlacementIntent {
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct AutoSizeIntent {
+    /// Omission derives a separate margin from each chain root's gap. Set uses
+    /// the authored common margin; explicit inherit/reset selects the versioned
+    /// AUTO_PADDING default (20mil), independent of source declaration order.
     pub padding: FieldIntent<Coord>,
     pub min_width: FieldIntent<Coord>,
     pub min_height: FieldIntent<Coord>,
@@ -657,6 +660,323 @@ fn eval_order(
     Ok(())
 }
 
+// Each dependency chain is an exact boundary/center expression plus a checked
+// translation. Same-edge references keep width and height constraints separable.
+#[derive(Debug, Clone, Copy)]
+enum AlongBase {
+    Low,
+    High,
+    Center,
+    Absolute(Coord),
+}
+#[derive(Debug, Clone, Copy)]
+struct CoordinateExpr {
+    base: AlongBase,
+    offset: i64,
+    span: Span,
+}
+impl CoordinateExpr {
+    fn value(self, low: i64, high: i64) -> Result<i64, SpecError> {
+        let base = match self.base {
+            AlongBase::Low => low,
+            AlongBase::High => high,
+            AlongBase::Center => (low + high) / 2,
+            AlongBase::Absolute(value) => i64::from(value.raw()),
+        };
+        base.checked_add(self.offset)
+            .ok_or_else(|| error("layout chain coordinate overflow", self.span))
+    }
+    fn translated(self, offset: i64, span: Span) -> Result<Self, SpecError> {
+        Ok(Self {
+            base: self.base,
+            offset: self
+                .offset
+                .checked_add(offset)
+                .ok_or_else(|| error("layout chain offset overflow", span))?,
+            span,
+        })
+    }
+}
+#[derive(Debug, Clone, Copy)]
+struct AlongConstraint {
+    position: CoordinateExpr,
+    margin: Coord,
+}
+#[derive(Debug, Default)]
+struct AxisConstraints {
+    inside: Vec<AlongConstraint>,
+    coordinates: Vec<CoordinateExpr>,
+}
+#[derive(Debug, Clone, Copy)]
+enum AxisOrigin {
+    Centered,
+    Minimum(Coord),
+    Maximum(Coord),
+}
+impl AxisOrigin {
+    fn bounds(self, size: i64) -> (i64, i64) {
+        match self {
+            Self::Centered => (-size / 2, size - size / 2),
+            Self::Minimum(value) => (i64::from(value.raw()), i64::from(value.raw()) + size),
+            Self::Maximum(value) => (i64::from(value.raw()) - size, i64::from(value.raw())),
+        }
+    }
+    fn maximum_size(self) -> i64 {
+        match self {
+            Self::Centered => 2 * i64::from(i32::MAX),
+            Self::Minimum(value) => i64::from(i32::MAX) - i64::from(value.raw()),
+            Self::Maximum(value) => i64::from(value.raw()) - i64::from(i32::MIN),
+        }
+    }
+}
+fn first_satisfying(
+    mut low: i64,
+    mut high: i64,
+    mut predicate: impl FnMut(i64) -> Result<bool, SpecError>,
+) -> Result<i64, SpecError> {
+    // Caller proves the high endpoint satisfies a monotone predicate.
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if predicate(middle)? {
+            high = middle
+        } else {
+            low = middle + 1
+        }
+    }
+    Ok(low)
+}
+fn last_satisfying(
+    mut low: i64,
+    mut high: i64,
+    mut predicate: impl FnMut(i64) -> Result<bool, SpecError>,
+) -> Result<i64, SpecError> {
+    // Caller proves the low endpoint satisfies a monotone decreasing predicate.
+    while low < high {
+        let middle = low + (high - low + 1) / 2;
+        if predicate(middle)? {
+            low = middle
+        } else {
+            high = middle - 1
+        }
+    }
+    Ok(low)
+}
+/// Compute the exact feasible integer-size interval for a monotone coordinate,
+/// accounting for pin connection offsets as well as the box's own Coord bounds.
+fn coordinate_size_interval(
+    origin: AxisOrigin,
+    expr: CoordinateExpr,
+) -> Result<(i64, i64), SpecError> {
+    let maximum = origin.maximum_size();
+    let value = |size| {
+        let (low, high) = origin.bounds(size);
+        expr.value(low, high)
+    };
+    let first = value(0)?;
+    let last = value(maximum)?;
+    let min = i64::from(i32::MIN);
+    let max = i64::from(i32::MAX);
+    let impossible = || {
+        error(
+            "auto-size constraints have no representable pin coordinate",
+            expr.span,
+        )
+    };
+    if first <= last {
+        if last < min || first > max {
+            return Err(impossible());
+        }
+        let lower = if first >= min {
+            0
+        } else {
+            first_satisfying(0, maximum, |size| Ok(value(size)? >= min))?
+        };
+        let upper = if last <= max {
+            maximum
+        } else {
+            last_satisfying(0, maximum, |size| Ok(value(size)? <= max))?
+        };
+        Ok((lower, upper))
+    } else {
+        if first < min || last > max {
+            return Err(impossible());
+        }
+        let lower = if first <= max {
+            0
+        } else {
+            first_satisfying(0, maximum, |size| Ok(value(size)? <= max))?
+        };
+        let upper = if last >= min {
+            maximum
+        } else {
+            last_satisfying(0, maximum, |size| Ok(value(size)? >= min))?
+        };
+        Ok((lower, upper))
+    }
+}
+fn solve_axis(
+    origin: AxisOrigin,
+    minimum: Coord,
+    constraints: &AxisConstraints,
+    span: Span,
+) -> Result<i64, SpecError> {
+    if minimum.raw() < 0 {
+        return Err(error("auto-size minimum must be nonnegative", span));
+    }
+    let mut lower = i64::from(minimum.raw());
+    let mut upper = origin.maximum_size();
+    for coordinate in &constraints.coordinates {
+        let (low, high) = coordinate_size_interval(origin, *coordinate)?;
+        lower = lower.max(low);
+        upper = upper.min(high);
+        if lower > upper {
+            return Err(error(
+                "auto-size constraints have no common representable size",
+                coordinate.span,
+            ));
+        }
+    }
+    if lower > upper {
+        return Err(error(
+            "auto-size minimum exceeds representable box bounds",
+            span,
+        ));
+    }
+    let violated = |size| -> Result<Option<Span>, SpecError> {
+        let (low, high) = origin.bounds(size);
+        for constraint in &constraints.inside {
+            let position = constraint.position.value(low, high)?;
+            let margin = i64::from(constraint.margin.raw());
+            if position < low + margin || position > high - margin {
+                return Ok(Some(constraint.position.span));
+            }
+        }
+        Ok(None)
+    };
+    if let Some(source) = violated(upper)? {
+        return Err(error(
+            "auto-size constraints cannot satisfy this anchor's edge margins at any representable size; revise its start/end, gap, offset, or sequence",
+            source,
+        ));
+    }
+    // Every containment distance is monotone in size for Low/High/Center/
+    // Absolute roots, including truncation-toward-zero integer center rounding.
+    first_satisfying(lower, upper, |size| Ok(violated(size)?.is_none()))
+}
+fn auto_constraints(
+    target: GraphicSourceRef,
+    placements: &[Option<PinPlacementIntent>],
+    effective_pins: &[EffectivePinGeometry],
+    order: &[usize],
+    padding: Option<Coord>,
+) -> Result<(AxisConstraints, AxisConstraints, Vec<(usize, Coord)>), SpecError> {
+    let mut x = AxisConstraints::default();
+    let mut y = AxisConstraints::default();
+    let mut along: Vec<Option<AlongConstraint>> = vec![None; placements.len()];
+    let mut margins = Vec::new();
+    for index in order {
+        let Some(p) = &placements[*index] else {
+            continue;
+        };
+        if p.graphic.node != target {
+            continue;
+        }
+        let edge = p.edge.node;
+        let gap = ANCHOR_GAP.definition(&p.gap)?;
+        let offset = ANCHOR_OFFSET.definition(&p.offset)?;
+        let length = effective_pins[*index].length;
+        if gap.raw() < 0 || length.raw() < 0 {
+            return Err(error(
+                "anchor gap and effective pin length must be nonnegative",
+                p.span,
+            ));
+        }
+        let along_offset = i64::from(if edge.vertical() {
+            offset.y.raw()
+        } else {
+            offset.x.raw()
+        });
+        let fixed_offset = i64::from(if edge.vertical() {
+            offset.x.raw()
+        } else {
+            offset.y.raw()
+        });
+        let side = match ANCHOR_SIDE.definition(&p.side)? {
+            PlacementSide::Outside => 1,
+            PlacementSide::Inside => -1,
+            PlacementSide::Center => 0,
+        };
+        let fixed = CoordinateExpr {
+            base: if edge.outward() < 0 {
+                AlongBase::Low
+            } else {
+                AlongBase::High
+            },
+            offset: edge.outward() * side * i64::from(length.raw()) + fixed_offset,
+            span: p.span,
+        };
+        let (position, margin) = if let Some((reference, after)) = dependency(p.position.node) {
+            let dependency = along[reference.index];
+            let base = dependency.map(|value| value.position).unwrap_or_else(|| {
+                let location = effective_pins[reference.index].location;
+                CoordinateExpr {
+                    base: AlongBase::Absolute(if edge.vertical() {
+                        location.y
+                    } else {
+                        location.x
+                    }),
+                    offset: 0,
+                    span: p.span,
+                }
+            });
+            let translation = edge.direction() * i64::from(gap.raw()) * if after { 1 } else { -1 };
+            (
+                base.translated(translation, p.span)?
+                    .translated(along_offset, p.span)?,
+                padding.unwrap_or_else(|| dependency.map(|value| value.margin).unwrap_or(gap)),
+            )
+        } else {
+            let (base, translation) = match p.position.node {
+                AnchorPosition::Start => {
+                    if edge.direction() > 0 {
+                        (AlongBase::Low, i64::from(gap.raw()))
+                    } else {
+                        (AlongBase::High, -i64::from(gap.raw()))
+                    }
+                }
+                AnchorPosition::End => {
+                    if edge.direction() > 0 {
+                        (AlongBase::High, -i64::from(gap.raw()))
+                    } else {
+                        (AlongBase::Low, i64::from(gap.raw()))
+                    }
+                }
+                _ => (AlongBase::Center, 0),
+            };
+            (
+                CoordinateExpr {
+                    base,
+                    offset: translation,
+                    span: p.span,
+                }
+                .translated(along_offset, p.span)?,
+                padding.unwrap_or(gap),
+            )
+        };
+        let constraint = AlongConstraint { position, margin };
+        along[*index] = Some(constraint);
+        margins.push((*index, margin));
+        if edge.vertical() {
+            y.inside.push(constraint);
+            x.coordinates.push(fixed)
+        } else {
+            x.inside.push(constraint);
+            y.coordinates.push(fixed)
+        }
+    }
+    Ok((x, y, margins))
+}
+
 /// Evaluate only after the caller resolves each native field against target,
 /// imported base, and defaults. In particular an absent pin length is supplied
 /// from its target, rather than silently replaced by the creation default.
@@ -715,7 +1035,7 @@ pub fn evaluate_layout(
         }
     }
     let mut graphics = vec![None; auto_sizes.len()];
-    let mut auto_margins: BTreeMap<(GraphicSourceRef, AnchorEdge), Coord> = BTreeMap::new();
+    let mut auto_margins: BTreeMap<usize, Coord> = BTreeMap::new();
     for (index, auto) in auto_sizes.iter().enumerate() {
         let Some(auto) = auto else { continue };
         if !auto.infer_from && !auto.infer_to {
@@ -726,63 +1046,48 @@ pub fn evaluate_layout(
         }
         let target = GraphicSourceRef { owner, index };
         let explicit_padding = if auto.padding.is_authored() {
-            Some(i64::from(AUTO_PADDING.definition(&auto.padding)?.raw()))
+            Some(AUTO_PADDING.definition(&auto.padding)?)
         } else {
             None
         };
-        if explicit_padding.is_some_and(|padding| padding < 0) {
+        if explicit_padding.is_some_and(|padding| padding.raw() < 0) {
             return Err(error("auto-size padding must be nonnegative", auto.span));
         }
-        let mut extents: BTreeMap<AnchorEdge, (i64, i64)> = BTreeMap::new();
-        for pin_index in &order {
-            if let Some(p) = &placements[*pin_index] {
-                if p.graphic.node == target {
-                    let gap = i64::from(ANCHOR_GAP.definition(&p.gap)?.raw());
-                    if gap < 0 {
-                        return Err(error("anchor gap must be nonnegative", p.span));
-                    }
-                    if let Some(entry) = extents.get_mut(&p.edge.node) {
-                        entry.1 = entry
-                            .1
-                            .checked_add(gap)
-                            .ok_or_else(|| error("auto-size extent overflow", auto.span))?;
-                    } else {
-                        let padding = explicit_padding.unwrap_or(gap);
-                        extents.insert(p.edge.node, (padding, 0));
-                    }
-                }
-            }
+        let (x_constraints, y_constraints, margins) =
+            auto_constraints(target, placements, effective_pins, &order, explicit_padding)?;
+        for (index, margin) in margins {
+            auto_margins.insert(index, margin);
         }
-        for (edge, (padding, _)) in &extents {
-            let padding = i32::try_from(*padding)
-                .map(Coord::new)
-                .map_err(|_| error("auto-size margin overflow", auto.span))?;
-            auto_margins.insert((target, *edge), padding);
-        }
-        let extent = |edge| -> Result<i64, SpecError> {
-            let (padding, gaps) = extents.get(&edge).copied().unwrap_or((0, 0));
-            padding
-                .checked_mul(2)
-                .and_then(|v| v.checked_add(gaps))
-                .ok_or_else(|| error("auto-size extent overflow", auto.span))
-        };
-        let min_width = i64::from(AUTO_MIN_WIDTH.definition(&auto.min_width)?.raw());
-        let min_height = i64::from(AUTO_MIN_HEIGHT.definition(&auto.min_height)?.raw());
-        if min_width < 0 || min_height < 0 || extents.values().any(|(padding, _)| *padding < 0) {
-            return Err(error("auto-size dimensions must be nonnegative", auto.span));
-        }
-        let width = min_width
-            .max(extent(AnchorEdge::Top)?)
-            .max(extent(AnchorEdge::Bottom)?);
-        let height = min_height
-            .max(extent(AnchorEdge::Left)?)
-            .max(extent(AnchorEdge::Right)?);
         let existing = effective_graphics[index].ok_or_else(|| {
             error(
                 "auto-size source slot has no effective box geometry",
                 auto.span,
             )
         })?;
+        let (x_origin, y_origin) = match (auto.infer_from, auto.infer_to) {
+            (true, true) => (AxisOrigin::Centered, AxisOrigin::Centered),
+            (false, true) => (
+                AxisOrigin::Minimum(existing.from.x),
+                AxisOrigin::Minimum(existing.from.y),
+            ),
+            (true, false) => (
+                AxisOrigin::Maximum(existing.to.x),
+                AxisOrigin::Maximum(existing.to.y),
+            ),
+            _ => unreachable!("validated inferred corner"),
+        };
+        let width = solve_axis(
+            x_origin,
+            AUTO_MIN_WIDTH.definition(&auto.min_width)?,
+            &x_constraints,
+            auto.span,
+        )?;
+        let height = solve_axis(
+            y_origin,
+            AUTO_MIN_HEIGHT.definition(&auto.min_height)?,
+            &y_constraints,
+            auto.span,
+        )?;
         let geom = match (auto.infer_from, auto.infer_to) {
             (true, true) => BoxGeometry {
                 from: xy(-width / 2, -height / 2, auto.span)?,
@@ -878,7 +1183,7 @@ pub fn evaluate_layout(
             y + i64::from(offset.y.raw()),
             p.span,
         )?;
-        if let Some(margin) = auto_margins.get(&(p.graphic.node, edge)) {
+        if let Some(margin) = auto_margins.get(&index) {
             let varying = i64::from(if edge.vertical() {
                 location.y.raw()
             } else {
@@ -887,7 +1192,7 @@ pub fn evaluate_layout(
             let margin = i64::from(margin.raw());
             if varying < min + margin || varying > max - margin {
                 return Err(error(
-                    "auto-size cannot contain this anchor chain within its edge margins; author explicit box bounds or revise the start/end, gap, offset, or sequence constraints",
+                    "auto-size solver invariant failed: evaluated pin violates solved edge margins",
                     p.span,
                 ));
             }
@@ -1070,11 +1375,11 @@ mod tests {
         )
         .unwrap();
         let geometry = evaluated.graphics[0].unwrap();
-        assert_eq!(geometry.from.y.to_mils(), -22.5);
-        assert_eq!(geometry.to.y.to_mils(), 22.5);
-        assert_eq!(evaluated.pins[1].unwrap().location.y.to_mils(), 12.5);
-        assert_eq!(evaluated.pins[2].unwrap().location.y.to_mils(), -7.5);
-        assert_eq!(evaluated.pins[0].unwrap().location.y.to_mils(), -2.5);
+        assert_eq!(geometry.from.y.to_mils(), -20.0);
+        assert_eq!(geometry.to.y.to_mils(), 20.0);
+        assert_eq!(evaluated.pins[1].unwrap().location.y.to_mils(), 10.0);
+        assert_eq!(evaluated.pins[2].unwrap().location.y.to_mils(), -10.0);
+        assert_eq!(evaluated.pins[0].unwrap().location.y.to_mils(), -5.0);
     }
     #[test]
     fn offsets_inside_center_and_explicit_orientation_survive_chain_resolution() {
@@ -1263,12 +1568,245 @@ mod tests {
             );
         }
     }
+    fn run_auto(source: &str) -> EvaluatedLayout {
+        let compiled = compile(source);
+        let pins = vec![effective(25); compiled.placements.len()];
+        let graphics = vec![Some(box100()); compiled.auto_sizes.len()];
+        evaluate_layout(
+            LayoutOwner::Component,
+            &compiled.placements,
+            &compiled.auto_sizes,
+            &pins,
+            &graphics,
+            &BTreeMap::new(),
+        )
+        .unwrap()
+    }
     #[test]
-    fn unsupported_centered_or_outward_auto_size_chains_block_with_source_context() {
-        for body in [
-            "root=pin 1 {on:$body.left,at:center,gap:10mil} a=pin 2 {after:$root,gap:50mil} b=pin 3 {after:$a,gap:50mil}",
-            "root=pin 1 {on:$body.left,at:start,gap:10mil} pin 2 {before:$root,gap:5mil}",
+    fn centered_branching_chains_solve_exact_extrema_instead_of_summing_gaps() {
+        let evaluated = run_auto(
+            "component R {body=rectangle {min_height:1mil} root=pin 1 {on:$body.left,at:center,gap:10mil} a=pin 2 {after:$root,gap:50mil} b=pin 3 {after:$a,gap:50mil} c=pin 4 {before:$root,gap:30mil} }",
+        );
+        let bounds = evaluated.graphics[0].unwrap();
+        assert_eq!(bounds.from.y, mil(-110));
+        assert_eq!(bounds.to.y, mil(110));
+        assert_eq!(
+            evaluated
+                .pins
+                .iter()
+                .map(|pin| pin.unwrap().location.y.to_mils())
+                .collect::<Vec<_>>(),
+            vec![0.0, -50.0, -100.0, 30.0]
+        );
+        // The negative branch requires 100mil plus its root's 10mil margin.
+        // A one-internal-unit smaller height would violate that exact bound.
+        assert_eq!(bounds.to.y.raw() - bounds.from.y.raw(), mil(220).raw());
+    }
+    #[test]
+    fn multiple_root_margins_are_independent_of_declaration_order_and_minima_hold() {
+        let first = "a=pin 1 {on:$body.left,at:start,gap:10mil} b=pin 2 {on:$body.left,at:center,gap:50mil}";
+        let second = "b=pin 2 {on:$body.left,at:center,gap:50mil} a=pin 1 {on:$body.left,at:start,gap:10mil}";
+        let a = run_auto(&format!(
+            "component R {{body=rectangle {{min_width:130mil,min_height:1mil}} {first}}}"
+        ));
+        let b = run_auto(&format!(
+            "component R {{body=rectangle {{min_width:130mil,min_height:1mil}} {second}}}"
+        ));
+        assert_eq!(a.graphics, b.graphics);
+        let bounds = a.graphics[0].unwrap();
+        assert_eq!(bounds.to.y.raw() - bounds.from.y.raw(), mil(100).raw());
+        assert_eq!(bounds.to.x.raw() - bounds.from.x.raw(), mil(130).raw());
+        assert_eq!(a.pins[0], b.pins[1]);
+        assert_eq!(a.pins[1], b.pins[0]);
+        let reset = run_auto(
+            "component R {body=rectangle {padding:reset,min_height:1mil,min_width:1mil} pin 1 {on:$body.left,at:center,gap:50mil}}",
+        );
+        let bounds = reset.graphics[0].unwrap();
+        assert_eq!(bounds.to.y.raw() - bounds.from.y.raw(), mil(40).raw());
+    }
+    #[test]
+    fn explicit_corners_and_absolute_effective_dependencies_are_preserved() {
+        for (corner, value, infer_from) in [
+            ("from", location(-40, -30), false),
+            ("to", location(40, 30), true),
         ] {
+            let source = format!(
+                "component R {{body=rectangle {{{corner}:({}mil,{}mil),min_width:1mil,min_height:1mil}} anchor=pin 1 {{}} pin 2 {{on:$body.left,after:$anchor,gap:10mil,offset:(0mil,5mil)}}}}",
+                value.x.to_mils(),
+                value.y.to_mils()
+            );
+            let compiled = compile(&source);
+            let mut reference = effective(25);
+            reference.location = location(0, 70);
+            let existing = if infer_from {
+                BoxGeometry {
+                    from: CoordPoint::zero(),
+                    to: value,
+                }
+            } else {
+                BoxGeometry {
+                    from: value,
+                    to: CoordPoint::zero(),
+                }
+            };
+            let result = evaluate_layout(
+                LayoutOwner::Component,
+                &compiled.placements,
+                &compiled.auto_sizes,
+                &[reference, effective(25)],
+                &[Some(existing)],
+                &BTreeMap::new(),
+            );
+            if infer_from {
+                // The fixed upper Y=30mil cannot contain absolute dependency Y65
+                // with its 10mil margin for any size.
+                assert!(result.is_err());
+            } else {
+                let evaluated = result.unwrap();
+                let bounds = evaluated.graphics[0].unwrap();
+                assert_eq!(bounds.from, value);
+                assert_eq!(bounds.to.y, mil(75));
+                assert_eq!(evaluated.pins[1].unwrap().location.y, mil(65));
+            }
+        }
+        let compiled = compile(
+            "component R {body=rectangle {to:(40mil,30mil),min_height:1mil} root=pin 1 {on:$body.right,at:center,gap:10mil} pin 2 {after:$root,gap:40mil}}",
+        );
+        let existing = BoxGeometry {
+            from: CoordPoint::zero(),
+            to: location(40, 30),
+        };
+        let evaluated = evaluate_layout(
+            LayoutOwner::Component,
+            &compiled.placements,
+            &compiled.auto_sizes,
+            &[effective(25); 2],
+            &[Some(existing)],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(evaluated.graphics[0].unwrap().to, location(40, 30));
+        assert_eq!(evaluated.graphics[0].unwrap().from.y, mil(-70));
+    }
+    #[test]
+    fn effective_pin_length_and_offsets_constrain_representable_auto_width() {
+        let compiled = compile("component R {body=rectangle {} pin 1 {on:$body.left,side:inside}}");
+        let mut placements = compiled.placements.clone();
+        placements[0].as_mut().unwrap().offset = FieldIntent::Set(Spanned::new(
+            CoordPoint::new(Coord::new(i32::MAX), Coord::ZERO),
+            Span::new(1, 2),
+        ));
+        let mut pin = effective(25);
+        pin.length = Coord::new(i32::MAX);
+        let evaluated = evaluate_layout(
+            LayoutOwner::Component,
+            &placements,
+            &compiled.auto_sizes,
+            &[pin],
+            &[Some(box100())],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(evaluated.graphics[0].unwrap().from.x, Coord::new(-i32::MAX));
+        assert_eq!(evaluated.graphics[0].unwrap().to.x, Coord::new(i32::MAX));
+        assert_eq!(evaluated.pins[0].unwrap().location.x, Coord::new(i32::MAX));
+    }
+    #[test]
+    fn individually_representable_pin_constraints_with_empty_intersection_error() {
+        let compiled = compile(
+            "component R {body=rectangle {min_width:0mil} pin 1 {on:$body.left,side:inside,offset:(0.01mil,0mil),gap:0mil} pin 2 {on:$body.right,offset:(-0.001mil,0mil),gap:0mil}}",
+        );
+        let mut pin = effective(25);
+        pin.length = Coord::new(i32::MAX);
+        let error = evaluate_layout(
+            LayoutOwner::Component,
+            &compiled.placements,
+            &compiled.auto_sizes,
+            &[pin; 2],
+            &[Some(box100())],
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("no common representable size"),
+            "{error}"
+        );
+        assert!(error.span.is_some());
+    }
+    #[test]
+    fn exact_integer_solver_matches_exhaustive_center_and_corner_rounding() {
+        let span = Span::new(1, 2);
+        for origin in [
+            AxisOrigin::Centered,
+            AxisOrigin::Minimum(Coord::new(-7)),
+            AxisOrigin::Maximum(Coord::new(9)),
+        ] {
+            for base in [
+                AlongBase::Low,
+                AlongBase::High,
+                AlongBase::Center,
+                AlongBase::Absolute(Coord::new(13)),
+            ] {
+                for offset in -15..=15 {
+                    for margin in 0..=3 {
+                        let constraint = AlongConstraint {
+                            position: CoordinateExpr { base, offset, span },
+                            margin: Coord::new(margin),
+                        };
+                        let expected = (0..=200).find(|size| {
+                            let (low, high) = origin.bounds(*size);
+                            let value = constraint.position.value(low, high).unwrap();
+                            value >= low + i64::from(margin) && value <= high - i64::from(margin)
+                        });
+                        let result = solve_axis(
+                            origin,
+                            Coord::ZERO,
+                            &AxisConstraints {
+                                inside: vec![constraint],
+                                coordinates: Vec::new(),
+                            },
+                            span,
+                        );
+                        assert_eq!(
+                            result.ok(),
+                            expected,
+                            "{origin:?} {base:?} offset={offset} margin={margin}"
+                        );
+                    }
+                }
+            }
+        }
+        for origin in [
+            AxisOrigin::Minimum(Coord::new(i32::MAX - 100)),
+            AxisOrigin::Maximum(Coord::new(i32::MIN + 100)),
+        ] {
+            for base in [AlongBase::Low, AlongBase::High, AlongBase::Center] {
+                for offset in [-150, -1, 0, 1, 150] {
+                    let expr = CoordinateExpr { base, offset, span };
+                    let sizes = (0..=100)
+                        .filter(|size| {
+                            let (low, high) = origin.bounds(*size);
+                            let value = expr.value(low, high).unwrap();
+                            i32::try_from(value).is_ok()
+                        })
+                        .collect::<Vec<_>>();
+                    let expected = sizes
+                        .first()
+                        .zip(sizes.last())
+                        .map(|(first, last)| (*first, *last));
+                    assert_eq!(
+                        coordinate_size_interval(origin, expr).ok(),
+                        expected,
+                        "{origin:?} {base:?} offset={offset}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn impossible_outward_auto_size_chains_block_with_source_context() {
+        for body in ["root=pin 1 {on:$body.left,at:start,gap:10mil} pin 2 {before:$root,gap:5mil}"]
+        {
             let compiled = compile(&format!("component R {{body=rectangle {{}} {body}}}"));
             let effective = vec![effective(25); compiled.placements.len()];
             let error = evaluate_layout(
@@ -1281,7 +1819,9 @@ mod tests {
             )
             .unwrap_err();
             assert!(
-                error.message.contains("auto-size cannot contain"),
+                error
+                    .message
+                    .contains("auto-size constraints cannot satisfy"),
                 "{error}"
             );
             assert!(

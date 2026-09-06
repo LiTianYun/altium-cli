@@ -147,3 +147,103 @@ impl PartCountPolicy {
         }
     }
 }
+
+pub const PIN_LOCATION_X: FieldPolicy<Coord> = FieldPolicy {
+    name: "pin.x",
+    default: Some(|| Coord::ZERO),
+    clear: None,
+};
+pub const PIN_LOCATION_Y: FieldPolicy<Coord> = FieldPolicy {
+    name: "pin.y",
+    ..PIN_LOCATION_X
+};
+
+/// Definition normalization and instance inheritance have distinct authority.
+/// Existing target values are preserved only for absent fields/axes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PinLocationContext {
+    Definition {
+        target: Option<CoordPoint>,
+    },
+    Instance {
+        target: Option<CoordPoint>,
+        base: Option<CoordPoint>,
+    },
+}
+
+/// Resolve effective native location before applying any retained anchor layout.
+/// This function returns values, not write scope: callers retain the authored
+/// pair/axis operations when deciding which native coordinate axes may change.
+pub fn resolve_pin_location(
+    pin: &super::PinIntent,
+    context: PinLocationContext,
+) -> Result<CoordPoint, SpecError> {
+    validate_pin_location(pin)?;
+    let (target, base, instance) = match context {
+        PinLocationContext::Definition { target } => (target, None, false),
+        PinLocationContext::Instance { target, base } => (target, base, true),
+    };
+    if pin.location.is_authored() {
+        return resolve_location_field(PIN_LOCATION, &pin.location, target, base, instance);
+    }
+    let x = resolve_location_field(
+        PIN_LOCATION_X,
+        &pin.location_x,
+        target.map(|point| point.x),
+        base.map(|point| point.x),
+        instance,
+    )?;
+    let y = resolve_location_field(
+        PIN_LOCATION_Y,
+        &pin.location_y,
+        target.map(|point| point.y),
+        base.map(|point| point.y),
+        instance,
+    )?;
+    Ok(CoordPoint::new(x, y))
+}
+fn resolve_location_field<T: Clone>(
+    policy: FieldPolicy<T>,
+    intent: &FieldIntent<T>,
+    target: Option<T>,
+    base: Option<T>,
+    instance: bool,
+) -> Result<T, SpecError> {
+    if instance {
+        policy.instance(intent, target.as_ref(), base.as_ref())
+    } else if matches!(intent, FieldIntent::Absent) {
+        match target {
+            Some(value) => Ok(value),
+            None => policy.definition(intent),
+        }
+    } else {
+        policy.definition(intent)
+    }
+}
+
+pub(crate) fn validate_pin_location(pin: &super::PinIntent) -> Result<(), SpecError> {
+    let axis_span = pin.location_x.span().or(pin.location_y.span());
+    if let (Some(pair), Some(axis)) = (pin.location.span(), axis_span) {
+        return Err(SpecError::at(
+            SpecErrorCode::TypeMismatch,
+            format!(
+                "pin at/location cannot be combined with x/y; pair authored at {}..{}",
+                pair.start, pair.end
+            ),
+            axis,
+        ));
+    }
+    if let Some(placement) = &pin.placement {
+        if let Some(span) = axis_span.or(pin.location.span()) {
+            return Err(SpecError::at(
+                SpecErrorCode::TypeMismatch,
+                format!(
+                    "pin coordinates cannot be combined with anchored placement at {}..{}",
+                    placement.span.start, placement.span.end
+                ),
+                span,
+            ));
+        }
+    }
+    Ok(())
+}

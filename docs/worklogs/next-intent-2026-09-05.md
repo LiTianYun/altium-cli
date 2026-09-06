@@ -39,3 +39,12 @@ ArithmeticOverflow diagnostic at the source value. Final fixture-free checks:
 Layout tests exercise effective target length 60mil versus creation length 25mil,
 lexical shadowing, positional references, cycles, ranges, and containment errors.
 They do not execute document patches or prove full layout constraint solving.
+
+After independent pin-axis intent and exact owner-local auto-size were added,
+the same five captured dumps again compiled deterministically with unchanged
+counts. The language suite passed 340 tests; the final solver-only suite passed
+17 tests after adding one more infeasible coordinate-interval case. Legacy spec
+tests passed 168 tests and CLI compilation passed. Independent agent reviews
+accepted both bounded changes. Solver cases include centered/branching chains,
+explicit corners, effective absolute references, integer rounding, and incompatible
+coordinate constraints. These checks still do not execute native patches.

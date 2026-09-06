@@ -511,6 +511,8 @@ fn pin(
         electrical: props.take("electrical", &[], PIN_ELECTRICAL, electrical)?,
         length: props.take("length", &[], PIN_LENGTH, coord)?,
         location: props.take("at", &["location"], PIN_LOCATION, point)?,
+        location_x: props.take("x", &[], PIN_LOCATION_X, coord)?,
+        location_y: props.take("y", &[], PIN_LOCATION_Y, coord)?,
         orientation: props.take("orientation", &[], PIN_ORIENTATION, rotation)?,
         is_hidden: props.take("is_hidden", &[], HIDDEN, boolean)?,
         hidden_net_name: props.take("hidden_net_name", &[], PIN_HIDDEN_NET_NAME, string)?,
@@ -519,6 +521,7 @@ fn pin(
         pair_swap_group: props.take("pair_swap_group", &[], SWAP_GROUP, swap_string)?,
     };
     props.finish("pin")?;
+    super::fields::validate_pin_location(&result)?;
     Ok(result)
 }
 fn parameter(decl: &ParameterDecl, scope: &ScopeStack) -> Result<ParameterIntent, SpecError> {

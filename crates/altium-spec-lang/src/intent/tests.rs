@@ -631,3 +631,199 @@ fn inherited_component_graphic_shadows_older_root_value_binding() {
         }
     );
 }
+
+#[test]
+fn independent_pin_axes_keep_authorship_and_preserve_unmentioned_target_axis() {
+    let pin = pin_for("x: 25mil");
+    assert_eq!(pin.location, FieldIntent::Absent);
+    assert_eq!(pin.location_y, FieldIntent::Absent);
+    assert!(
+        matches!(&pin.location_x, FieldIntent::Set(value) if value.node == Coord::from_mils_f64(25.0) && value.span.end > value.span.start)
+    );
+    let point = |x, y| {
+        altium_format_types::CoordPoint::new(Coord::from_mils_f64(x), Coord::from_mils_f64(y))
+    };
+    assert_eq!(
+        resolve_pin_location(
+            &pin,
+            PinLocationContext::Definition {
+                target: Some(point(60.0, 90.0))
+            }
+        )
+        .unwrap(),
+        point(25.0, 90.0)
+    );
+    assert_eq!(
+        resolve_pin_location(&pin, PinLocationContext::Definition { target: None }).unwrap(),
+        point(25.0, 0.0)
+    );
+    let y_only = pin_for("y: 10");
+    assert_eq!(
+        resolve_pin_location(
+            &y_only,
+            PinLocationContext::Definition {
+                target: Some(point(60.0, 90.0))
+            }
+        )
+        .unwrap(),
+        point(60.0, 10.0)
+    );
+    let absent = pin_for("");
+    assert_eq!(
+        resolve_pin_location(
+            &absent,
+            PinLocationContext::Definition {
+                target: Some(point(60.0, 90.0))
+            }
+        )
+        .unwrap(),
+        point(60.0, 90.0)
+    );
+}
+#[test]
+fn independent_axis_inherit_and_reset_distinguish_base_target_and_default() {
+    let point = |x, y| {
+        altium_format_types::CoordPoint::new(Coord::from_mils_f64(x), Coord::from_mils_f64(y))
+    };
+    let target = point(60.0, 90.0);
+    let base = point(40.0, 80.0);
+    let context = PinLocationContext::Instance {
+        target: Some(target),
+        base: Some(base),
+    };
+    assert_eq!(
+        resolve_pin_location(&pin_for("x: inherit"), context).unwrap(),
+        point(40.0, 90.0)
+    );
+    assert_eq!(
+        resolve_pin_location(&pin_for("x: reset"), context).unwrap(),
+        point(0.0, 90.0)
+    );
+    assert_eq!(
+        resolve_pin_location(&pin_for("y: inherit"), context).unwrap(),
+        point(60.0, 80.0)
+    );
+    assert_eq!(
+        resolve_pin_location(&pin_for("y: reset"), context).unwrap(),
+        point(60.0, 0.0)
+    );
+    assert_eq!(
+        resolve_pin_location(
+            &pin_for("x: inherit"),
+            PinLocationContext::Definition {
+                target: Some(target)
+            }
+        )
+        .unwrap(),
+        point(0.0, 90.0)
+    );
+    assert_eq!(
+        resolve_pin_location(
+            &pin_for("x: 25mil"),
+            PinLocationContext::Instance {
+                target: None,
+                base: Some(base)
+            }
+        )
+        .unwrap(),
+        point(25.0, 80.0)
+    );
+    assert!(
+        resolve_pin_location(
+            &pin_for("x: inherit"),
+            PinLocationContext::Instance {
+                target: Some(target),
+                base: None
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        resolve_pin_location(
+            &pin_for("x: 25mil"),
+            PinLocationContext::Instance {
+                target: None,
+                base: None
+            }
+        )
+        .is_err(),
+        "unmentioned y needs a resolved target/base"
+    );
+}
+#[test]
+fn axes_reject_clear_pair_conflicts_and_anchor_conflicts_including_spreads() {
+    for body in [
+        "x: null",
+        "y: null",
+        "...{x:null}",
+        "at:(0mil,0mil), x:1mil",
+        "location:(0mil,0mil), y:1mil",
+        "...{at:(0mil,0mil)}, x:1mil",
+        "y:1mil, ...{location:(0mil,0mil)}",
+        "...{location:(0mil,0mil), x:1mil}",
+        "x:1mil, x:2mil",
+    ] {
+        assert!(
+            compile(&format!("component R {{pin 1 {{{body}}}}}")).is_err(),
+            "must reject {body}"
+        );
+    }
+    for axes in ["x: 1mil", "y: reset", "...{x:1mil}"] {
+        assert!(
+            compile(&format!(
+                "component R {{body=rectangle {{}} pin 1 {{on:$body.left, {axes}}}}}"
+            ))
+            .is_err()
+        );
+    }
+    let mut forged = pin_for("x: 1mil");
+    forged.location = FieldIntent::Reset(Span::new(1, 2));
+    assert!(
+        resolve_pin_location(&forged, PinLocationContext::Definition { target: None }).is_err()
+    );
+    forged.location = FieldIntent::Absent;
+    forged.location_x = FieldIntent::Clear(Span::new(2, 3));
+    assert!(
+        resolve_pin_location(&forged, PinLocationContext::Definition { target: None }).is_err()
+    );
+}
+#[test]
+fn axis_spreads_and_pair_resolution_keep_declared_precedence() {
+    let pin = pin_for("...{x:10mil, y:20mil}, x:30mil");
+    let point = |x, y| {
+        altium_format_types::CoordPoint::new(Coord::from_mils_f64(x), Coord::from_mils_f64(y))
+    };
+    assert_eq!(
+        resolve_pin_location(&pin, PinLocationContext::Definition { target: None }).unwrap(),
+        point(30.0, 20.0)
+    );
+    let pair = pin_for("at:(15mil,25mil)");
+    assert_eq!(
+        resolve_pin_location(
+            &pair,
+            PinLocationContext::Definition {
+                target: Some(point(60.0, 90.0))
+            }
+        )
+        .unwrap(),
+        point(15.0, 25.0)
+    );
+    let target = Some(point(60.0, 90.0));
+    let base = Some(point(40.0, 80.0));
+    assert_eq!(
+        resolve_pin_location(
+            &pin_for("location:inherit"),
+            PinLocationContext::Instance { target, base }
+        )
+        .unwrap(),
+        base.unwrap()
+    );
+    assert_eq!(
+        resolve_pin_location(
+            &pin_for("at:reset"),
+            PinLocationContext::Instance { target, base }
+        )
+        .unwrap(),
+        point(0.0, 0.0)
+    );
+}

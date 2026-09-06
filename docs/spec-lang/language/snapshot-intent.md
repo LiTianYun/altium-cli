@@ -72,12 +72,20 @@ cargo run -p altium-spec-lang --example check_schlib_intent -- design.schlib-spe
 ```
 
 This is a front-end API, not the replacement CLI planner. Full step 1 still needs
-independent x/y field intent, complete auto-size constraints, generated footprint-pad
-imports, graphic default and clear policies, and typed image-resource support. Unsupported image_data and
+generated footprint-pad imports, graphic default and clear policies, and typed
+image-resource support. Unsupported image_data and
 generated pad references fail explicitly. Graphic fields are intent, not proof of
 a native mapping: line-width enum conversion and fields without a native counterpart
 must be resolved before materialization. Later steps must verify ownership,
 materialize/project equality, scope enforcement, and native serialization.
+
+Pin coordinates retain either a paired `at`/`location` operation or independent
+`x` and `y` operations. `resolve_pin_location` resolves effective coordinates
+without granting write scope: an omitted axis preserves the target value, or uses
+the resolved instance base or definition default when creating a pin. Instance
+`inherit` selects the base axis; `reset` selects zero. Coordinates cannot be
+cleared. Paired coordinates, independent axes, and anchored placement are mutually
+exclusive, including when supplied through spreads.
 
 ## Retained layout dependencies
 
@@ -92,9 +100,12 @@ for placement even when its source omits length; creation may use the 25mil
 definition default. Parts inherit component graphic bindings with ordinary lexical
 shadowing. Source ranges, cycles, overflows, and contradictory placements error.
 
-The current auto-size formula covers the existing edge-chain cases; it is not a
-general constraint solver for arbitrary centered/branching layouts. Unsupported
-containment fails with source context. Parts treat inherited component boxes as
-fixed effective geometry; they do not resize a shared box from part-local pins.
-Full layout acceptance still requires those constraints and integration with
-snapshot scope.
+Owner-local auto-size solves the minimum feasible integer width and height for
+start/end/center roots, before/after chains, branches, offsets, and effective
+absolute-pin dependencies. It preserves an explicit corner and respects minimum
+dimensions, margins, and representable pin coordinates. Infeasible constraints
+fail with source context. Omitted padding uses each chain's root gap; explicit
+padding applies to all chains, with reset/inherit selecting the 20mil default.
+Parts treat inherited component boxes as fixed effective geometry; they do not
+resize a shared box from part-local pins. Snapshot scope integration remains a
+later elaboration gate.

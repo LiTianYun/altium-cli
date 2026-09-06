@@ -140,6 +140,9 @@ pub struct PinIntent {
     pub electrical: FieldIntent<PinElectricalType>,
     pub length: FieldIntent<Coord>,
     pub location: FieldIntent<CoordPoint>,
+    /// Independent authored axes; never fill the unmentioned axis while compiling.
+    pub location_x: FieldIntent<Coord>,
+    pub location_y: FieldIntent<Coord>,
     pub orientation: FieldIntent<RotationBy90>,
     pub is_hidden: FieldIntent<bool>,
     pub hidden_net_name: FieldIntent<String>,
