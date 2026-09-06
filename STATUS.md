@@ -41,7 +41,7 @@ is parsed and preserved by the CST; legacy commands explicitly reject collection
 scope instead of ignoring it. The typed SchLib intent core now preserves field operations/spans, collection
 scope, typed definition references, imported source provenance, and nested spread
 origins. It compiles captured transitive values without reopening imports. Full
-step 1 remains open for typed image resources and physical pen-width compatibility.
+step 1 remains open for typed image resources.
 Graphic field policies now cover all 13 kinds against the existing typed Rust
 API/creation defaults, including optional arc endpoints and named PenWidth values.
 Inapplicable properties fail explicitly. Font/resource existence and valid creation
@@ -71,6 +71,15 @@ The [embedded-image inventory](docs/worklogs/next-images-2026-09-05.md) found
 with appended PNG/JPEG/EMF source objects. Preview-only decoding would discard
 source content. Typed resources must cover both representations and metadata;
 the inventory does not establish complete codec or native-source understanding.
+Fresh original managed-assembly inspection now verifies the appended-class
+serialization contract and the 0/10/30/50mil pen-width table. Graphic intent accepts
+only exact physical widths after checked Coord conversion; renderer and intent
+share the verified constants. Endpoint sizes remain named-only because they use
+a separate semantic table. The [proposed shared image boundary](docs/proposals/typed-image-resources.md)
+is awaiting the required new-domain-type discussion; no codec/types have been added.
+Verified physical-width validation: 354 language tests and 168 legacy spec tests
+pass; CLI compilation passes. The bounded conversion/rendering change passed
+independent review. No fixture-feature or property tests were run.
 Coordinate literals and dimensional float conversions now reject nonfinite/overflow
 values; signed-minimum division, negation, and abs return errors instead of panics. `altium-sync` remains a dependency scaffold. No state subsystem
 existed to remove. Obsolete design notes and scaffold identity

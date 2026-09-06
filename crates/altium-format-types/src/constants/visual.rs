@@ -74,6 +74,17 @@ pub const FONT_TABLE: &str = "FontTable";
 /// **Used by:** most drawing objects
 pub const LINE_WIDTH: &str = "LineWidth";
 
+/// Physical schematic pen widths in internal coordinate units (10,000 per mil).
+/// Source: AD26 `Altium.Edp.Interfaces.dll`, `Rt_Schematic.Consts.LineWidthArrayC`
+/// (`TSize.eZeroSize`). This is not the separate bus-width or endpoint-size table.
+pub const SCH_PEN_WIDTH_ZERO_INTERNAL: i32 = 0;
+/// `LineWidthArrayC[TSize.eSmall]`: 10 mil.
+pub const SCH_PEN_WIDTH_SMALL_INTERNAL: i32 = 100_000;
+/// `LineWidthArrayC[TSize.eMedium]`: 30 mil.
+pub const SCH_PEN_WIDTH_MEDIUM_INTERNAL: i32 = 300_000;
+/// `LineWidthArrayC[TSize.eLarge]`: 50 mil.
+pub const SCH_PEN_WIDTH_LARGE_INTERNAL: i32 = 500_000;
+
 /// Line style (legacy field, clamped to 0..2).
 ///
 /// **Wire type:** u8

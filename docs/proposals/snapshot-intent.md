@@ -241,10 +241,11 @@ angles default to typed absence, not 360 degrees; intent reset/clear now preserv
 that distinction. Native line widths use `PenWidth`, while
 the old compiler exposes coordinates and the old executor ignores them. Polyline
 `closed` and image `show_border` have no direct field in the current public graphic
-API. The new intent compiler rejects those properties and dimensioned pen widths;
-named typed pen widths are supported. Font defaults require validation against the
-destination font table. These policy choices are checked against current Rust
-code, not a new independent AD26 source verification.
+API. The new intent compiler rejects those properties. Named pen widths and exact
+physical widths of 0/10/30/50mil are supported, with that table now verified against
+the original AD26 managed assembly. Font defaults require validation against the
+destination font table. Other creation policy choices remain checked against
+current Rust code, without independent AD26 verification of every default.
 
 The old `image_data` compiler field has no corresponding public image-resource
 mutation boundary and is ignored by its executor. The replacement intent compiler

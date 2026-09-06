@@ -10,6 +10,10 @@ use super::{FieldIntent, FieldPolicy};
 use crate::ast::GraphicDecl;
 use crate::diagnostic::Span;
 use crate::{ScopeStack, SpecError, Value};
+use altium_format_types::constants::visual::{
+    SCH_PEN_WIDTH_LARGE_INTERNAL, SCH_PEN_WIDTH_MEDIUM_INTERNAL, SCH_PEN_WIDTH_SMALL_INTERNAL,
+    SCH_PEN_WIDTH_ZERO_INTERNAL,
+};
 use altium_format_types::sch::{
     HorizontalAlign, LineShape, LineStyle, PenWidth, TextJustification,
 };
@@ -97,7 +101,7 @@ pub struct GraphicIntent {
 impl GraphicKind {
     /// Language-schema policies derived from current Rust creation behavior.
     /// Optional arc end angles default/clear to None rather than an invented
-    /// full-circle endpoint. Physical linewidth conversion is deliberately absent.
+    /// full-circle endpoint. Physical line widths use the verified AD26 size table.
     pub fn field_policies(self) -> GraphicPolicies {
         use GraphicKind::*;
         let mut policies = GraphicPolicies::default();
@@ -264,7 +268,7 @@ pub(super) fn compile_graphic(
     field!(line_style, line_style);
     field!(start_line_shape, line_shape);
     field!(end_line_shape, line_shape);
-    field!(line_shape_size, pen_width);
+    field!(line_shape_size, named_endpoint_size);
     field!(is_solid, boolean);
     field!(transparent, boolean);
     field!(show_border, boolean);
@@ -293,13 +297,32 @@ pub(super) fn compile_graphic(
 fn enum_name(value: Value, span: Span) -> Result<String, SpecError> {
     string(value, span).map(|value| value.to_ascii_lowercase())
 }
+/// Compare canonical coordinates exactly; never round a width to a nearby enum.
 fn pen_width(value: Value, span: Span) -> Result<PenWidth, SpecError> {
+    if matches!(value, Value::String(_)) {
+        return named_pen_width(value, span);
+    }
+    match coord(value, span)?.raw() {
+        SCH_PEN_WIDTH_ZERO_INTERNAL => Ok(PenWidth::Zero),
+        SCH_PEN_WIDTH_SMALL_INTERNAL => Ok(PenWidth::Small),
+        SCH_PEN_WIDTH_MEDIUM_INTERNAL => Ok(PenWidth::Medium),
+        SCH_PEN_WIDTH_LARGE_INTERNAL => Ok(PenWidth::Large),
+        _ => Err(super::compile::error(
+            "physical schematic line width must be exactly 0, 10, 30, or 50 mil; use zero, small, medium, or large for named widths",
+            span,
+        )),
+    }
+}
+fn named_endpoint_size(value: Value, span: Span) -> Result<PenWidth, SpecError> {
     if !matches!(value, Value::String(_)) {
         return Err(super::compile::error(
-            "schematic pen width requires zero, small, medium, or large; physical/dimensional width conversion is not yet verified",
+            "line_shape_size requires a named endpoint size: zero, small, medium, or large; physical endpoint-size conversion is not verified",
             span,
         ));
     }
+    named_pen_width(value, span)
+}
+fn named_pen_width(value: Value, span: Span) -> Result<PenWidth, SpecError> {
     match enum_name(value, span)?.as_str() {
         "zero" => Ok(PenWidth::Zero),
         "small" => Ok(PenWidth::Small),
@@ -589,23 +612,87 @@ mod tests {
         }
     }
     #[test]
-    fn named_pen_widths_are_typed_and_physical_conversion_never_silently_drops() {
+    fn named_and_exact_physical_pen_widths_are_typed() {
         for (name, width) in [
             ("zero", PenWidth::Zero),
             ("small", PenWidth::Small),
             ("Medium", PenWidth::Medium),
             ("large", PenWidth::Large),
+            ("0mil", PenWidth::Zero),
+            ("10mil", PenWidth::Small),
+            ("30mil", PenWidth::Medium),
+            ("50mil", PenWidth::Large),
+            ("0raw", PenWidth::Zero),
+            ("100000raw", PenWidth::Small),
+            ("300000raw", PenWidth::Medium),
+            ("500000raw", PenWidth::Large),
+            ("0.254mm", PenWidth::Small),
+            ("0.762mm", PenWidth::Medium),
+            ("1.27mm", PenWidth::Large),
+            ("0", PenWidth::Zero),
+            ("10", PenWidth::Small),
+            ("30.0", PenWidth::Medium),
+            ("50", PenWidth::Large),
         ] {
             let line = graphic(&format!("line {{line_width:{name}}}")).unwrap();
             assert!(matches!(line.fields.line_width, FieldIntent::Set(value) if value.node==width));
         }
-        for value in ["1mil", "0.2mm", "1", "0.5"] {
+        for value in [
+            "1mil",
+            "0.2mm",
+            "1",
+            "0.5",
+            "-10mil",
+            "-1raw",
+            "99999raw",
+            "100001raw",
+            "49.9999mil",
+            "50.0001mil",
+        ] {
             let error = graphic(&format!("line {{line_width:{value}}}")).unwrap_err();
             assert!(error.message.contains("zero, small, medium, or large"));
             assert!(error.span.is_some());
         }
         assert!(graphic("line {line_width:wide}").is_err());
         assert!(graphic("line {line_width:null}").is_err());
+    }
+    #[test]
+    fn physical_widths_keep_field_policies_and_checked_numeric_errors() {
+        let policy = GraphicKind::Line.field_policies().line_width.unwrap();
+        for (body, expected) in [
+            ("", PenWidth::Large),
+            ("line_width:inherit", PenWidth::Medium),
+            ("line_width:reset", PenWidth::Zero),
+            ("line_width:10mil", PenWidth::Small),
+        ] {
+            let line = graphic(&format!("line {{{body}}}")).unwrap();
+            assert_eq!(
+                policy
+                    .instance(
+                        &line.fields.line_width,
+                        Some(&PenWidth::Large),
+                        Some(&PenWidth::Medium)
+                    )
+                    .unwrap(),
+                expected
+            );
+        }
+        for value in [
+            "999999999999mil",
+            "2147483648raw",
+            "999999999999.0",
+            "1.0 / 0.0",
+        ] {
+            let error = graphic(&format!("line {{line_width:{value}}}")).unwrap_err();
+            assert!(
+                error.span.is_some(),
+                "numeric failure must retain source context: {value}"
+            );
+        }
+        let error = pen_width(Value::Float(f64::INFINITY), Span::new(0, 1)).unwrap_err();
+        assert!(error.span.is_some());
+        let error = graphic("polyline {line_shape_size:10mil}").unwrap_err();
+        assert!(error.message.contains("named endpoint size"));
     }
     #[test]
     fn native_applicability_and_existing_named_enums_are_checked() {

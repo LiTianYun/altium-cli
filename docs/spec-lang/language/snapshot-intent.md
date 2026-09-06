@@ -72,7 +72,7 @@ cargo run -p altium-spec-lang --example check_schlib_intent -- design.schlib-spe
 ```
 
 This is a front-end API, not the replacement CLI planner. Full step 1 still needs
-typed image-resource support and physical pen-width compatibility.
+typed image-resource support.
 Unsupported image_data fails explicitly. Later steps must verify ownership,
 materialize/project equality, scope enforcement, and native serialization.
 
@@ -107,8 +107,12 @@ geometry.
 Arc, elliptical-arc, and pie `end_angle` defaults/clears to `None`; an explicit
 `360` remains `Some(360)`. String text/URL/filename fields can clear to empty;
 required geometry, enums, flags, fonts, and vertices cannot clear. Named
-`line_width: zero | small | medium | large` values use `PenWidth`. Physical or
-dimensioned widths fail with a diagnostic until their conversion is verified.
+`line_width: zero | small | medium | large` values use `PenWidth`. Physical
+widths must match exactly 0, 10, 30, or 50mil after normal checked coordinate
+conversion; arbitrary widths are never rounded to the nearest enum. The mapping
+is verified against original AD26 `Rt_Schematic.Consts.LineWidthArrayC` and shared
+with rendering. `line_shape_size` remains named-only; the line-width table does
+not establish physical endpoint sizes.
 Polyline `closed` and image `show_border` fail as inapplicable properties.
 
 ## Retained layout dependencies

@@ -24,14 +24,19 @@ pub(crate) fn c_to_f(c: Coord) -> f64 {
 /// - eMedium   = 300,000  → 30.0 mils
 /// - eLarge    = 500,000  → 50.0 mils
 pub(crate) fn pen_width_to_mils(pw: altium_format_types::PenWidth) -> f64 {
-    use altium_format_types::PenWidth;
-    match pw {
-        PenWidth::Zero => 0.0,
-        PenWidth::Small => 10.0,
-        PenWidth::Medium => 30.0,
-        PenWidth::Large => 50.0,
-        _ => 0.0,
-    }
+    use altium_format_types::constants::visual::{
+        SCH_PEN_WIDTH_LARGE_INTERNAL, SCH_PEN_WIDTH_MEDIUM_INTERNAL, SCH_PEN_WIDTH_SMALL_INTERNAL,
+        SCH_PEN_WIDTH_ZERO_INTERNAL,
+    };
+    use altium_format_types::{Coord, PenWidth};
+    let width = match pw {
+        PenWidth::Zero => SCH_PEN_WIDTH_ZERO_INTERNAL,
+        PenWidth::Small => SCH_PEN_WIDTH_SMALL_INTERNAL,
+        PenWidth::Medium => SCH_PEN_WIDTH_MEDIUM_INTERNAL,
+        PenWidth::Large => SCH_PEN_WIDTH_LARGE_INTERNAL,
+        _ => SCH_PEN_WIDTH_ZERO_INTERNAL,
+    };
+    Coord::from_internal(width).to_mils()
 }
 
 /// Convert a PenWidth (bus) to mils. Buses use a separate, wider lookup table.

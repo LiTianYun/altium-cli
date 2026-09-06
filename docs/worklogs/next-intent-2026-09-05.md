@@ -57,3 +57,11 @@ tests covering naming, overrides, source capture, and checked geometry. Graphic
 policies have five test groups for applicability, defaults, enum values, clear
 operations, and retained absence. Typed image resources and verified physical
 pen-width conversion remain open.
+
+Fresh original managed-assembly inspection subsequently verified physical pen
+widths of 0/10/30/50mil. Intent conversion now accepts exact canonical Coord
+matches and shares constants with rendering. Six targeted graphic tests and the
+full 354-test language suite pass, as do 168 legacy tests and CLI compilation.
+Independent review passed. The existing five-dump result above was not rerun for
+this bounded conversion change; those dumps do not exercise physical line widths.
+Typed image resources remain open.
