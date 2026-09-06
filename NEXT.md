@@ -33,7 +33,8 @@ Import resolution and immutable transitive source capture also live in the
 language crate. Collection scope and contextual operations parse into explicit
 AST/CST forms. The typed SchLib intent core compiles captured imports and retains
 field operations, collection scope, source provenance, and spread origins. Full
-step 1 is still open for typed image resources.
+step 1 is still open for image asset-reference intent and its completeness review;
+image codecs are no longer a gate. See the [revised image import design](docs/proposals/typed-image-resources.md).
 Graphic field defaults/clear policies now match the current typed Rust API. Captured footprint
 imports now export generated pad names. Independent pin axes and owner-local auto-size constraints
 now resolve over effective target/base geometry. Physical line widths map exactly
@@ -66,7 +67,8 @@ persistent file-format identifier. Evidence: `api/pcbdoc_read.rs`,
 `altium-format` owns strict parsing, serialization, native references, ownership,
 format upgrades, typed public APIs, and invariant validation. All file-format
 internals remain private. Expand typed APIs before using a missing operation;
-unsupported data must error, never pass through as undecoded bytes.
+unsupported data must error, never pass through as undecoded bytes, except for
+the explicitly authorized image asset boundary below.
 
 `altium-spec-lang` owns CST, diagnostics, parser, formatter, authored intent,
 imports, type-checking, and normalization. It depends on `altium-format-types`,
@@ -145,6 +147,21 @@ symbol errors. Dump preserves imports and authored expressions, representing
 differences as overrides or complete positional child collections where possible.
 If that cannot preserve authored meaning, block rather than silently flatten.
 Keep existing inline-child errors until materialization works.
+
+## Imported image assets
+
+Treat image contents as opaque imported assets, per the user's 2026-09-05 scope
+change. Keep Storage framing, resource identities, references, placement, and
+display flags typed. Preserve the complete native image body, including preview
+and original, without decoding or re-encoding it. This exception is only for
+image assets; the strict parsing rule still applies to all other document data.
+
+Initially dump/import explicit `.altium-image` bundles containing the exact
+decompressed resource body. Standalone PNG/JPEG conversion and preview generation
+are deferred. Planning captures asset bytes and hashes; saved plans contain the
+payload and apply never refreshes it. Dump stages assets and spec together.
+Use whole-resource replacement, explicit scope, and reference validation.
+See the [import contract and staged gates](docs/proposals/typed-image-resources.md).
 
 ## PcbDoc bulk routing
 

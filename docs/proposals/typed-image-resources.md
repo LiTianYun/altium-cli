@@ -1,79 +1,77 @@
-# Typed image resources
+# Imported image assets
 
-Proposed shared boundary for the NEXT image-resource gate. Not implemented.
+Revised direction following the user's 2026-09-05 instruction to defer image
+codecs and treat image contents as opaque imported assets. Not implemented.
+This supersedes the shared codec/type proposal previously at this path.
 
-The real SchLib corpus stores a bitmap preview and, in 42 of 58 resources, an
-additional PNG, JPEG, or enhanced-metafile source. The preview cannot replace
-that source. See the [inventory](../worklogs/next-images-2026-09-05.md).
+## Boundary
 
-## Ownership and dependency boundary
+Use the same explicit artifact workflow as routing: authored source references a
+file, planning captures it, and dump exports it alongside the spec. Unlike copper,
+image contents need no semantic geometry model. Do not add an image codec crate,
+pixel model, JPEG coefficient model, or metafile command model for this workflow.
 
-- `altium-format-types::image` owns shared semantic resource and codec types.
-  It remains free of parsing and I/O.
-- A document-independent `altium-image-codec` crate owns strict image decoding
-  and serialization. Both the language and document crates can use it without
-  introducing a language-to-document dependency.
-- `altium-format` privately owns Storage framing and Altium's appended-class
-  dispatch. It exposes typed document resource operations.
-- `altium-spec-lang` retains authored field operations and compiles image input
-  through the shared codec. Encoded native payloads are not semantic IR fields.
-- `altium-sync` will own source scope, immutable resource snapshots, patches,
-  and planning of resource changes alongside graphic changes.
+The user-authorized exception to the no-opaque-data rule is limited to image asset
+payloads. Parse and validate Altium's outer Storage headers, counts, resource
+identifiers, block framing, compression, and image-record references as before.
+The entire decompressed image resource body is an indivisible encoded asset;
+this includes its bitmap preview and any appended original/class framing. Do not
+claim its internal headers or codec data have been semantically validated.
+Unknown document streams, records, fields, and bytes outside this boundary still
+hard-error. This exception does not permit opaque routing or other native data.
 
-## Proposed shared types
+## Initial import/export contract
 
-The initial shared vocabulary is:
+- Export one `.altium-image` asset per resource: exactly the decompressed native
+  image resource body, without the outer compression envelope or resource name.
+  This is an Altium image bundle, not a new general-purpose image file format.
+- Keep the resource name and the explicit asset path in the spec. Keep placement,
+  display flags, embedded/external behavior, and native reference/alias handling
+  typed and separate. Never derive resource identity from a basename or hash.
+- Proposed source property: `image { source: "assets/logo.altium-image" ... }`.
+  Exact grammar and shared-resource declaration syntax remain implementation
+  details to settle with the existing graphic/collection grammar. This is not
+  supported syntax today. Do not overload legacy `image_data` silently.
+- Initially import only these native bundles, obtained by dump from a document
+  Altium has already embedded. Preserve the complete body byte-for-byte; never
+  replace an original with its preview or normalize image encoding.
+- Defer standalone PNG/JPEG/SVG import and preview generation. Reject those inputs
+  explicitly until a conversion path exists. Rendering and codec validation are
+  separate capabilities, not prerequisites for bundle import/export.
+- Treat an asset change as whole-resource replacement. Preserve resource order
+  and existing duplicate entries; block ambiguous edits. Resolve references and
+  enforce collection scope before deletion. No implicit garbage collection or
+  external-image file loading.
 
-- `ImageResourceName`: exact decoded storage identifier, with no basename matching.
-  Native rotated aliases also need a typed filename/orientation key, following
-  the verified `FileName=...|Orientation=...` grammar and comparison rules.
-- `PixelDimensions`, `RasterResolution`, and `BitmapRowOrder`.
-- `BitmapImageSizeDeclaration`: explicit zero versus computed size declaration.
-- Typed bitmap pixels: indexed pixels and palette, 24-bit BGR colors, or 32-bit
-  BGRX pixels with a separate unused-byte field. Existing `Color` represents RGB;
-  the unused byte must not become alpha. Pixel counts and palette indices are
-  checked. The nested metafile corpus requires indexed 1-bit bitmap support too.
-- `BitmapPreview`: dimensions, row order, resolution, size declaration, and
-  fully decoded typed pixels/metadata.
-- `OriginalGraphic`: fully typed PNG, JPEG, or enhanced-metafile variants.
-- `ImageResourceData`: bitmap preview plus optional original graphic.
-- `ImageResource`: resource name and typed data.
-- `ImageReference`: embedded resource name or explicit external image path.
+## Planning and transactions
 
-Codec-specific headers, chunks, commands, and metadata types will follow the
-verified source/specification contracts. There is no encoded-source fallback,
-unknown-chunk map, raw command payload, or temporarily retained trailer. Unsupported
-content produces a contextual error until its typed support is implemented.
-The original Altium dispatch also recognizes GIF and SVG; these are not covered
-by the current corpus-derived codec proposal and must error until supported.
-The detailed initial schemas and reuse constraints are recorded in the
-[codec investigation](../worklogs/next-image-codecs-2026-09-05.md).
+Resolve explicit paths relative to the declaring source, consistent with other
+artifact imports. Capture exact bytes and content hashes during planning; bind
+them into the input manifest and include the payload in the self-contained saved
+plan. Apply checks preconditions and executes captured bytes, never refreshed
+asset contents. Byte hashes report changes without pretending to compare pixels.
+Missing files, framing errors, unresolved references, and conflicting resource
+replacements are contextual errors. Opaque contents can still be an invalid image;
+this workflow promises preservation, not codec validity or visual equivalence.
 
-## Document and source behavior
+Dump stages the spec and all named assets in one transaction, with deterministic
+collision-safe paths and no silent overwrite. Native serialization rebuilds the
+validated outer envelope around the unchanged asset body. Its compressed bytes
+may differ; the decompressed body must not.
 
-The public SchLib API will support ordered resource enumeration, lookup, and
-explicit insert/replace. Native loading tolerates repeated identifiers and rotated
-aliases, so parsing must retain every typed entry in order. This does not authorize
-ambiguous name-based edits: duplicate/ambiguous keys block planning under NEXT's
-collection contract. Insert/replace must validate the complete resulting resource
-set. No implicit upsert, basename matching, external file loading, or resource
-garbage collection. Embedded references must resolve using the verified native
-alias rules; external references stay explicit. Deletion requires authored scope
-and verified reference coverage.
+## Revised gates
 
-Image placement refers to the resource separately from its geometry and display
-flags. Source image input must decode strictly into the shared model; its authored
-Set/Clear/Absent operation remains separate from the resolved target value.
-Original AD26 `ImageBase.SaveBmpToStream` now confirms a white-backed 24-bit
-preview bounded to 1024 by 768 pixels. Source authoring must either supply an
-explicit preview or use a specified deterministic rendering policy; decoding the
-original and discarding it is not an option. Font and graphic-geometry validation
-are independent elaboration responsibilities.
+Step 1 needs typed authored asset-reference intent and source-preservation tests,
+not image decoding. Step 2 adds ordered resource snapshots and whole-asset patches.
+Steps 3 and 4 capture assets in saved plans and enforce transactional execution;
+the SchLib workflow gate includes paired spec/asset dump and import.
 
-## Acceptance
+Test exact bundle equality across native save/reopen and export/import for BMP-only
+and preview-plus-original corpus examples. Test shared references, ambiguous names,
+missing assets, conflicting replacements, changed inputs, and scoped deletion at
+their respective implementation steps. Existing outer-envelope validation remains
+mandatory. Completing this design update does not complete a numbered plan step.
 
-Decode all observed resource structures completely, serialize from typed values,
-reparse, and compare pixels, commands, metadata, resource names, and references.
-Unknown content must fail. Exercise shared resources and conflicting operations,
-and use real corpus examples for every observed source variant. A BMP-only slice
-does not close this gate.
+The [inventory](../worklogs/next-images-2026-09-05.md) and
+[codec investigation](../worklogs/next-image-codecs-2026-09-05.md) remain historical
+evidence. Their full-codec implementation direction is superseded here.

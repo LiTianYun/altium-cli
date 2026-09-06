@@ -72,7 +72,8 @@ cargo run -p altium-spec-lang --example check_schlib_intent -- design.schlib-spe
 ```
 
 This is a front-end API, not the replacement CLI planner. Full step 1 still needs
-typed image-resource support.
+image asset-reference intent under the revised import design in `NEXT.md`, not
+full image codecs. Asset import syntax is not implemented yet.
 Unsupported image_data fails explicitly. Later steps must verify ownership,
 materialize/project equality, scope enforcement, and native serialization.
 

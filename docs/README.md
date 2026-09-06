@@ -22,5 +22,5 @@ replacement. It specifies future work, not current feature availability.
 - Do not add an in-tree archive. Git history is the archive.
 - Do not copy implementation status into format references. Keep current status in `STATUS.md`.
 - Prefer links to Rust types, constants, and parsers over duplicated field tables.
-- Every unknown stream, record, field, or trailing byte must produce a hard error until typed support exists. Documentation must never recommend opaque retention or silent skipping.
+- Every unknown stream, record, field, or trailing byte must produce a hard error until typed support exists. The user-authorized image asset exception in `NEXT.md` permits preserving the complete encoded image body without codec decoding; outer framing and references remain validated. No other opaque retention or silent skipping is permitted.
 - When a document becomes a completed plan or a one-off investigation, delete it or move it to the owning repository.

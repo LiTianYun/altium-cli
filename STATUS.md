@@ -41,7 +41,8 @@ is parsed and preserved by the CST; legacy commands explicitly reject collection
 scope instead of ignoring it. The typed SchLib intent core now preserves field operations/spans, collection
 scope, typed definition references, imported source provenance, and nested spread
 origins. It compiles captured transitive values without reopening imports. Full
-step 1 remains open for typed image resources.
+step 1 remains open for image asset-reference intent and its completeness review.
+Full image codecs were removed from the gate by the user's 2026-09-05 scope change.
 Graphic field policies now cover all 13 kinds against the existing typed Rust
 API/creation defaults, including optional arc endpoints and named PenWidth values.
 Inapplicable properties fail explicitly. Font/resource existence and valid creation
@@ -69,14 +70,16 @@ Independent review found no blockers in the bounded graphic policy change.
 The [embedded-image inventory](docs/worklogs/next-images-2026-09-05.md) found
 58 resources in 13 real SchLib files: 16 BMP-only resources and 42 BMP previews
 with appended PNG/JPEG/EMF source objects. Preview-only decoding would discard
-source content. Typed resources must cover both representations and metadata;
-the inventory does not establish complete codec or native-source understanding.
+source content. The revised import design preserves the complete encoded image
+body as an opaque asset, under an explicit user-authorized exception; codecs are
+deferred. The inventory does not establish codec validity or visual equivalence.
 Fresh original managed-assembly inspection now verifies the appended-class
 serialization contract and the 0/10/30/50mil pen-width table. Graphic intent accepts
 only exact physical widths after checked Coord conversion; renderer and intent
 share the verified constants. Endpoint sizes remain named-only because they use
-a separate semantic table. The [proposed shared image boundary](docs/proposals/typed-image-resources.md)
-is awaiting the required new-domain-type discussion; no codec/types have been added.
+a separate semantic table. The [revised image import design](docs/proposals/typed-image-resources.md)
+supersedes the shared codec proposal. Native bundle import/export, asset-reference
+intent, and saved-plan asset capture remain unimplemented; no codec crate is needed.
 Verified physical-width validation: 354 language tests and 168 legacy spec tests
 pass; CLI compilation passes. The bounded conversion/rendering change passed
 independent review. No fixture-feature or property tests were run.
