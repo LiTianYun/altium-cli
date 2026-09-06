@@ -17,16 +17,15 @@ the human-readable, version-controllable middle layer: *write or generate a spec
 decisions in text means they live in source control and diff cleanly, instead of
 being buried in an opaque binary.
 
-## Two authoritative modes: greenfield vs brownfield
+## Authoring context and direction
 
-A spec workflow is either *greenfield* (the `*-spec` files are authoritative and
-Altium is a generated artifact + GUI escape hatch) or *brownfield* (existing Altium
-files are authoritative and the spec is an agent-editable view). The distinction
-decides what `dump` / `apply` should preserve — most visibly, whether a SchDoc
-component's inline children are materialized verbatim (brownfield) or treated as
-overrides on an imported symbol (greenfield), and whether the tooling may embed its
-own identity metadata into the file. This is significant enough to live on its own
-page: [Greenfield vs brownfield](greenfield-vs-brownfield.md).
+Greenfield starts from authored specs; brownfield starts from existing Altium
+documents. Either can use compile or dump. The selected direction determines
+authority within the operation's scope; a component's explicit symbol reference
+determines inline materialization versus imported-base overrides. Neither implies
+permission to embed tool identity metadata. See
+[Greenfield vs brownfield](greenfield-vs-brownfield.md) and the replacement
+[implementation plan](../../../NEXT.md).
 
 ## Text-based rewriting, not AST round-trip
 
@@ -64,8 +63,8 @@ stability for zero user effort on a first dump.
 
 **Manual IDs are preserved verbatim.** A hand-set `#[annotation(id = "...")]` is
 never overwritten by the dumper and survives all rewrite operations. Users who
-need stable IDs (to anchor external tooling or a future three-way merge) should
-set them by hand.
+need stable source IDs for external tooling can set them by hand. This does not
+give corresponding Altium objects a durable identity across GUI edits.
 
 **Annotation keys are predefined, not free-form.** `#[annotation(...)]` accepts
 only the keys in the `AnnotationKey` enum (`id`, `stable`, `group`, `source_id`).
@@ -100,8 +99,9 @@ jitter.
 Specs are plain text without persistent UUIDs, so the reconciler and sync system
 match entities by *designator*. Altium itself falls back to designator matching
 (`eMapByDesignator`) when UniqueIDs are missing or broken, so designator-only
-matching is the correct starting point. Annotation IDs are supplementary, kept in
-reserve for rename detection in a future three-way merge.
+matching is the current starting point. Annotation IDs are source metadata, not
+a persistent cross-artifact binding. The replacement uses exact scoped keys or
+snapshot-bound indices, with report-only similarity heuristics.
 
 The connection back to Altium's own ECO is preserved through
 `SyncComponent.source_unique_id`, which uses Altium's exact backslash-prefixed
@@ -120,8 +120,9 @@ as separate code paths.
 The `SyncSnapshot` IR (`src/sync.rs`) is intentionally ephemeral — generated,
 diffed, applied, and discarded, mirroring how Altium's own ECO objects are
 transient. Recomputing it is cheap (milliseconds), and persisting it would
-introduce staleness risk if the spec is edited between syncs. A persisted *base*
-snapshot would be needed for three-way merge, but that design is deferred.
+introduce staleness risk if the spec is edited between syncs. The replacement
+workflow uses directional planning without historical sync state; saved plans
+carry exact input preconditions instead.
 
 Two supporting choices reinforce determinism and safety:
 

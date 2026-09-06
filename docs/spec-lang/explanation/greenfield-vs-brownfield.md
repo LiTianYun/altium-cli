@@ -1,147 +1,85 @@
-# Greenfield vs brownfield: who is authoritative?
+# Greenfield, brownfield, and directional plan/apply
 
-The spec language serves two fundamentally different workflows. Which one you are
-in decides what `dump` / `compile` / `plan` / `apply` should *mean* — especially
-how a SchDoc component's inline children (pins, graphics, parameters) are treated.
-This is the single most important conceptual distinction in the spec pipeline, so
-read this before changing the SchDoc executor, dump, or reconciler.
+Greenfield describes a design authored in specs; brownfield describes an existing
+Altium design being edited through specs. Either workflow can use compile
+(spec → document) or dump (document → spec). Command direction selects authority
+for the requested operation, independently of how components are materialized.
 
-**Related pages:** [Design rationale](design-rationale.md) ·
-[Annotations](../language/annotations.md) · [Introduction](../01-introduction.md)
+The accepted replacement design is [NEXT.md](../../../NEXT.md).
+It uses addresses bound to exact input snapshots and no persistent synchronization
+state or embedded tool identity. These are planned semantics, not a claim that
+the replacement CLI or inline-child materialization has shipped.
 
-## The two cases
+## Authoring workflows
 
-### Greenfield — the spec is authoritative
+A greenfield spec can import library definitions and instantiate symbols. GUI
+edits can be folded into source by explicitly planning the dump direction:
 
-The `*-spec` files own the design. They `import` and reference each other; a SchDoc
-component is an *instance* of a symbol defined in an imported `*.schlib-spec`. The
-Altium files are a generated artifact.
-
-`dump` / `plan` / `apply` exist here as a **GUI escape hatch**: the user opens the
-generated document in Altium Designer to do work the spec/agents cannot yet do well
-— spatial reasoning, placement, routing — and then persists those edits *back into
-the spec*. Because the spec is the source of truth, the round-trip that matters is:
-
-```
-spec → apply → (user edits in Altium GUI) → dump → spec   (deltas folded back in)
+```text
+spec → compile/apply → Altium GUI edit → dump/plan → reviewed source edits
 ```
 
-The hard problem in greenfield is **divergence tracking**. A materialized pin or
-graphic is normally identical to its imported symbol template, so it should not be
-re-inlined on dump — only the *delta the user introduced in the GUI* should be
-captured (as an override on the instance). To compute that delta we need stable
-**identity** linking each placed object back to the spec entity it came from
-(see "Identity cascade" below). Because we own the Altium file in this mode, we may
-embed our own typed identity metadata into it.
+A brownfield workflow starts with an existing document and its concrete contents:
 
-### Brownfield — the Altium files are authoritative
-
-An existing Altium project is the source of truth. `dump` / `compile` / `apply`
-exist so agents can read an existing project into spec text, make changes, and
-persist them back to the Altium binaries. There is no library to resolve a
-component against — the component's **inline children are the truth** and must
-materialize verbatim and round-trip losslessly:
-
-```
-Altium doc → dump → spec → (agent edits) → apply → Altium doc   (lossless)
+```text
+Altium document → dump → source edits → compile/plan → reviewed document edits
 ```
 
-In brownfield we must **not** pollute the user's Altium file with our own metadata.
-Identity for diffing comes from Altium-native fields (UniqueId) plus structural
-matching only.
+There is no remembered previous synchronization state. If both files changed,
+the chosen direction determines the desired managed values and the plan exposes
+the destination changes. A changed input after planning invalidates the saved
+plan. Do not promise automatic detection or merging of historical concurrent edits.
 
-## How this resolves the inline-children fork
+## Inline component children
 
-(Previously "Decision #1" in the June 2026 spec roundtrip worklog.) The earlier framing asked
-whether to teach `apply` to materialize inline children (Option A), make `dump`
-authoring-only (Option B), or treat inline children as advisory (Option C). The
-two-case model resolves it: **it is both A and a greenfield override layer**,
-selected per component by *whether the component resolves to an imported symbol*:
+Materialization depends on the explicit symbol reference, not inferred authority:
 
-| Component in spec | Mode | Behavior |
-| --- | --- | --- |
-| No resolvable `symbol:` import (only inline children, or bare `lib_reference:`) | brownfield | Materialize inline children **verbatim**; lossless round-trip. Reuse the SchLib `ComponentChild` machinery (`schdoc_write.rs` already serializes children). |
-| Resolvable `symbol: $lib.Name` import | greenfield | Reconstruct geometry from the resolved symbol as the **base**, apply inline children as **overrides** on top. On dump, emit only fields that diverge from the resolved template. |
+| Component form | Planned materialization |
+| --- | --- |
+| Inline children without a symbol reference | Materialize the concrete pins, graphics, parameters, and other children directly |
+| Resolvable explicit `symbol: $lib.Name` | Use the imported symbol as base and apply declared overrides |
+| Explicit unresolved symbol reference | Hard error; do not fall back to inline-only materialization |
 
-This answers the old open question "who wins when both inline children *and* a
-`symbol:` reference appear?" — **the import is the base, inline children are
-overrides layered on top.**
+An imported definition remains authored source. Dump may represent concrete
+differences as overrides, including whole ordered child collections. If source
+edits cannot preserve imports, expressions, and meaning, report an unsupported
+operation instead of silently flattening or rewriting the definition.
 
-### Current fail-fast boundary (independent of mode)
+### Current fail-fast boundary
 
-Inline `pin` / `graphic` / `part` / `footprint_map` blocks inside a SchDoc
-component parse into `ComponentItem`, but materialization is not implemented.
-`compiler.rs::compile_schdoc_component` now rejects those blocks with a hard
-compile error. Keep that boundary until the materialization path above lands;
-never turn unsupported inline children back into a no-op.
+Inline `pin`, `graphic`, `part`, and `footprint_map` blocks inside a SchDoc
+component parse, but materialization is not implemented.
+`compiler.rs::compile_schdoc_component` rejects them. Keep that error until
+typed materialization and save/reopen validation exist.
 
-## Identity cascade (greenfield)
+## Addressing and source preservation
 
-To map a placed object back to its spec entity for divergence tracking, resolve
-identity in this precedence order — cheapest/least-invasive first:
+Objects without reliable keys use their parent/collection/index in the captured
+typed snapshot. Named collections may use exact scoped keys under their domain
+contract. Native IDs are preserved where present, but are not assumed universal.
 
-1. **Native Altium UniqueId.** Components carry a `UniqueId`; use it first. No data
-   written to the file. Works well for component-level identity.
-2. **Embedded typed spec params.** When native identity is insufficient (e.g. pin-
-   or graphic-level identity, or UniqueId churns across GUI edits), write our spec
-   identity — the 8-char `#[annotation(...)]` IDs — as **reserved, fully-typed**
-   parameters we understand end to end. Never opaque (CARDINAL RULE still applies:
-   typed in/out, no raw retention). Only in greenfield, where we own the file.
-3. **Structural match.** As a last resort, match by designator / position against
-   the resolved symbol.
+Indices can change after insertions, deletions, reorders, or GUI saves. An exact
+input hash protects a reviewed plan from being applied to a different snapshot.
+It does not prove that two objects across edited snapshots share an identity.
 
-Start with (1); add (2) only where (1) demonstrably fails; (3) is the fallback.
+Existing spec annotations remain supported. A source annotation identifies authored
+source metadata; it cannot establish a binding to an Altium primitive that has no
+corresponding durable field. Do not introduce hidden component parameters,
+file-level mode markers, or external identity maps for this workflow.
 
-## Open investigation — mode detection
+Structured CST edits preserve comments, formatting, expressions, and existing
+annotations according to explicit matching/positional semantics. Similarity
+heuristics may improve the report only; reassigning a comment or override is a
+source mutation and cannot be driven by a display heuristic.
 
-**Unresolved:** how does the pipeline know it is in greenfield vs brownfield mode?
-Two candidate mechanisms, both gated on an Altium round-trip question:
+## Artifacts and transactions
 
-- **File-level marker.** Write a document-level metadata value marking the file
-  "greenfield" (and possibly carrying the identity map). Requires that **Altium
-  preserves our metadata across a GUI save** — otherwise the marker is lost the
-  first time the user saves in Altium, exactly the round-trip greenfield depends on.
-- **Inferred.** Derive mode per-component from whether `symbol:` resolves to an
-  imported symbol. No file metadata needed, but more implicit.
+A plan lists every file it would modify. Compile normally writes the document;
+dump normally writes the spec. PcbDoc dump may also write a typed binary routing
+artifact so bulk copper need not appear as thousands of source lines.
 
-**Investigation required before locking this in** (reverse-engineering task, see
-CLAUDE.md "Reverse engineering Altium"): determine empirically and from the
-decompiled source whether Altium Designer preserves, on a GUI save:
-
-1. unknown **document-level header parameters**,
-2. unknown **component parameters** (needed for identity cascade step 2),
-3. unknown **CFB streams** (the sidecar alternative).
-
-The answer decides whether the file-level marker is viable, whether embedded spec
-params survive (identity cascade step 2), and ultimately whether mode can be a
-durable file property or must be inferred. Default until resolved: **brownfield**
-(never embed our metadata into a user's file unless they opted into greenfield).
-
-## Two-sided change sets (plan / apply touch both files)
-
-`plan` / `apply` must be able to report and write changes to **both** the source
-spec *and* the destination document — not just the document. The motivating case is
-greenfield identity: when a spec entity is first applied (or first linked back from
-a GUI edit), the **source spec gains the linking annotation** that ties it to the
-placed object, while the **destination document gains the actual design change**.
-
-So a single `plan` produces a change set with two halves:
-
-- **Source-side changes** — e.g. inserting/updating `#[annotation(<id>)]` lines so
-  spec entities and placed objects stay linked (the spec-side carrier of the
-  [identity cascade](#identity-cascade-greenfield) step 2), folding GUI-introduced
-  deltas back into the spec as overrides, etc.
-- **Destination-side changes** — the ECO against the Altium document (add / modify /
-  remove primitives), as today.
-
-Implications to design for:
-
-- `plan` output should clearly separate "changes to `foo.schdoc-spec`" from
-  "changes to `foo.SchDoc`" so the user sees both before approving.
-- `apply` must write both atomically (or fail both): a destination edit whose
-  linking annotation never made it back into the spec breaks the next round-trip.
-- This generalizes the existing span-based spec rewriting used by `format` / `sync`
-  (see [Design rationale](design-rationale.md) "Text-based rewriting") — annotation
-  insertion is another targeted source rewrite.
-- Brownfield rarely needs source-side writes (no identity to embed), but the
-  mechanism is the same; keep it mode-aware rather than greenfield-only in code.
+All sources, imports, design artifacts, and destinations have hash/absence
+preconditions. Apply stages, serializes, reopens, and validates all outputs before
+committing with a temporary recovery journal. This provides recovery across files,
+not a claim of perfect multi-file atomicity. No source linking-annotation write or
+embedded identity write is required as a side effect.

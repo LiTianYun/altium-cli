@@ -1,6 +1,6 @@
 # Codebase Status
 
-Updated: 2026-06-21
+Updated: 2026-09-05 (plan/apply direction; older corpus results remain dated below)
 
 ## Workspace Overview
 
@@ -14,21 +14,41 @@ altium-format          (core: parsing, serialization, high-level API, rendering 
   ├→ altium-format-render-svg  (SVG rendering backend)
   └→ altium-format-render-png  (PNG rasterization via resvg)
 altium-format-spec     (declarative spec language for Altium documents — being replaced)
-altium-spec-lang       (NEW: lossless CST, parser, intent model, compilation)
-altium-sync            (NEW: snapshots, identity, baseline, three-way planner, plans/patches)
+altium-spec-lang       (scaffold: lossless CST, parser, intent model, compilation)
+altium-sync            (scaffold: snapshots, indexed patches, directional plan/apply)
 altium-cli             (CLI binary)
 ```
 
-## Plan/apply rebuild (in progress, 2026-06-21)
+## Plan/apply rebuild (design simplified, 2026-09-05)
 
-A clean-slate replacement of the spec dump/reconciler/executor/apply machinery is
-underway (see `NEXT.md`; design decisions resolved in `NEXT.md` §20). Foundation
-step 1 is done: the `altium-spec-lang` and `altium-sync` crates are scaffolded and
-wired (`altium-format-types → altium-spec-lang → altium-sync`, with `altium-sync`
-also depending on `altium-format`); the workspace compiles. Next: decouple the
-lossless CST in `altium-format-spec::cst` from the old `lexer`/`ast` modules and
-relocate it (plus its `diagnostic` foundation) into `altium-spec-lang`. The old
-`altium-format-spec` machinery is gutted per-piece as the replacement covers it.
+[NEXT.md](NEXT.md) is the accepted implementation plan: collection/index addresses
+bound to exact input snapshots, self-contained saved plans, directional compile
+and dump, and checked apply with temporary transaction recovery. There is no
+external identity ledger, persistent baseline, automatic sync-state directory,
+or new embedded binding metadata. Report heuristics may group likely edits/moves
+but cannot change execution. Without historical state, direction selects authority;
+the workflow cannot detect independent edits to both sides since a previous sync.
+
+Implemented foundation: the lossless CST, structured source edits, and
+comment-preserving dump updates remain in `altium-format-spec`. The two new
+crates are dependency scaffolds only; neither contains executable modules. No
+state subsystem existed to remove. Obsolete design notes and scaffold identity
+plans were removed, including the unused `altium-sync` random-ID dependency.
+Existing native Altium IDs, spec annotations, and ephemeral spec-to-spec sync
+remain supported; they are not a cross-artifact identity database.
+
+Current CLI behavior is unchanged: `plan` renders the legacy ECO and `apply`
+recompiles/runs the separate executor. Saved-plan execution, precondition checks,
+typed snapshot patches, and recovery transactions are not implemented. The
+plan/apply checkmarks below indicate legacy command availability, not these
+guarantees. Next: finish language/SchLib intent separation, then the complete
+SchLib snapshot → plan → checked apply slice before migrating other domains.
+
+PcbDoc bulk routing is planned as an explicitly referenced typed binary design
+artifact, separate from synchronization state. AutoPCB has `.routes` binary I/O;
+Altium currently only compiles `routing.solution` and does not load it on apply.
+Dump still emits tracks/arcs/vias as text. The bridge needs a fidelity and net/layer
+mapping contract before arbitrary routed boards can roundtrip through that artifact.
 
 ## Document Type Support
 
@@ -127,10 +147,11 @@ Invariants now enforced:
 **Design gap (decision RESOLVED 2026-06-20)**: SchDoc spec dump emits inline
 component children (pins, graphics, parameters), but `apply` was designed for
 SchLib-import authoring (`symbol: $lib.Name` + `pin X -> #NET`), not
-full-fidelity sheet reconstruction. Resolved via the greenfield/brownfield
-model — see `docs/spec-lang/explanation/greenfield-vs-brownfield.md`. Inline
-children will materialize verbatim (brownfield) or as overrides on an imported
-symbol (greenfield), selected per component by whether `symbol:` resolves.
+full-fidelity sheet reconstruction. The planned materialization contract (clarified
+2026-09-05) is independent of authority: absent symbol reference means concrete
+inline children; a resolvable explicit symbol supplies an imported base plus
+overrides; an unresolved explicit symbol is an error. See
+`docs/spec-lang/explanation/greenfield-vs-brownfield.md`.
 **Fail-fast fix landed**: inline `pin`/`graphic`/`part`/`footprint_map` blocks
 inside a SchDoc component previously parsed then silently dropped at compile;
 they now hard-error (`compiler.rs::compile_schdoc_component`) until

@@ -292,6 +292,15 @@ stored on `PcbDocSpec.routing`. Every key other than `solution` is captured in
 `config: IndexMap<String, String>`. This is routing tooling metadata, not a direct
 PcbDoc record.
 
+**Current execution gap:** Altium CLI does not load `routing.solution` during
+plan/apply, and dump emits tracks/arcs/vias as inline text. A successfully compiled
+path is not evidence that its copper was applied. The replacement
+[PcbDoc plan](../../../NEXT.md#pcbdoc-bulk-routing) uses an explicitly referenced
+typed binary routing artifact, with input preconditions and transactional dump
+outputs. AutoPCB has `.routes` binary I/O, but the native bridge still needs full
+field coverage and board/net/layer context checks; arbitrary PcbDoc routing cannot
+yet roundtrip through it losslessly. Binary design data is separate from sync state.
+
 ---
 
 ## `placement`

@@ -223,13 +223,12 @@ generated artifact + GUI escape hatch) and *brownfield* (Altium authoritative, s
 is an agent-editable view). Inline-children handling is selected per component by
 whether it resolves to an imported symbol: brownfield → materialize verbatim
 (lossless, "Option A"); greenfield → reconstruct from the imported symbol and apply
-inline children as overrides (emit only divergence on dump). Identity uses a cascade
-(native UniqueId → embedded typed spec params → structural match). `plan`/`apply`
-must produce two-sided change sets (source spec gains linking annotations; document
-gains the design delta). Open item: mode detection (file-level marker vs inferred)
-gated on a reverse-engineering investigation into whether Altium preserves our
-metadata across a GUI save. Immediate fail-fast fix regardless: unhandled inline
-children currently drop silently at compile and must become a hard error.
+inline children as overrides (emit only divergence on dump). The associated
+identity/mode proposal was superseded on 2026-09-05 by [NEXT.md](../../NEXT.md):
+directional authority, snapshot-bound indices, and no persistent sync state or
+embedded linking metadata. The current explanation separates authority from
+materialization. The immediate fail-fast fix from this investigation was to
+reject unsupported inline children; that compiler error has since landed.
 
 The original analysis is retained below for context.
 

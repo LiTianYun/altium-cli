@@ -1,8 +1,10 @@
 # Annotations
 
-The `#[annotation(...)]` attribute attaches sync metadata to a block: a stable identity,
-a stability flag, and an optional group. Annotations are what let the sync system match
-spec blocks to Altium objects across edits without relying on names or positions.
+The `#[annotation(...)]` attribute attaches source metadata to a block: an ID,
+a stability flag, an optional group, and an optional native source ID. A source
+annotation does not create a durable Altium object identity. Matching still depends
+on available native fields, scoped keys, or positional rules; the replacement
+[plan/apply design](../../../NEXT.md) does not persist cross-artifact bindings.
 
 Annotation parsing is in
 [`src/parser.rs`](../../../crates/altium-format-spec/src/parser.rs) (`parse_annotation`),
@@ -132,5 +134,6 @@ pub struct CompiledAnnotation {
 ```
 
 This compiled annotation is attached to 15+ spec model types and is emitted before each
-block by the `dump` command (`#[annotation(...)]` lines) so round-tripped specs retain
-their stable identities.
+block by the `dump` command (`#[annotation(...)]` lines). Structured source updates
+preserve annotations on matched blocks; this is not a guarantee of identifying
+the same Altium primitive after arbitrary GUI edits.

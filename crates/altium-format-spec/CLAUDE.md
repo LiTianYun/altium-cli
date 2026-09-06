@@ -6,12 +6,12 @@ Spec DSL crate: parse, compile, execute, reconcile, dump, and sync Altium spec f
 
 Before changing the SchDoc executor/dump/reconciler (or any inline-children,
 identity, or two-sided change-set behavior), read
-`docs/spec-lang/explanation/greenfield-vs-brownfield.md`. It defines whether the
-spec or the Altium files are authoritative, which decides whether inline children
-are materialized verbatim (brownfield) or treated as overrides on an imported
-symbol (greenfield), how object identity is tracked (UniqueId → embedded typed spec
-params → structural match), and why `plan`/`apply` must write both the source spec
-(linking annotations) and the destination document.
+`docs/spec-lang/explanation/greenfield-vs-brownfield.md`. It separates command
+direction/authority from inline materialization and imported-symbol overrides.
+The replacement plan in `NEXT.md` uses snapshot-bound collection indices, exact
+input preconditions, and directional patches. Do not introduce persistent sync
+state or embedded linking metadata. Existing native IDs and source annotations
+remain typed data; report-only matching heuristics must never select mutations.
 
 ## Index
 

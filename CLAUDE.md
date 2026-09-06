@@ -9,7 +9,7 @@ Rust workspace for reading, writing, and querying Altium Designer files.
 * **crates/altium-format-types** Raw types types reverse engineered from Altium
 * **crates/altium-format**  Core library for Altium file parsing and manipulation
 * **crates/altium-format-query**  Query interface over altium-format documents
-* **crates/altium-format-spec**  Declarative `*-spec` DSL: parse/compile/dump/plan/apply/sync over Altium documents. See `docs/spec-lang/` and especially `docs/spec-lang/explanation/greenfield-vs-brownfield.md` (greenfield = spec authoritative; brownfield = Altium authoritative — this decides inline-children, identity, and two-sided change-set behavior).
+* **crates/altium-format-spec**  Declarative `*-spec` DSL: parse/compile/dump/plan/apply/sync over Altium documents. See `docs/spec-lang/` and especially `docs/spec-lang/explanation/greenfield-vs-brownfield.md` for directional authority and inline/imported materialization. `NEXT.md` defines the replacement plan/apply design using snapshot-bound indices without persistent synchronization state.
 * **crates/altium-format-render-svg**  SVG rendering for Altium documents
 * **crates/altium-format-render-png**  PNG rendering for Altium documents
 * **crates/altium-cli**  Command-line tool for file inspection and manipulation

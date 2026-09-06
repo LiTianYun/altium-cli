@@ -14,6 +14,9 @@ Use sources in this order:
 
 [`proposals/`](proposals/) and [`worklogs/`](worklogs/) are explicitly non-authoritative. They record proposed work and dated investigations.
 
+[`NEXT.md`](../NEXT.md) is the accepted implementation direction for the plan/apply
+replacement. It specifies future work, not current feature availability.
+
 ## Maintenance rules
 
 - Do not add an in-tree archive. Git history is the archive.
@@ -21,4 +24,3 @@ Use sources in this order:
 - Prefer links to Rust types, constants, and parsers over duplicated field tables.
 - Every unknown stream, record, field, or trailing byte must produce a hard error until typed support exists. Documentation must never recommend opaque retention or silent skipping.
 - When a document becomes a completed plan or a one-off investigation, delete it or move it to the owning repository.
-

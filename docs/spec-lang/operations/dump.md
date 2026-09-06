@@ -59,8 +59,8 @@ crate README:
   ambiguous (e.g. two footprints with the same name): the value depends on the
   order the dumper visits blocks, which can change after document edits.
 
-If you need stable IDs — for three-way merge or to anchor external tooling — set
-them by hand:
+To give external tooling a stable source annotation, set it by hand. This does
+not create a durable identity on a corresponding Altium primitive:
 
 ```
 #[annotation(id = "MYID1234")]

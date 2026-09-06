@@ -99,8 +99,8 @@ outputs but operate on different input types. They must remain separate.
 
 Altium's ECO objects are transient in-memory — generated, reviewed, applied, discarded.
 Recomputing is cheap (O(ms)). Persistence would add staleness risk if the spec is edited
-between syncs. For three-way merge (Phase 3), a base snapshot would need persistence, but
-that design is deferred.
+between syncs. The replacement plan in `NEXT.md` uses directional planning without
+persistent synchronization state; saved plans bind patches to captured inputs.
 
 ### Why auto-generated annotation IDs may change between dump runs
 
@@ -111,8 +111,8 @@ depends on the ordering the dumper happens to visit them in, which may differ be
 runs after document edits. This is expected behaviour: auto-generation is a convenience
 default that trades strict stability for zero user effort on first dump.
 
-Users who require stable IDs — for example, to drive three-way merge or to anchor
-external tooling — should set them manually:
+Users who require stable source IDs to anchor external tooling can set them
+manually; these do not establish durable identities for Altium primitives:
 
 ```
 #[annotation(id = "MYID1234")]
@@ -141,8 +141,9 @@ than introducing a free-form escape hatch.
 
 Specs are plain text without persistent UUIDs. Altium itself falls back to designator
 matching (`eMapByDesignator`) when UniqueIDs are missing or broken. Designator-only
-matching is the correct starting point; annotation IDs are supplementary for future
-rename detection in Phase 3 three-way merge.
+matching is the current starting point. Source annotation IDs do not establish
+cross-artifact bindings. The replacement uses explicit scoped-key or positional
+semantics, with similarity pairing restricted to report presentation.
 
 ### Why `IndexMap` over `HashMap` in SyncSnapshot
 

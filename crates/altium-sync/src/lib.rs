@@ -1,20 +1,23 @@
 //! # altium-sync
 //!
-//! The synchronization layer of the Altium spec toolchain: it compares the
-//! authored spec (via [`altium_spec_lang`]) against a concrete Altium document
-//! (via [`altium_format`]) and a recorded baseline, then produces a versioned,
-//! self-contained plan of typed patches that `apply` executes exactly.
+//! The directional plan/apply layer of the Altium spec toolchain. It projects
+//! authored intent (via [`altium_spec_lang`]) and typed Altium documents (via
+//! [`altium_format`]) into snapshots, then produces self-contained typed patches.
+//! Addresses are collection indices bound to exact input hashes. Apply executes
+//! the reviewed patches; display heuristics cannot change execution targets.
+//!
+//! No persistent sync state or embedded binding metadata is required. Explicit
+//! binary design artifacts, saved plans, and temporary recovery files are supported
+//! workflow concepts, not a database of cross-artifact object identities.
 //!
 //! This crate is being populated as part of the clean-slate plan/apply rebuild
 //! (see `NEXT.md`). It depends on both `altium-format` and `altium-spec-lang`;
 //! neither depends on it.
 //!
-//! Planned modules (per `NEXT.md` §§6–12, 14):
-//! - `snapshot` — concrete per-domain artifact snapshots (concrete types, not traits yet)
-//! - `identity` — `BindingId` (u128, base32), `DocumentLocator`, the resolution ladder
-//! - `baseline` — per-artifact `.altium/` JSON baseline (`schema_version`), the keyless ledger
-//! - `plan` — versioned self-contained plan, `ArtifactPrecondition`, `SemanticChange`,
-//!   `ArtifactPatch` / `PatchOp` (coarse entity-aggregate replacement)
-//! - `planner` — three-way diff (`ChangeDisposition`) and conflict classification
-//! - `apply` — staging, validation, reopen, and the filesystem recovery journal
-//! - `render` — the semantic ECO view over a plan
+//! Planned modules (see `NEXT.md`):
+//! - `snapshot` — per-domain projection and intent elaboration
+//! - `address` — artifact/owner/collection/index locators in an immutable snapshot
+//! - `plan` — versioned patches, input preconditions, and typed before/after state
+//! - `planner` — directional diff and managed-scope validation
+//! - `apply` — checked execution, staging, reopen validation, and journal recovery
+//! - `render` — exact patch reporting and optional display-only pairing/grouping

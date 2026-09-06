@@ -1,907 +1,318 @@
-# Clean-Slate Bidirectional Plan/Apply Architecture
+# Snapshot-bound plan/apply
 
-Status: proposed plan of record for the next implementation cycle.
+Updated: 2026-09-05. Accepted implementation direction; the replacement engine
+is not implemented yet. See [STATUS.md](STATUS.md) for current behavior.
 
-Implementation checkpoint (2026-06-21): the lossless structured CST, typed
-accessor/edit layer, and comment-preserving `dump` update path described in
-sections 4.1 and 11 are implemented. The old CLI `spec_merge` text splice has
-been removed. The baseline, three-way planner, saved-plan transaction, and
-document patch portions of this plan remain future work.
+## Decisions
 
-This document captures the clean-slate design discussion for replacing the existing spec-language
-dump/reconciler/executor/apply machinery. Future work should start here rather than extending the
-current reconciler or executor.
+- No external identity ledger, persistent sync database, last-synchronized
+  baseline, or automatic `.altium/` state discovery.
+- No tool-generated cross-artifact IDs or embedded identity parameters. Preserve
+  native Altium IDs and existing spec annotations as typed document/source data.
+- Address objects by artifact, owner path, collection kind, and numeric index in
+  a particular typed snapshot. An index is not durable identity.
+- Plan produces versioned, self-contained typed patches. Apply executes exactly
+  those patches without recompiling intent or running a separate reconciler.
+- Exact hashes bind the plan to all reviewed inputs. Any intervening edit,
+  including a GUI save or source formatting change, requires replanning.
+- Compile and dump are directional. The selected source supplies desired values
+  inside declared scope; the destination supplies preserved values outside it.
+  There is no automatic historical three-way conflict detection.
+- Similarity matching, move detection, and grouping improve the report only.
+  They cannot select execution targets, change patches, or resolve conflicts.
 
-## 1. Decision boundary
+Explicit binary design artifacts (such as routing data), saved plans, and
+temporary transaction recovery files are permitted. None is a database of
+persistent object bindings. Recovery journals are never inputs to later planning.
 
-Preserve:
+## Current checkpoint and evidence
 
-- `altium-format` low-level parsing and serialization implementation.
-- `altium-format` high-level typed document APIs.
-- Domain types and constants from `altium-format-types`.
-- The repository-wide fail-fast and no-opaque-data rules.
+The language, lossless CST, structured edits, and comment-preserving dump updates
+exist in `altium-format-spec`. CLI plan still renders an ECO while apply recompiles
+the spec and invokes a different executor; preview/apply agreement is not guaranteed.
+`altium-spec-lang` and `altium-sync` contain dependency scaffolds only. There is
+no executable external state subsystem to migrate or delete.
 
-Treat as replaceable:
+The recorded SchLib / Altium 26.2 GUI-save experiment (2026-06-21) found:
 
-- The current spec `dump.rs` implementation.
-- The current `reconciler.rs` implementation.
-- The current `executor.rs` implementation.
-- The current report-oriented `eco.rs` model.
-- `altium-cli/src/spec_merge.rs`.
-- The current root `dump`, `plan`, and `apply` orchestration.
-- The current `SpecModel` shape and compiler architecture where they obstruct the new design.
-- Existing spec syntax implementation details. Preserve useful language behavior deliberately, not
-  accidentally.
+| Injection point | Recorded GUI-save result |
+| --- | --- |
+| FileHeader document block, unknown key | Dropped |
+| Component RECORD=1 header, unknown key | Dropped despite its native UniqueID |
+| Pie RECORD=9 primitive, unknown key | Dropped |
+| Real user parameter RECORD=41, Name/Text | Preserved; normalized and given a native UniqueID |
 
-Do not start by incrementally teaching the current `EntityChange` report to execute. Its string
-identities and string-valued properties are not a safe executable protocol.
+This is historical evidence, not a newly repeated GUI test. It does not establish
+preservation of hidden parameters, arbitrary streams, or other formats. The new
+workflow does not depend on custom metadata surviving a GUI save.
 
-## 2. Core conclusion
+Native IDs are not uniformly absent: PcbLib has typed UniqueID sidecar support,
+and PcbDoc rebuilds its pad-ID section. Conversely, PcbDoc high-level names such
+as `track_3` are synthesized from positions. Do not equate an API `id` with a
+persistent file-format identifier. Evidence: `api/pcbdoc_read.rs`,
+`api/pcbdoc_write.rs`, and `pcblib/sidecar.rs` in `altium-format/src/`.
 
-This is not fundamentally a two-way Terraform reconciliation problem. Both artifacts are editable,
-so safe synchronization needs three inputs:
+## Boundaries
 
-```text
-                 last synchronized state
-                           Base
-                          /    \
-                         /      \
-              authored spec    Altium document
-                 Source             Document
-```
+`altium-format` owns strict parsing, serialization, native references, ownership,
+format upgrades, typed public APIs, and invariant validation. All file-format
+internals remain private. Expand typed APIs before using a missing operation;
+unsupported data must error, never pass through as undecoded bytes.
 
-The new system is a three-way bidirectional synchronization engine:
+`altium-spec-lang` owns CST, diagnostics, parser, formatter, authored intent,
+imports, type-checking, and normalization. It depends on `altium-format-types`,
+not the document or sync crates. It produces typed intent.
 
-```text
-Spec text
-   |
-   v
-Lossless CST --> Authored Intent Model --resolve/import/default-->+
-                                                               |
-Altium file --high-level API--> Concrete Artifact Snapshot -----+
-                                                               v
-Sync baseline ------------------------------------------> Three-Way Planner
-                                                               |
-                                                               v
-                                                          PlanBundle
-                                             +-----------------+-----------------+
-                                             v                                   v
-                                      SpecSourcePatch                    AltiumDocumentPatch
-                                             |                                   |
-                                             +---- stage -> validate -> commit --+
-```
+`altium-sync` owns Altium-shaped intent elaboration, concrete snapshots,
+addresses, directional diff, plans, source/document patches, reports, and checked
+transaction execution. It depends on both language and document layers. This
+avoids a cycle between intent compilation and snapshot types. Start with concrete
+SchLib types; a universal provider framework is not a prerequisite.
 
-The defining invariant is:
+`altium-cli` owns arguments, explicit paths, exit codes, and output. Each migrated
+domain calls one planner and one saved-plan executor. Existing ephemeral
+`altium spec sync` is a separate spec-to-spec workflow; keep it working.
 
-> `apply` executes the exact typed patches produced by `plan`.
+AutoPCB owns canonical routing data, routing algorithms, transactions, and route
+certificates; Altium CLI owns typed native import/export. Follow
+[the integration boundary](docs/autopcb-routing-integration.md).
 
-The semantic ECO is a rendered view of that plan. It is not itself the mutation protocol.
+## Addressing and collection semantics
 
-## 3. Preserved Altium API boundary
+An address is `(artifact, owner_path, collection_kind, index)`. Use typed collection
+kinds and validated index wrappers. Reuse domain types; discuss missing domain
+types before adding them to `altium-format-types`.
 
-`altium-format` remains responsible for understanding Altium formats:
+Every address refers to the immutable input snapshot, not an incrementally mutated
+collection. Each domain defines its typed projection order and ownership. Display
+sorting and native CFB record numbers do not define this order.
 
-- CFB and stream layout.
-- Records, primitives, sidecars, and ownership reconstruction.
-- Strict typed parsing and serialization.
-- Format-version upgrades.
-- High-level document types and mutation methods.
-- Document invariant validation.
+For collections with language-defined natural keys, match exact parent-scoped
+keys (component name, footprint name, pad designator). Duplicate/ambiguous keys
+block the operation. Native-ID matching requires an explicit domain contract.
+Otherwise, source item N describes destination item N: positional alignment is
+the declared semantics, not a guess about historical identity.
 
-The new workflow code must not reach into private records, streams, parameter collections, or raw
-binary structures. If the high-level API cannot express a required operation, expand the high-level
-API first with fully typed support.
+- A complete, explicitly managed collection determines its final order and length.
+  Removing destination-only entries requires source-declared deletion permission.
+- A partial collection preserves unspecified destination entries. Omission does
+  not authorize truncation. Define partial/complete collection syntax before
+  shipping collection deletion.
+- Reordering/inserting may produce a noisy positional diff. Similarity cannot
+  remap objects, annotations, comments, or overrides during mutation.
+- Source annotation IDs remain source metadata; they cannot bind an otherwise
+  unidentifiable Altium object across GUI edits.
 
-Low-level details stay private to `altium-format`. The workflow layer operates only on high-level
-API objects and its own authored/synchronization models.
+Prefer replacing complete high-level aggregates (SchLib component, PcbLib
+footprint) with typed ordered children. Resolve all addressed inputs first, then
+build final collections from the immutable snapshot; multiple deletes/inserts
+must never shift another patch's target. Reject overlapping/contradictory patches.
+Preserve/rebuild native references and ownership through typed APIs. Reopen and
+validate insertion, deletion, and reorder cases before a domain can ship.
 
-## 4. Model layers
+## Direction, scope, and intent
 
-Do not force authored intent, resolved document state, and persisted source syntax into one model.
-They have different semantics.
+Compile resolves the spec and imports and computes desired target state. Dump
+projects the document and computes structured edits to existing source, or creates
+new source. No state remembers which side changed: if both were edited before
+planning, direction selects authority within scope and the report shows replacements.
+Edits after planning invalidate the plan.
 
-### 4.1 Lossless source CST
+Retain explicit authored meanings: literal = Set, `null` = Clear, contextual
+`inherit` and `reset` = inheritance/reset. Absence at instance scope leaves the
+target unchanged; absence in a definition inherits the defined default. Define
+precedence, legal clear/reset operations, and contextual errors with SchLib examples
+before implementing these forms. Unsupported is never an absence meaning.
 
-The spec parser must produce a lossless concrete syntax tree that preserves:
+Source-declared scope selects writable entities, collections, and fields. Deletes
+require explicit source opt-in; CLI options may only tighten scope. Outside-scope
+content is fully parsed and typed and deliberately preserved. Unsupported
+representation inside scope blocks planning instead of claiming convergence.
 
-- Comments.
-- Whitespace and formatting.
-- Block and property ordering.
-- Imports, templates, bindings, and expressions.
-- Explicit versus omitted properties.
-- Source spans and stable syntax-node identities.
+Greenfield/brownfield describe authoring context, not metadata policies. SchDoc
+inline children without a symbol reference materialize directly. A resolvable
+explicit symbol supplies an imported base plus overrides; an unresolved explicit
+symbol errors. Dump preserves imports and authored expressions, representing
+differences as overrides or complete positional child collections where possible.
+If that cannot preserve authored meaning, block rather than silently flatten.
+Keep existing inline-child errors until materialization works.
 
-Unknown syntax is a parse error. It is never silently retained as an opaque node.
+## PcbDoc bulk routing
 
-The CST is the target of `dump apply`. Existing specs are updated with structured CST edits, not
-regenerated wholesale and not merged by top-level text replacement.
-
-### 4.2 Authored intent model
-
-The authored model represents what the source means before it is expanded into an Altium document.
-It may contain:
-
-- Imports and reusable definitions.
-- Definition/occurrence relationships.
-- Templates and generators.
-- Defaults and inherited values.
-- Instance overrides.
-- Placement and routing constraints.
-- Explicit unset/reset operations.
-- Source bindings and annotations.
-
-Conceptually:
-
-```rust
-struct ComponentOccurrenceIntent {
-    id: SourceId,
-    designator: String,
-    definition: DefinitionRef,
-    placement: Option<PlacementIntent>,
-    overrides: Vec<OverrideIntent>,
-}
-```
-
-The authored model is not compared directly with Altium API objects.
-
-### 4.3 Concrete artifact snapshot
-
-Compilation resolves imports, templates, defaults, constraints, and overrides into a complete,
-Altium-shaped semantic snapshot:
-
-```rust
-enum ArtifactSnapshot {
-    SchLib(SchLibSnapshot),
-    PcbLib(PcbLibSnapshot),
-    SchDoc(SchDocSnapshot),
-    PcbDoc(PcbDocSnapshot),
-    PrjPcb(PrjPcbSnapshot),
-}
-```
-
-The document side projects through the high-level APIs into the same snapshot family.
-
-Reuse high-level API types inside snapshots where they are complete and have suitable ownership
-semantics. Wrap or supplement them where synchronization needs additional information such as:
-
-- Stable binding identity.
-- Ownership and occurrence paths.
-- Managed/unmanaged coverage.
-- Source provenance.
-- Collection ordering.
-- Semantic fingerprints.
-
-The existing high-level APIs are the Altium artifact boundary, not necessarily the long-term
-vendor-neutral canonical design graph.
-
-### 4.4 Optional future design graph
-
-Do not make a new vendor-neutral design graph a prerequisite for reliable plan/apply.
-
-Near-term flow:
+Do not require thousands of routed segments to appear in authored spec text.
+The intended split is readable board/net/rule/placement intent plus an explicitly
+referenced, typed binary routing artifact:
 
 ```text
-Authored Intent -> Concrete Altium Snapshot
+routing {
+    solution: "main.routes"
+}
 ```
 
-Possible future flow:
+Current evidence (2026-09-05):
+
+- This syntax compiles to `RoutingSpec.solution` in Altium CLI today, but its
+  executor does not load the file. Dump still emits individual tracks/arcs/vias.
+- The sibling AutoPCB repository implements `autopcb-routes`, including binary
+  save/load for typed segments, vias, and pour geometry. It also has JSON inspection.
+- Its current route model is not a complete arbitrary-PcbDoc serialization:
+  native arcs and some Altium attributes are not represented. Numeric net/layer
+  IDs need an explicit mapping to the board they belong to.
+
+Implementation requirements:
+
+1. Reuse the AutoPCB artifact boundary; do not invent a second routing authority.
+   Define the exact supported schema, board context, units, net/layer mapping,
+   native attributes, and import/export contract before wiring the bridge.
+2. Keep all routing content fully typed. Extend the owning typed schema where
+   needed or reject unsupported externalization. No raw native payload sidecar.
+   Scope-limited edits may preserve fully parsed routing in the target document
+   when routing is outside scope; never claim a complete export in that case.
+3. A full PcbDoc dump stages spec plus routing artifact together. Compile loads
+   the explicitly named file, validates references, and plans replacement of the
+   managed routing collections. Missing/invalid files are errors; never silently
+   ignore `routing.solution` or append duplicate copper on repeat apply.
+4. Define the interaction with inline hand-authored copper: each managed collection
+   must have one authoritative representation. Reject overlapping inline/artifact
+   ownership until a deterministic explicit composition rule exists.
+5. Hash routing artifacts as inputs/outputs just like source/imports/documents.
+   Freeze typed route patch data in the saved plan; apply must not refresh it from
+   a subsequently changed artifact. Dump's spec and binary outputs share a transaction.
+6. Report counts and semantic changes by net/layer, with expanded indexed detail.
+   Offer an explicit text inspection/export path; bulk text is not the default
+   authored representation. Bound memory and report-pairing cost on large boards.
+
+The artifact stores current design geometry, not object-history mappings or a
+last-synchronized baseline. File encoding does not alter strict typed parsing rules.
+
+## Saved-plan contract
+
+Use self-contained JSON with an exact supported `schema_version`. Versioning
+covers patch semantics, snapshot projection/order, addresses, and normalization.
+Unsupported versions fail with a request to regenerate.
+
+The plan embeds domain/direction/scope, a resolved artifact manifest, typed
+before/after state, typed Create/Replace/Delete or source patches, and diagnostics.
+Use collision-resistant byte hashes (such as SHA-256) for every source, transitive
+import, referenced binary design artifact, and destination read or written.
+Record expected absence for new outputs.
+
+Hash and parse the same captured contents. Detect changes during planning.
+Freeze output paths; an alternate output has its own precondition independent of
+a read-only target. Permit an explicitly declared in-place input/output as one
+artifact protected by one precondition. Reject accidental cross-artifact aliases,
+duplicate destinations, and any plan-file collision with an input or output;
+resolve symlinks consistently. Numeric references inside routing artifacts must be
+checked against their board/net/layer context, not accepted because they are in range.
+
+At apply, do not recompile intent, reread untracked imports, rerun a router, or mint
+new random semantic values. Allocate required native creation IDs at planning.
+They are native output data, not synchronization bindings.
+
+For a new source file embed validated text and its typed expected state; for
+existing source save structured edits whose locators are bound to the source hash.
+Large machine-readable plan payloads may contain all frozen geometry; report
+summaries and authored spec text need not. Binary plan packaging can be considered
+later without changing the contract; it is not required for the first SchLib slice.
+
+## Reporting
+
+Derive the report from actual patches and typed before/after values. First ship
+an exact indexed diff. Later add deterministic, bounded display heuristics:
+exact-value alignment, likely move/edit pairing, grouping, and repetitive summaries.
+Label inferred pairings, retain old/new indices, and expose every executable change
+in expanded output. Never hide deletes, blocking errors, or changed values behind
+tolerances. Turning heuristics off must leave patches and after-state identical.
+
+## Checked apply and recovery
+
+1. Decode strictly; reject bad versions, diagnostics, contradictory patches, and
+   invalid addresses before artifact writes.
+2. Verify every input hash/absence precondition, parse captured contents, and
+   resolve all addresses against immutable snapshots.
+3. Execute typed patches in memory; verify planned after-state and all invariants.
+4. Stage every output beside its destination; serialize, reopen, project, and
+   validate against the planned result. Only documented typed upgrades are allowed.
+5. Prepare a durable recovery journal for this transaction's explicit destinations,
+   stages, and previous files. Recheck inputs immediately before commit.
+6. Commit by renames and record progress durably. Keep recovery material until
+   every output is committed, then clean it up.
+7. Detect interrupted transactions and support completing or restoring the full
+   file set. Never overwrite a subsequent unrelated edit during recovery. Remove
+   the journal after resolution; later plans never consume it as sync state.
+
+Ordinary renames do not provide multi-file atomicity or exclude an Altium writer.
+Document the exclusive-write window and detect races where possible; do not claim
+cross-process atomic compare-and-swap. Read-only planning creates no recovery files.
+Transaction backups are not undecoded payloads carried through the semantic model.
+
+## Planned CLI
+
+These commands are not implemented yet:
 
 ```text
-Authored Intent -> Vendor-Neutral Design Graph -> Concrete Altium Snapshot
-```
-
-Any future graph must still obey the no-opaque-data rule. The existing draft design-graph documents
-that permit opaque preservation cannot be adopted unchanged.
-
-## 5. Authority and metadata are orthogonal
-
-Do not infer authority from whether a component import resolves.
-
-```rust
-enum Authority {
-    Spec,
-    Altium,
-}
-
-enum MetadataPolicy {
-    NativeOnly,
-    ManagedEmbedded,
-    ManagedExternal,
-}
-```
-
-Supported workflows:
-
-| Workflow | Authority | Metadata policy | Meaning |
-| --- | --- | --- | --- |
-| Greenfield managed | Spec | ManagedEmbedded or ManagedExternal | Spec owns design intent; Altium is generated but GUI edits can be folded back. |
-| Brownfield managed | Altium | ManagedEmbedded or ManagedExternal | Existing Altium design remains authoritative, but durable bindings and baselines are allowed. |
-| Brownfield non-invasive | Altium | NativeOnly | Never add tool metadata; use native IDs and explicit/heuristic matching only. |
-
-Import/template resolution determines materialization behavior, not workflow authority.
-
-## 6. Identity and bindings
-
-Keep distinct identity roles:
-
-```rust
-struct BindingId(...);        // common identity across source and Altium artifacts
-struct SourceId(...);         // identity of an authored source entity
-struct AltiumNativeId(...);   // Altium UniqueId or equivalent
-struct ResourceAddress(...);  // scoped runtime address used by plans
-```
-
-Matching priority:
-
-1. Existing managed `BindingId` shared across artifacts.
-2. Native Altium `UniqueId` or typed sidecar identity.
-3. Stable source identity.
-4. Natural key within a parent scope.
-5. Similarity-based candidate matching.
-6. Ambiguous match: hard error requiring resolution.
-
-Structural hashes are fingerprints, not identity. Geometry changes alter the hash, and identical
-primitives can collide. Use hashes to test equality and rank candidates, never as the only durable
-identity mechanism.
-
-For managed files, plan/apply may add annotations and typed metadata to both the spec and Altium
-document. Prefer native IDs where sufficient. Custom metadata must be fully parsed and serialized by
-`altium-format`; unknown parameter retention and opaque streams remain forbidden.
-
-Before choosing a metadata carrier, verify with fixtures and reverse-engineered Altium code that GUI
-saves preserve it. Candidate carriers include typed document/component parameters or a dedicated,
-fully understood stream. If preservation is not proven, use managed external state or native-only
-identity.
-
-### 6.1 GUI-save preservation: empirical result (2026-06-21, SchLib / Altium 26.2)
-
-Tested directly. Unknown `|KEY=VALUE|` pairs were injected at four points through the high-level
-write path, the file was opened in the Altium GUI, saved (`Ctrl+S`, which re-serializes in place),
-and the result was inspected stream-by-stream.
-
-| Injection point | Entity has native UniqueID? | Survived GUI save? |
-| --- | --- | --- |
-| `FileHeader` document block (raw key) | n/a | No — dropped |
-| Component header `RECORD=1` (raw key) | Yes | No — dropped |
-| Pie primitive `RECORD=9` (raw key) | No | No — dropped |
-| User parameter `RECORD=41` (real `Name=/Text=` object) | n/a | Yes — Altium normalized it and assigned it a fresh UniqueID |
-
-Conclusions that constrain the identity/metadata design:
-
-- Altium round-trips every record through a typed model and **discards any parameter it has no field
-  for** on save. This is the same fail-fast/typed-reserialize behavior `altium-format` itself enforces.
-- **Native UniqueID presence does not protect an unknown key.** The component header carries a
-  UniqueID and still lost its injected key. Survival depends on the key being a *recognized
-  first-class object*, not on the host entity having an id.
-- The only proven embedded carrier in SchLib is a **real component parameter (`RECORD=41`), and only
-  at component scope.** Document-level keys and sub-component primitives cannot carry surviving
-  embedded metadata.
-- Therefore `MetadataPolicy::ManagedEmbedded` is viable **only for component-scoped metadata via real
-  parameters**. Document-level and primitive-level managed metadata must use
-  `MetadataPolicy::ManagedExternal` (an external baseline file) or fall back to native-only identity.
-- For entities below component scope (pins, graphics) and for document/component headers, **binding
-  must rely on native `UniqueId` where it exists, and on structural/natural-key matching where it does
-  not.** We cannot persist our own `BindingId` on them.
-- Still to confirm for PcbLib, SchDoc, PcbDoc, PrjPcb. The pipeline is the same param-based
-  typed-reserialize, so the result is expected to be identical, but each must be verified before any
-  format relies on an embedded carrier.
-
-### 6.2 Resolved identity model (2026-06-21)
-
-Native identity coverage is heterogeneous (verified against the high-level API types). The new design
-must model identity *source/confidence per entity*, not assume a single id field per entity — that
-assumption is the core defect of the current reconciler (one natural-key string used as both identity
-*and* apply-address, exact-match only, additive-only, no rename detection, no baseline).
-
-Identity tiers:
-
-| Tier | Entities | Anchor |
-| --- | --- | --- |
-| 1 — reliable native id | All SchDoc sheet objects; PrjPcb document refs/variants; PcbDoc *named* collections (Net/Component/Polygon/Rule, `id == name`) | `BindingId` ← native `UniqueId` directly; renames are free |
-| 2 — present-but-blank | SchLib Component / Pin / Parameter (`unique_id` exists but is often empty) | Component anchored by an embedded `BindingId`; Pin/Parameter use native id when populated, else parent-scoped natural key |
-| 3 — keyless | SchLib `PieGraphic`; **all** PcbLib primitives; **all** PcbDoc primitives (their `id` is synthesized at parse, not stored in the file) | No native id and not embeddable — identity exists **only** in the external ledger |
-
-Three fixed decisions:
-
-1. **The keyless structural ledger is designed up front** (covers Tier 3 across PcbDoc/PcbLib/Pie), not
-   deferred. The baseline format must support all three tiers from the first release.
-2. **Managed SchLib component binding is embedded as a hidden `RECORD=41` parameter** — the only
-   GUI-survivable carrier (§6.1). Sub-component and keyless entities are carried by the external ledger
-   only. (Reserved parameter name TBD; must be re-confirmed survivable when `is_hidden` and excluded
-   from Altium's own param dedup. The visible-parameter case is proven.)
-3. **Unmatched + key-changed entities are handled conservatively**: delete + add, surfaced as a
-   blocking review item. Exact-id, stable natural-key, and exact-fingerprint/stable-ordinal pairing are
-   allowed; similarity/"looks alike" pairing is never performed.
-
-Core types:
-
-```rust
-struct BindingId(u128);   // opaque, minted at first bind, never derived from mutable data
-
-enum DocumentLocator {                                   // how a BindingId re-finds its Altium entity
-    Native { unique_id: String },                        // Tier 1, and Tier 2 when populated
-    NaturalKey { parent: BindingId, key: String },       // Tier 2 fallback
-    Structural {                                          // Tier 3 — ledger only
-        parent: BindingId,
-        collection: CollectionKind,
-        ordinal: u32,
-        fingerprint: Fingerprint,
-    },
-}
-
-struct LedgerEntry {
-    binding: BindingId,
-    parent: Option<BindingId>,
-    source: Option<SourceId>,            // authored-side CST node identity
-    document: DocumentLocator,           // Altium side
-    semantic_fingerprint: Fingerprint,   // EXCLUDES management metadata (the embedded BindingId param)
-    revision: Revision,
-}
-```
-
-Resolution ladder (each run, per entity; stop at first hit):
-
-1. Embedded managed `BindingId` (SchLib component parameter).
-2. Native `UniqueId`.
-3. Parent-scoped natural key.
-4. Ledger structural match: same `(parent, collection, ordinal)`, fingerprint confirms/disambiguates.
-5. Ledger exact-fingerprint match within parent (recovers reorder/insert when the ordinal shifted) —
-   only when the match is unique.
-6. No unique match → fresh `BindingId` for a genuinely new entity; an unmatched baseline counterpart is
-   a delete. Any pair that would require similarity guessing is emitted as delete+add and flagged for
-   review, never silently bound.
-
-Identity is decoupled from the apply target. `BindingId` is the stable handle; `ResourceAddress`
-(parent path + collection + locator) is re-resolved from it each run, so reordering an entity does not
-change its identity. Change detection: same `BindingId` resolving on both sides with a differing
-semantic fingerprint is an Update; address/ordinal drift with an unchanged fingerprint is a Move. The
-embedded `BindingId` parameter is excluded from the semantic fingerprint, so writing it never registers
-as a content change (§7).
-
-Consequences accepted:
-
-- Editing a keyless primitive's geometry keeps identity via `(parent, collection, ordinal)`; the
-  fingerprint flags the edit as Update. If the collection's count or order also changed so the ordinal
-  is ambiguous, the affected primitives fall to delete+add+review rather than being fuzzy-matched.
-- First brownfield adoption has no ledger and no embedded ids: bootstrap binds by native id + natural
-  key, mints `BindingId`s, and writes the ledger (plus component params where managed/embedded). Keyless
-  primitives bind by an ordinal+fingerprint snapshot taken at adoption.
-
-## 7. Synchronization baseline
-
-Every successful managed synchronization records a semantic baseline:
-
-```rust
-struct SyncBaseline {
-    schema_version: u32,
-    semantic_digest: Digest,
-    resources: IndexMap<BindingId, ResourceBaseline>,
-}
-
-struct ResourceBaseline {
-    source_id: Option<SourceId>,
-    altium_id: Option<AltiumNativeId>,
-    address: ResourceAddress,
-    parent: Option<BindingId>,
-    semantic_fingerprint: Fingerprint,
-    revision: Revision,
-}
-```
-
-Exclude management metadata itself from semantic fingerprints.
-
-The baseline may be:
-
-- Embedded in both artifacts when the typed carrier is proven and policy permits it.
-- Stored in an external versioned state file.
-- Absent in native-only mode, in which case operations are two-way adoption/reconciliation and
-  conflict detection is necessarily weaker.
-
-## 8. Three-way planning
-
-The planner compares:
-
-```text
-Base -> current resolved source snapshot
-Base -> current Altium document snapshot
-```
-
-Per resource it classifies:
-
-```rust
-enum ChangeDisposition {
-    SourceOnly,
-    DocumentOnly,
-    SameChange,
-    Conflict,
-    Unchanged,
-}
-```
-
-Command direction selects the default resolution policy:
-
-- `compile`: project source-side changes toward Altium.
-- `dump`: project Altium-side changes toward source.
-- `SameChange`: converge metadata/baselines without repeating the semantic edit.
-- `Conflict`: block apply until explicitly resolved.
-- Metadata/binding changes may update both artifacts in either direction.
-
-First adoption has no baseline. The user chooses the bootstrap direction:
-
-- First `dump`: Altium establishes the source representation and bindings.
-- First `compile`: source establishes the document representation and bindings.
-
-The initial plan must show all semantic and metadata changes before writing either artifact.
-
-## 9. Managed scope and absence semantics
-
-Do not encode all of these meanings as `Option::None`:
-
-- Inherit from a template/default.
-- Leave the current target value unchanged.
-- Reset to the format default.
-- Clear/delete the value.
-- Field is unsupported or unmanaged.
-
-Model them explicitly at the authored boundary. After resolution, a managed artifact snapshot should
-be concrete.
-
-```rust
-struct ManagedScope {
-    entity_kinds: ManagedKinds,
-    fields: ManagedFields,
-    allow_delete: bool,
-}
-```
-
-Delete only within a completely representable, authoritative managed scope. If a document section
-cannot be represented, planning must return a blocking unsupported diagnostic. It must not silently
-preserve the section while claiming convergence, and it must never delete content it cannot model.
-
-## 10. Executable plan model
-
-The current ECO is presentation-oriented and should be replaced.
-
-```rust
-struct PlanBundle {
-    format_version: u32,
-    domain: Domain,
-    operation: Operation,
-    authority: Authority,
-    metadata_policy: MetadataPolicy,
-    managed_scope: ManagedScope,
-
-    input_preconditions: Vec<ArtifactPrecondition>,
-    semantic_changes: Vec<SemanticChange>,
-    patches: Vec<ArtifactPatch>,
-    diagnostics: Vec<PlanDiagnostic>,
-}
-```
-
-The plan must be versioned and deserializable. It contains hashes/preconditions for every source and
-target artifact it may write.
-
-### 10.1 Semantic changes
-
-Semantic changes power the ECO renderer:
-
-```rust
-enum SemanticAction {
-    Create,
-    Update,
-    Rename,
-    Move,
-    Delete,
-    Replace,
-    MetadataOnly,
-    Unchanged,
-    Conflict,
-}
-```
-
-They use typed or structured values internally. Formatting into mils, layer names, colors, and text
-belongs in the renderer.
-
-### 10.2 Typed artifact patches
-
-```rust
-enum ArtifactPatch {
-    SchLibDocument(SchLibPatch),
-    PcbLibDocument(PcbLibPatch),
-    SchDocDocument(SchDocPatch),
-    PcbDocDocument(PcbDocPatch),
-    PrjPcbDocument(PrjPcbPatch),
-    SpecSource(SpecSourcePatch),
-    Baseline(BaselinePatch),
-}
-```
-
-Prefer replacing high-level aggregates rather than implementing property setters for every field:
-
-```rust
-enum PatchOp<T> {
-    Create {
-        address: ResourceAddress,
-        value: T,
-    },
-    Replace {
-        address: ResourceAddress,
-        expected: Fingerprint,
-        value: T,
-    },
-    Delete {
-        address: ResourceAddress,
-        expected: Fingerprint,
-    },
-}
-```
-
-For example, changing a SchLib pin replaces the containing high-level component through
-`update_component`. This aligns patch granularity with the high-level API and avoids a second field-
-by-field executor.
-
-## 11. Source patches
-
-`dump apply` executes structured CST edits:
-
-```rust
-enum SpecEdit {
-    InsertBlock {
-        parent: SourceId,
-        block: IntentBlock,
-    },
-    DeleteBlock {
-        id: SourceId,
-    },
-    SetProperty {
-        id: SourceId,
-        key: PropertyKey,
-        value: Expr,
-    },
-    RemoveProperty {
-        id: SourceId,
-        key: PropertyKey,
-    },
-    SetAnnotation {
-        id: SourceId,
-        binding: BindingMetadata,
-    },
-}
-```
-
-First-time dump builds a new CST and formats it canonically. Subsequent dumps edit the existing CST.
-Malformed existing source is a hard error. Never warn and overwrite it.
-
-When greenfield source uses an imported definition, dumping GUI changes should emit instance
-overrides rather than re-inline the entire materialized definition. Brownfield source may represent
-the complete inline Altium state. That behavior is selected by authority and the existing authored
-construct, not by a heuristic mode switch.
-
-## 12. Plan application and filesystem transaction
-
-Applying a plan:
-
-1. Read all affected source and target artifacts.
-2. Verify every content hash and resource precondition.
-3. Clone/project documents into mutable high-level API objects.
-4. Execute typed document and source patches in memory.
-5. Run all structural and semantic validators.
-6. Serialize every output to temporary files.
-7. Reopen serialized outputs and validate them again.
-8. Prepare the updated synchronization baseline.
-9. Commit prepared files using renames plus a small transaction journal.
-10. Remove the journal only after every artifact is committed.
-
-True atomic replacement across multiple files and filesystems cannot be guaranteed. Use a recovery
-journal instead of claiming perfect atomicity. A failed operation must be recoverable to either the
-old or new complete set.
-
-## 13. CLI surface
-
-Infer domain from extensions; do not require five redundant outer domain command groups unless a
-future domain genuinely needs a distinct surface.
-
-```text
-# Spec -> Altium
-altium compile plan  design.schdoc-spec --target design.SchDoc --out plan.json
+altium compile plan design.schlib-spec --target design.SchLib --out plan.json
 altium compile apply --plan plan.json
-
-# Altium -> spec
-altium dump plan  design.SchDoc --spec design.schdoc-spec --out plan.json
+altium dump plan design.SchLib --spec design.schlib-spec --out plan.json
 altium dump apply --plan plan.json
 ```
 
-Optional convenience mode:
-
-```text
-altium compile apply design.schdoc-spec --target design.SchDoc --auto-approve
-altium dump apply design.SchDoc --spec design.schdoc-spec --auto-approve
-```
-
-The strongest workflow uses saved plans. `apply --plan` executes exactly the reviewed artifact after
-checking preconditions.
-
-Recommended exit codes:
-
-- `0`: converged/no changes.
-- `2`: plan contains applicable changes.
-- `1`: error, unsupported content, or conflict.
-
-Plan output must group changes by artifact because one operation may update the spec, Altium file,
-and baseline together.
-
-## 14. Crate boundaries
-
-Recommended initial split:
-
-```text
-altium-format
-  low-level parsing/writing
-  high-level document APIs
-  invariant validation
-  no spec-language or planning logic
-
-altium-spec-lang
-  lossless CST
-  parser and formatter
-  authored intent model
-  imports and semantic compilation
-
-altium-reconcile
-  concrete artifact snapshots
-  identity and bindings
-  baseline state
-  three-way planner
-  typed plan and patches
-  semantic ECO rendering
-  conflict classification/resolution
-
-altium-cli
-  command parsing
-  filesystem transactions
-  plan storage and reporting
-```
-
-Dependency direction:
-
-```text
-altium-format-types
-        |
-        +--> altium-format
-        +--> altium-spec-lang
-                    \
-                     +--> altium-reconcile --> altium-cli
-                    /
-          altium-format
-```
-
-`altium-reconcile` may depend on both `altium-format` and `altium-spec-lang`; neither depends on the
-reconciler.
-
-Avoid splitting into additional crates until a real dependency boundary demands it.
-
-## 15. Architecture options and tradeoffs
-
-### Option A: high-level Altium API as the only semantic model
-
-Pros:
-
-- Fastest implementation.
-- Excellent brownfield fidelity.
-- Minimal projection code.
-- Spec becomes a direct serialization of Altium-shaped types.
-
-Cons:
-
-- Vendor-shaped authored language.
-- Poor representation of imports, generators, definitions, occurrences, and constraints.
-- Weak cross-domain semantics.
-- Encourages conflating omitted intent with concrete defaults.
-
-Good fit if the only goal is editing Altium artifacts textually. Not recommended as the complete
-long-term architecture.
-
-### Option B: one new vendor-neutral design graph
-
-Pros:
-
-- Clean long-term multi-EDA architecture.
-- Explicit definitions, occurrences, connectivity, and cross-domain links.
-- Good native model for future UI, analysis, placement, and routing.
-
-Cons:
-
-- Largest initial scope.
-- Hard to map all brownfield Altium detail without format leakage.
-- Risks blocking reliable plan/apply on broader product-model decisions.
-- Existing graph drafts permit opaque preservation and therefore conflict with current rules.
-
-Do not make this a prerequisite for the first replacement workflow.
-
-### Option C: authored intent plus concrete Altium snapshot
-
-Pros:
-
-- Preserves ergonomic greenfield abstractions.
-- Preserves full concrete brownfield state.
-- Both sides compare in a complete resolved snapshot.
-- Allows the future design graph to be inserted later.
-- Keeps Altium-specific details at the artifact boundary.
-
-Cons:
-
-- Two models and a required elaboration/projection layer.
-- Must prove that compiling intent and importing documents converge to equivalent snapshots.
-- More initial design work than Option A.
-
-Recommended option.
-
-### Option D: authored intent plus design graph plus Altium snapshot
-
-Pros:
-
-- Best eventual separation of authored intent, canonical design semantics, and vendor artifact.
-- Strongest multi-tool and cross-domain future.
-
-Cons:
-
-- Three models and two major projections.
-- Highest consistency and testing burden.
-- Too large for the first replacement slice.
-
-Treat as an evolutionary destination, not the starting point.
-
-## 16. Implementation strategy
-
-Build complete vertical domain slices. Do not build one phase across all five formats and leave every
-workflow partially functional.
-
-### Foundation
-
-1. Freeze semantics for authority, metadata policy, managed scope, identity, baseline, conflicts,
-   and saved plans.
-2. Define plan schema, typed preconditions, semantic changes, and patch traits.
-3. Implement the lossless source CST and structured edit API.
-4. Implement filesystem staging, validation, and recovery journal support.
-
-### Domain slices
-
-1. SchLib as the reference implementation.
-2. PcbLib.
-3. PrjPcb.
-4. SchDoc, including full inline component children and greenfield overrides.
-5. PcbDoc last because primitive identity, ownership, collection mutation, and high-level API
-   completeness are the hardest.
-
-For each domain, implement:
-
-1. Source intent compilation.
-2. Intent-to-snapshot elaboration.
-3. Document-to-snapshot projection.
-4. Identity extraction and binding.
-5. Three-way semantic diff.
-6. Typed document patch lowering.
-7. Structured source patch lowering.
-8. Plan rendering.
-9. Apply, serialization, reopen, and invariant validation.
-10. Independent completeness review before proceeding to the next slice.
-
-Remove the old machinery when the replacement slice covers its domain. Do not maintain two active
-planners/executors for the same domain longer than necessary.
-
-## 17. Required laws and acceptance criteria
-
-Every domain must satisfy:
-
-```text
-project(document) == snapshot
-materialize(snapshot) then project == snapshot
-apply(plan(base, source, document)) == planned after-state
-replanning after apply produces no changes
-applying a stale plan fails
-independent same-resource edits produce Conflict
-unsupported or unrepresentable content blocks planning
-```
-
-Additional requirements:
-
-- Plan and apply cannot disagree because apply consumes only plan patches.
-- Dump and compile both support `plan` and `apply`.
-- Both operations may show and update multiple artifacts.
-- Brownfield inline content round-trips losslessly.
-- Greenfield imported definitions materialize as bases plus explicit overrides.
-- Managed brownfield may add typed annotations and metadata.
-- Native-only brownfield never adds tool metadata.
-- Deletion occurs only inside explicit, fully supported managed scopes.
-- Ambiguous identity is a hard error.
-- Malformed source is never overwritten.
-- No parser, planner, projection, or apply path silently skips input.
-- No opaque/raw/unparsed format data is introduced.
-- Every fallible format boundary returns contextual errors.
-
-## 18. Testing strategy
-
-Use layered tests:
-
-- Unit tests for CST editing, identity, fingerprints, matching, conflict classification, and patch
-  preconditions.
-- Model-law tests for elaboration/projection convergence.
-- Per-domain plan/apply tests with small programmatic documents that do not require fixtures.
-- Saved-plan staleness and schema-version tests.
-- Transaction recovery tests with injected failures between commits.
-- Fixture-dependent roundtrip tests behind `test-fixtures` only.
-- Property tests behind `proptest` only.
-
-Do not weaken comparisons to normalize unexplained differences. Supported upgrades must be explicit,
-typed, documented, and visible in reports.
-
-## 19. Separate low-level CFB verification
-
-Keep semantic planning separate from serialized CFB verification.
-
-- The user-facing ECO describes semantic resource changes.
-- The typed plan describes executable source/document patches.
-- `cfb diff --semantic` remains an agent/developer tool for validating serialization behavior.
-
-An optional compile-plan verification mode may dry-run the plan and compare before/after CFB output,
-but that is a parallel report, not part of the semantic change algebra and not proof of correctness by
-itself.
-
-## 20. Resolved decisions (2026-06-21)
-
-The pre-implementation decisions in §20 (and the gaps raised in `NEXT-review.md`) were
-worked through one by one and resolved as follows. These are the plan of record for the
-first implementation cycle; the original open-question list is preserved in git history.
-
-| # | Decision | Resolution | Consequence |
-| --- | --- | --- | --- |
-| 1 | Spec surface syntax | **Revise** | Keep the existing grammar + the new lossless CST; extend constructs deliberately as the semantics layer demands. Not a rewrite. |
-| 2 | Elaboration semantics (intent → snapshot) | **Phased, minimal-for-SchLib** | Adopt a Dhall-style pass pipeline (resolve imports → type-check → normalize → elaborate), each independently testable. Build only the passes SchLib needs (imports, lets, defaults, overrides, explicit absence) and write the override-precedence + absence rules now. Constraint solving and generators/templates are **deferred** to the PcbDoc/placement slice, designed against a real snapshot. |
-| 3 | Absence/override model (the five meanings of "missing") | **Explicit intent enum + marker keywords** | Intent model carries `Set(v) \| Inherit \| Reset \| Clear` per managed field; "leave unchanged" = the field simply absent at instance scope. Syntax: bare value → `Set`; `null` → `Clear`; new contextual keywords `inherit` / `reset` → those cases; absence → `Unchanged` at instance scope, `Inherit` inside a template body. "Unsupported/unmanaged" is a managed-scope concept (§9, Decision 7), not an absence meaning. |
-| 4 | Identity architecture & id format | **Three-role split + u128 base32** | (a) The CST's current positional `SourceId` is an *ephemeral node locator* (rename to `NodeLocator`/`CstId`), recomputed per parse, never persisted. (b) `BindingId(u128)` is the single durable cross-artifact identity, minted once, persisted on the spec side via the annotation `id` and in the ledger, mapped to Altium via native `UniqueId` or ledger locator. (c) `ResourceAddress` is derived from a `BindingId` each run. The ledger keys on `BindingId` and **never persists positional source paths**. Persisted id format: full u128 as compact base32 (~26 chars). NEXT.md §6's separate persisted `SourceId` is dropped as redundant. |
-| 5 | External baseline | **Per-artifact · `.altium/` dir · JSON+`schema_version` · optimistic** | One baseline file per Altium file (a project is a directory of them; cross-artifact cascade handled by a later project layer). Stored under a project-root `.altium/` state dir. Serialized as human-diffable JSON with a `schema_version`. Concurrency is optimistic: the plan carries artifact + baseline hashes and apply fails on mismatch (no lock). Missing baseline → first-adoption bootstrap. |
-| 6 | Embedded metadata for PcbLib/SchDoc/PcbDoc/PrjPcb | **Defer per-format** | External baseline is the universal carrier now. Keep the proven SchLib component `RECORD=41` embedded id (§6.1, §6.2). Validate each other format's embedded carrier (GUI-save test per §6.1) only when its slice begins. |
-| 7 | Managed-scope declaration location | **Source-declared + authority defaults** | `managed { entity_kinds, fields, allow_delete }` (and/or block markers) live in the spec, defaulting from authority when omitted. The CLI may only *tighten* scope, never broaden; deletes require an explicit in-source opt-in. Reproducible and reviewable. Field-level ownership is **not** modeled now (entity granularity only — Decision 10 makes field-level conflict detection moot anyway). |
-| 8 | Plan serialization | **JSON+`schema_version`, self-contained** | The saved plan is human-reviewable JSON (matching the baseline) that embeds patches, preconditions (artifact + baseline hashes), and the prior-state slice it needs — `apply` requires only the plan + current artifacts. Patch values are *snapshot-shaped* serializable types, materialized through the high-level API at apply (keeps the plan decoupled from internal API serializability). |
-| 9 | Saved-plan versioning | **Strict exact-version gate** | `apply` accepts only known-supported `schema_version`s; anything newer or older is a hard error telling the user to regenerate. No migration code while plans are ephemeral. Plans are explicit `--out`/`--plan` files (no magic discovery). |
-| 10 | Aggregate patch boundary | **Coarse entity-aggregate** | `PatchOp<T>` replaces the largest natural high-level object (SchLib Component with pins/params inline, PcbLib Footprint, …) via methods like `update_component`; no field-by-field executor. Accepted consequence: precondition hash covers the whole entity, so independent edits to different fields of the same entity always register as a Conflict. Escalate to a two-tier (entity + child sub-patch) model only if a domain (likely PcbDoc) makes whole-entity conflicts/patch-size hurt. |
-| 11 | Conflict-resolution UX | **Report-only / block (v1)** | Conflicts are blocking plan diagnostics; `apply` refuses until resolved. Resolution path: converge one side and re-plan. `--accept-source` / `--accept-altium` overrides and interactive resolution come later. |
-| 12 | First SchLib vertical slice | **Full SchLib** | All constructs: component, parts, pins, parameters, aliases, footprint-maps, graphics (Tier-3 keyless, exercises the ledger), swap_groups. The complete reference implementation. |
-| 13 | CST structured-edit mechanism | **Keep byte-splice, migrate if fragile** | Use the existing tested byte-offset splicing (`cst/edit.rs`) through the full-SchLib slice; if structural insert/reorder edits mis-position or corrupt trivia, migrate those paths to tree-based green-node substitution. No speculative rewrite. |
-| 14 | Crate boundaries & snapshots | **`altium-spec-lang` + `altium-sync`; concrete snapshots** | Split the gutted `altium-format-spec` into `altium-spec-lang` (CST, parser, formatter, intent model, imports, compilation) and `altium-sync` (snapshots, identity, baseline, planner, plan/patches, ECO rendering, conflict). `altium-sync` depends on both `altium-format` and `altium-spec-lang`. Snapshot types are concrete per-domain structs/enums now; traits only when a second consumer (the design graph) demands them. |
-
-### Deferred / implied items (acknowledged, not dropped)
-
-- **Compile-direction identity minting** (review gap #3): follows from Decision 4 — `compile`
-  mints a fresh `BindingId`, writes it to the spec annotation `id` + baseline, and assigns a
-  native Altium `UniqueId` via the existing `altium-format` `generate_unique_id()` (currently
-  `pub(crate)` in `src/util.rs`; expose a typed high-level assignment method per §3 before the
-  compile direction ships).
-- **Multi-file project sync / cascade** (review gap #6): deferred to a future project layer;
-  not needed for single-file SchLib. Per-artifact baselines + a future project manifest
-  accommodate it. Revisit at PrjPcb and the SchDoc+PcbDoc ECO slices.
-- **Constraint solving + generators/templates** (Decision 2): deferred to the PcbDoc/placement
-  slice; design against a real snapshot rather than in a vacuum.
-
-### Implementation sequence
-
-**Foundation** (before the slice):
-
-1. Create `altium-spec-lang` (move CST/parser/formatter in; add the intent model + the four
-   compiler phases) and `altium-sync` (snapshots, identity, baseline, planner, patches, render,
-   conflict). Wire dependencies; gut the old `altium-format-spec` machinery as each piece is
-   replaced.
-2. Plan schema: versioned, self-contained JSON; `ArtifactPrecondition`, `SemanticChange`,
-   `ArtifactPatch` / `PatchOp` traits.
-3. Identity + state: `BindingId` (u128 base32), `NodeLocator` rename, `DocumentLocator`,
-   `LedgerEntry`, baseline JSON `schema_version`, `.altium/` discovery, optimistic hash
-   preconditions.
-4. Filesystem staging + recovery journal (commit via renames).
-
-**Full-SchLib slice** (§16's 10-step checklist, with an independent completeness review after
-each step per `CLAUDE.md`): intent compilation → intent→snapshot elaboration →
-document→snapshot projection → identity binding (resolution ladder + embedded component param +
-Tier-3 ledger for graphics) → three-way semantic diff → coarse SchLib patch lowering →
-structured source-patch lowering → plan rendering → apply (stage → validate → serialize →
-reopen → validate → commit journal → baseline) → review. Plus the §17 laws and §18 layered
-tests.
+Exit codes: 0 for no-change planning/successful apply, 2 for an applicable plan with
+changes, 1 for an error or blocking diagnostic. Direction-specific apply rejects
+the wrong plan direction. Report writes by artifact.
+
+Convenience modes must route through the same planner/executor. Each completed
+domain retires its legacy reconciliation/execution route; no silent fallback.
+Until then, distinguish legacy commands from the new surface. Project `--all`
+plans and stages every affected artifact before any destination is committed.
+
+## Implementation steps and gates
+
+Complete an independent agent completeness review after every numbered step;
+resolve findings before proceeding. This cleanup updates design/scaffold metadata
+only. None of the implementation steps below is complete.
+
+1. **Language boundary and full SchLib intent.** Move/decouple CST, diagnostics,
+   parser, and formatter into `altium-spec-lang`; port imports and SchLib intent
+   passes. Specify absence, overrides, and collection scope. Gate: existing source
+   preservation tests plus deterministic examples for imports, defaults,
+   Set/Inherit/Reset/Clear, invalid keys, and partial/complete collections.
+2. **SchLib snapshots and indexed patches.** Implement complete elaboration and
+   projection, addresses, aggregate replacement, and scope checks. Cover components,
+   parts, pins, parameters, aliases, footprint maps, graphics, and swap groups.
+   Gate: materialize/project equality, ownership validation, multi-insert/delete/
+   reorder cases, and hard errors for unsupported content or unauthorized deletion.
+3. **Saved plans and both directional planners.** Implement schema/version,
+   manifests, source/document lowering, and exact reporting. Gate: deterministic
+   semantic plans, complete preconditions, no-op/create/update/delete examples,
+   preserved source comments/expressions/CRLF/annotations, no heuristic execution.
+4. **Checked transaction executor.** Implement staging, reopen validation, durable
+   commit, and recovery. Gate: source/import/target/routing changes and newly
+   occupied outputs reject stale plans; path aliases/overlapping patches error;
+   injected failures at each commit boundary recover without silent partial results.
+5. **Ship full SchLib CLI slice.** Wire both directions, remove SchLib's old
+   execution path, update operational docs/STATUS. Gate: apply equals the planned
+   semantic state; same-direction replanning is empty; supported roundtrips preserve
+   authored meaning; no persistent synchronization state or embedded linking IDs.
+6. **PcbLib, then PrjPcb.** Repeat steps 1–5 and independent review for each domain.
+   PcbLib needs complete pads/graphics and long-name SectionKeys. PrjPcb needs a
+   typed public mutation boundary and all-artifact project transaction behavior.
+7. **SchDoc.** Complete inline children, imported overrides, document parameters,
+   ownership/connectivity rebuilding, and both-direction acceptance laws. Preserve
+   fail-fast errors until each path is complete; review before moving on.
+8. **PcbDoc and binary routing bridge.** Define the artifact fidelity/context
+   contract above with AutoPCB; implement typed bulk import/export, complete board/
+   layer/primitive snapshots, and native-reference rebuilding. Gate: no-op routed
+   board preservation, spec-plus-artifact roundtrips, stale-artifact and bad-net/
+   layer errors, no duplicate copper on reapply, bounded large-board handling.
+   Creation only ships when initialization invariants and typed APIs support it.
+9. **Report readability.** Add pairing/grouping using representative noisy diffs;
+   retain exact expanded output. Gate: display settings cannot change patches or
+   hide changes. This step may follow SchLib; it need not wait for PcbDoc and is
+   never a prerequisite for correct execution.
+
+Use fixture-free unit and programmatic-document tests. Run targeted checks first,
+then broader default suites appropriate to changed modules. Do not run
+`test-fixtures` or `proptest` without explicit authorization. When corpus testing
+is authorized, use semantic CFB comparisons and distinguish documented upgrades
+from unexplained loss. Keep contextual errors and strict no-opaque-data rules.

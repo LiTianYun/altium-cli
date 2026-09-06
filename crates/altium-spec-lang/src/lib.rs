@@ -2,10 +2,11 @@
 //!
 //! The language layer of the Altium spec toolchain: the lossless concrete syntax
 //! tree (CST), parser, formatter, the authored *intent* model, and the semantic
-//! compilation that elaborates intent into a concrete artifact snapshot.
+//! compilation that resolves and normalizes intent for snapshot elaboration by
+//! `altium-sync`.
 //!
 //! This crate is being populated as part of the clean-slate plan/apply rebuild
-//! (see `NEXT.md`). It has no dependency on identity, baselines, or planning —
+//! (see `NEXT.md`). It has no dependency on document projection or planning;
 //! those live in `altium-sync`, which depends on this crate. Dependency
 //! direction: `altium-format-types → altium-spec-lang → altium-sync`.
 //!
@@ -19,9 +20,9 @@
 //! requires first decoupling it from those modules (or relocating the lexer and
 //! `diagnostic` foundation with it). That decoupling is the next Foundation step.
 //!
-//! Planned modules (per `NEXT.md` §14):
+//! Planned modules (see `NEXT.md`):
 //! - `cst` — lossless syntax tree, lexer, structured parser, typed accessors, edits
 //! - `diagnostic` — spans, parse errors
 //! - `intent` — authored intent model (`Set | Inherit | Reset | Clear` field values)
-//! - `compile` — the Dhall-style passes: resolve imports → type-check → normalize → elaborate
+//! - `compile` — resolve imports → type-check → normalize authored intent
 //! - `format` — canonical formatter

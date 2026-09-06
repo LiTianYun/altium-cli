@@ -50,7 +50,7 @@ it. The implementation lives in the crate `crates/altium-format-spec`.
 | Page | Description |
 | --- | --- |
 | [Design rationale](explanation/design-rationale.md) | Why the language is built the way it is. |
-| [Greenfield vs brownfield](explanation/greenfield-vs-brownfield.md) | Who is authoritative (spec or Altium files), how that decides inline-children handling, identity tracking, and two-sided change sets. |
+| [Greenfield vs brownfield](explanation/greenfield-vs-brownfield.md) | Directional authority, inline/imported materialization, and the planned snapshot-bound workflow. |
 
 ## The five spec domains
 
