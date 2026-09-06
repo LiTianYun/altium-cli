@@ -66,6 +66,11 @@ implementation passed independent review.
 Final graphic-policy validation: 353 language tests, 168 legacy spec tests, CLI
 compilation, and the five real SchLib-derived deterministic intent checks pass.
 Independent review found no blockers in the bounded graphic policy change.
+The [embedded-image inventory](docs/worklogs/next-images-2026-09-05.md) found
+58 resources in 13 real SchLib files: 16 BMP-only resources and 42 BMP previews
+with appended PNG/JPEG/EMF source objects. Preview-only decoding would discard
+source content. Typed resources must cover both representations and metadata;
+the inventory does not establish complete codec or native-source understanding.
 Coordinate literals and dimensional float conversions now reject nonfinite/overflow
 values; signed-minimum division, negation, and abs return errors instead of panics. `altium-sync` remains a dependency scaffold. No state subsystem
 existed to remove. Obsolete design notes and scaffold identity
