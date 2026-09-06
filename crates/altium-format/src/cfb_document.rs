@@ -168,29 +168,50 @@ impl CfbDocument {
 mod tests {
     use super::*;
 
-    fn data_path(filename: &str) -> std::path::PathBuf {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        std::path::Path::new(manifest_dir)
-            .join("../../data")
-            .join(filename)
+    // These tests exercise CFB I/O/tracking, not SchLib record semantics.
+    // Keep the stream topology explicit and independent of external libraries.
+    fn temporary_cfb() -> tempfile::NamedTempFile {
+        use std::io::{Cursor, Write};
+        let mut compound = cfb::CompoundFile::create(Cursor::new(Vec::new()))
+            .expect("create temporary CFB container");
+        compound
+            .create_storage("/Component_1")
+            .expect("create /Component_1 storage");
+        for (path, content) in [
+            ("/FileHeader", b"container test header".as_slice()),
+            ("/Storage", b"container test storage".as_slice()),
+            ("/Component_1/Data", b"component stream payload".as_slice()),
+        ] {
+            compound
+                .create_stream(path)
+                .unwrap_or_else(|error| panic!("create {path}: {error}"))
+                .write_all(content)
+                .unwrap_or_else(|error| panic!("write {path}: {error}"));
+        }
+        let mut file = tempfile::NamedTempFile::new().expect("create temporary CFB file");
+        file.write_all(&compound.into_inner().into_inner())
+            .expect("write temporary CFB container");
+        file
     }
 
     #[test]
-    fn open_blank_schlib_and_read_file_header() {
-        let path = data_path("BlankSchlibComponent.SchLib");
-        let mut doc = CfbDocument::open(&path).expect("should open valid SchLib");
+    fn open_cfb_and_read_file_header() {
+        let fixture = temporary_cfb();
+        let mut doc =
+            CfbDocument::open(fixture.path()).expect("should open temporary CFB container");
         let bytes = doc
             .read_stream("/FileHeader")
             .expect("FileHeader stream must exist");
-        assert!(!bytes.is_empty(), "FileHeader stream must be non-empty");
+        assert_eq!(bytes, b"container test header", "exact /FileHeader content");
     }
 
     #[test]
     fn enumerate_all_entries_returns_expected_paths() {
-        let path = data_path("BlankSchlibComponent.SchLib");
-        let mut doc = CfbDocument::open(&path).expect("should open valid SchLib");
+        let fixture = temporary_cfb();
+        let mut doc =
+            CfbDocument::open(fixture.path()).expect("should open temporary CFB container");
         let entries = doc.enumerate_all_entries().expect("enumerate must succeed");
-        // Top-level streams and storages known from BlankSchlibComponent.SchLib.
+        // Top-level streams and storage explicitly created by temporary_cfb.
         assert!(
             entries.contains("/FileHeader"),
             "FileHeader must be in entry set"
@@ -209,8 +230,9 @@ mod tests {
 
     #[test]
     fn read_stream_optional_missing_returns_none() {
-        let path = data_path("BlankSchlibComponent.SchLib");
-        let mut doc = CfbDocument::open(&path).expect("should open valid SchLib");
+        let fixture = temporary_cfb();
+        let mut doc =
+            CfbDocument::open(fixture.path()).expect("should open temporary CFB container");
         let result = doc
             .read_stream_optional("/NonExistentStream")
             .expect("read_stream_optional must not error on missing stream");
@@ -228,11 +250,12 @@ mod tests {
 
     #[test]
     fn read_stream_missing_returns_stream_not_found() {
-        let path = data_path("BlankSchlibComponent.SchLib");
-        let mut doc = CfbDocument::open(&path).expect("should open valid SchLib");
+        let fixture = temporary_cfb();
+        let mut doc =
+            CfbDocument::open(fixture.path()).expect("should open temporary CFB container");
         let result = doc.read_stream("/NonExistentStream");
         assert!(
-            matches!(result, Err(AltiumFormatError::StreamNotFound(_))),
+            matches!(result, Err(AltiumFormatError::StreamNotFound(ref path)) if path == "/NonExistentStream"),
             "expected StreamNotFound error"
         );
     }

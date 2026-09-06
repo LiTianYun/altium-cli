@@ -102,17 +102,37 @@ impl TrackedCfbDocument {
 mod tests {
     use super::*;
 
-    fn data_path(filename: &str) -> std::path::PathBuf {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        std::path::Path::new(manifest_dir)
-            .join("../../data")
-            .join(filename)
+    // These tests exercise CFB I/O/tracking, not SchLib record semantics.
+    // Keep the stream topology explicit and independent of external libraries.
+    fn temporary_cfb() -> tempfile::NamedTempFile {
+        use std::io::{Cursor, Write};
+        let mut compound = cfb::CompoundFile::create(Cursor::new(Vec::new()))
+            .expect("create temporary CFB container");
+        compound
+            .create_storage("/Component_1")
+            .expect("create /Component_1 storage");
+        for (path, content) in [
+            ("/FileHeader", b"container test header".as_slice()),
+            ("/Storage", b"container test storage".as_slice()),
+            ("/Component_1/Data", b"component stream payload".as_slice()),
+        ] {
+            compound
+                .create_stream(path)
+                .unwrap_or_else(|error| panic!("create {path}: {error}"))
+                .write_all(content)
+                .unwrap_or_else(|error| panic!("write {path}: {error}"));
+        }
+        let mut file = tempfile::NamedTempFile::new().expect("create temporary CFB file");
+        file.write_all(&compound.into_inner().into_inner())
+            .expect("write temporary CFB container");
+        file
     }
 
     #[test]
     fn assert_all_consumed_succeeds_when_all_streams_are_read() {
-        let path = data_path("BlankSchlibComponent.SchLib");
-        let mut doc = TrackedCfbDocument::open(&path).expect("should open valid SchLib");
+        let fixture = temporary_cfb();
+        let mut doc =
+            TrackedCfbDocument::open(fixture.path()).expect("should open temporary CFB container");
         // List root to discover top-level storages and streams (returns bare names).
         let (root_storages, root_streams) = doc
             .list_entries("/")
@@ -141,8 +161,9 @@ mod tests {
 
     #[test]
     fn assert_all_consumed_fails_when_nothing_is_read() {
-        let path = data_path("BlankSchlibComponent.SchLib");
-        let doc = TrackedCfbDocument::open(&path).expect("should open valid SchLib");
+        let fixture = temporary_cfb();
+        let doc =
+            TrackedCfbDocument::open(fixture.path()).expect("should open temporary CFB container");
         let result = doc.assert_all_consumed();
         match result {
             Err(AltiumFormatError::UnconsumedStreams { paths }) => {
@@ -171,9 +192,10 @@ mod tests {
 
     #[test]
     fn read_stream_optional_absent_does_not_cause_false_positive_unconsumed() {
-        let path = data_path("BlankSchlibComponent.SchLib");
-        let mut doc = TrackedCfbDocument::open(&path).expect("should open valid SchLib");
-        // Mark a non-existent stream as consumed; it must not appear as unconsumed later.
+        let fixture = temporary_cfb();
+        let mut doc =
+            TrackedCfbDocument::open(fixture.path()).expect("should open temporary CFB container");
+        // A missing optional read must not introduce a tracked entry.
         let result = doc
             .read_stream_optional("/NonExistentStream")
             .expect("read_stream_optional must not error on missing stream");

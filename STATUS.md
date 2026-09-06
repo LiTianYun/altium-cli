@@ -80,6 +80,11 @@ is awaiting the required new-domain-type discussion; no codec/types have been ad
 Verified physical-width validation: 354 language tests and 168 legacy spec tests
 pass; CLI compilation passes. The bounded conversion/rendering change passed
 independent review. No fixture-feature or property tests were run.
+CFB wrapper/tracking unit tests now create temporary containers instead of
+depending on the missing legacy `data/BlankSchlibComponent.SchLib` file. Their
+stream-content and consumption assertions are preserved or strengthened; all
+eight targeted tests and independent review pass. This does not validate native
+SchLib semantics.
 Coordinate literals and dimensional float conversions now reject nonfinite/overflow
 values; signed-minimum division, negation, and abs return errors instead of panics. `altium-sync` remains a dependency scaffold. No state subsystem
 existed to remove. Obsolete design notes and scaffold identity
