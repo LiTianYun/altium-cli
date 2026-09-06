@@ -96,6 +96,16 @@ suite passes 385 tests, legacy spec passes 168, and the CLI builds. All 13 real
 image-bearing SchLibs still validate; an altered text-tagged resource block that
 previously passed now fails at `/Storage block #1`. This is envelope validation,
 not typed image payload support or native roundtrip acceptance.
+Oversized embedded-object framing now follows the verified AD26 extension through
+32 MiB minus one byte. A checked D0 prefix selects the extended length; ordinary
+framing remains intact otherwise, including empty binary blocks followed by
+D0-looking frame headers. Embedded envelope validation remains strict, and lazy
+framing iterators terminate after errors. Generic block writers are unchanged.
+Independent review and all 392 default core-library tests pass, including an
+actual compressed payload above 16 MiB followed by another entry. All 168 legacy
+spec tests pass, the CLI builds, and all 13 real image-bearing libraries still
+validate while the corrupted block-format variant fails. The large-payload test
+is synthetic; those 13 real files do not establish oversized-image codec support.
 Coordinate literals and dimensional float conversions now reject nonfinite/overflow
 values; signed-minimum division, negation, and abs return errors instead of panics. `altium-sync` remains a dependency scaffold. No state subsystem
 existed to remove. Obsolete design notes and scaffold identity

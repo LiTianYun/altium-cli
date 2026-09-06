@@ -8,13 +8,15 @@
 use std::io::Write;
 
 use altium_format_types::constants::file_headers::EMBEDDED_OBJECT_HEADER_RECORD;
-use altium_format_types::constants::parsing::{BLOCK_SIZE_MASK, INSTRUCTION_BINARY};
+use altium_format_types::constants::parsing::{
+    BLOCK_FLAG_BINARY, BLOCK_FLAG_SHIFT, BLOCK_SIZE_MASK, INSTRUCTION_BINARY,
+};
 use altium_format_types::constants::record_structure::{HEADER, RECORD, WEIGHT};
 use flate2::write::ZlibEncoder;
 use flate2::{Compression, Decompress, FlushDecompress, Status};
 
 use crate::binary_io::{BinaryReader, BinaryWriter};
-use crate::block_stream::{Block, BlockFormat, write_binary_block, write_text_block};
+use crate::block_stream::{Block, BlockFormat, write_text_block};
 use crate::param_collection::ParameterCollection;
 use crate::{AltiumFormatError, Result, ResultExt};
 
@@ -234,6 +236,30 @@ fn checked_block_size(size: usize) -> Result<i32> {
     Ok(size as i32)
 }
 
+/// AD26 `SchDataSerializerParam.FlushCurrent` writes the full envelope size OR
+/// the binary flag. `GetNextLine` retains that full size when it matches the
+/// D0 envelope's identifier and compressed lengths. This permits bit 24 in the
+/// size, but any higher bit would change the mode and is not representable.
+fn checked_embedded_block_header(envelope_size: usize) -> Result<u32> {
+    let binary_flag = u32::from(BLOCK_FLAG_BINARY) << BLOCK_FLAG_SHIFT;
+    let max_envelope_size = binary_flag | BLOCK_SIZE_MASK;
+    if envelope_size > max_envelope_size as usize {
+        return Err(AltiumFormatError::InvalidEmbeddedObject(format!(
+            "embedded envelope size {envelope_size} exceeds the binary-mode framing limit {max_envelope_size}"
+        )));
+    }
+    Ok(envelope_size as u32 | binary_flag)
+}
+
+/// Only called with complete envelopes produced by `serialize_embedded_object`;
+/// their full size equals the encoded identifier plus compressed length plus six.
+fn append_embedded_block(stream: &mut Vec<u8>, envelope: &[u8]) -> Result<()> {
+    let header = checked_embedded_block_header(envelope.len())?;
+    stream.extend_from_slice(&header.to_le_bytes());
+    stream.extend_from_slice(envelope);
+    Ok(())
+}
+
 /// Serializes a complete embedded object stream: header text block + entry binary blocks.
 /// The header block contains HEADER=<header_name>, Weight=<count>.
 /// Each entry is a 0xD0-tagged envelope in a binary block.
@@ -259,13 +285,12 @@ pub(crate) fn serialize_embedded_object_stream(
                 index + 1
             )
         })?;
-        checked_block_size(envelope.len()).with_context(|| {
+        append_embedded_block(&mut stream, &envelope).with_context(|| {
             format!(
                 "serializing embedded object stream '{header_name}' entry block {} '{id}'",
                 index + 1
             )
         })?;
-        stream.extend_from_slice(&write_binary_block(&envelope));
     }
 
     Ok(stream)
@@ -371,6 +396,55 @@ mod tests {
             error.contains("'image' zlib payload at offset 11"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn embedded_block_header_preserves_full_size_without_changing_binary_mode() {
+        let binary_flag = u32::from(BLOCK_FLAG_BINARY) << BLOCK_FLAG_SHIFT;
+        let maximum = binary_flag | BLOCK_SIZE_MASK;
+        for size in [0, BLOCK_SIZE_MASK, BLOCK_SIZE_MASK + 1, maximum] {
+            let header = checked_embedded_block_header(size as usize).unwrap();
+            assert_eq!(header, size | binary_flag);
+            assert_eq!(header >> BLOCK_FLAG_SHIFT, u32::from(BLOCK_FLAG_BINARY));
+        }
+        for size in [maximum as usize + 1, i32::MAX as usize, usize::MAX] {
+            assert!(
+                checked_embedded_block_header(size).is_err(),
+                "unreadable binary framing for size {size}"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_embedded_stream_roundtrips_incompressible_payload_and_next_entry() {
+        // Fixed xorshift data exercises actual compression and envelope framing
+        // above 16 MiB without external fixtures or a nondeterministic generator.
+        let mut state = 0x7139_a52du32;
+        let payload_size = BLOCK_SIZE_MASK as usize + 4097;
+        let mut payload = Vec::with_capacity(payload_size);
+        for _ in 0..payload_size {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            payload.push((state >> 24) as u8);
+        }
+        let entries = vec![
+            ("oversized".to_owned(), payload),
+            ("next".to_owned(), b"following payload".to_vec()),
+        ];
+        let stream = serialize_embedded_object_stream("Large resources", &entries).unwrap();
+        let blocks = parse_blocks(&stream).unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert!(
+            blocks[1].data.len() > BLOCK_SIZE_MASK as usize,
+            "test must exercise full-size embedded framing"
+        );
+        let parsed = parse_embedded_object_stream(&blocks).unwrap();
+        assert_eq!(parsed.len(), entries.len());
+        for (actual, (expected_id, expected_payload)) in parsed.iter().zip(&entries) {
+            assert_eq!(&actual.id, expected_id);
+            assert_eq!(&actual.inner_data, expected_payload);
+        }
     }
 
     #[test]

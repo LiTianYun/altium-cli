@@ -377,3 +377,76 @@ dependencies in CFB wrapper test setup, the full default core-library suite
 passes 385 tests, the legacy spec suite passes 168, and CLI compilation succeeds.
 Fixture-feature and property-test suites were not enabled. This confirms the
 bounded framing behavior, not complete native image semantics or roundtrips.
+
+### Oversized D0 representability equations
+
+Let `N` be the encoded identifier's one-byte length, `C` the full nonnegative
+signed-32-bit compressed length, and `E = C + N + 6` the envelope payload length
+(the six bytes are tag, identifier length and compressed-length word). Original
+`SchDataSerializerParam.FlushCurrent:231` writes outer header
+`H = E | 0x01000000`. `GetNextLine:253–273` derives mode as `H >> 24`, peeks the
+D0 metadata only for mode 1, and retains the full `H` exactly when `H == E`;
+otherwise the original masks to `H & 0x00FFFFFF`.
+
+The intersection of this original writer and reader is:
+
+| Envelope length E | Header H | Original successful size branch |
+| --- | --- | --- |
+| below `0x01000000` (16 MiB) | `E + 0x01000000` | Mask to low 24 bits |
+| `0x01000000` through `0x01FFFFFF` | `E` | D0 metadata equality retains full header |
+| `0x02000000` (32 MiB) | `0x03000000` | Mode 3, no binary/D0 branch; not supported |
+
+Thus the largest supported **complete envelope** is `0x01FFFFFF` bytes. Its
+compressed-content limit is that value minus `N + 6`. The original writer does
+not guard the 32 MiB transition; copying that omission would create output its
+own corresponding binary reader cannot interpret. This is separate from the
+inner signed-32-bit length domain and the generic 24-bit outer block writer.
+Only the D0-aware writer should use the extended range.
+
+The generic block reader must treat the D0 prefix as an **extension candidate**,
+not proof that the standard block owns all bytes inspected after its header.
+Under binary mode 1, select the full H length only when a safely bounded peek
+finds the D0 tag, complete identifier/length prefix, nonnegative signed C,
+checked E, and exact `E == H`. Once selected, require H payload bytes to remain;
+a truncated proven oversized frame is an error. Otherwise retain ordinary
+low-24-bit framing. A candidate's incomplete prefix, negative C or mismatched E
+must not itself invalidate an otherwise valid standard block sequence.
+
+A concrete counterexample is an empty binary block (`H=0x01000000`) followed by
+a 208-byte text block. The next block's header begins with byte D0, although it
+is not part of the empty binary payload. Requiring D0 envelope fields merely
+because the next byte is D0 rejects this valid sequence. Another case is ordinary
+binary data beginning D0 that is not an embedded-resource envelope. Source-
+correct bounded candidate recognition preserves these standard sequences.
+
+This is layered framing, **not** the image decoder's malformed-source fallback:
+no bytes are discarded or replaced. A caller expecting an embedded object still
+passes the complete selected binary payload to `parse_embedded_object`, which
+strictly validates tag, identifier/length fields, full signed compressed length,
+exact envelope exhaustion, and complete single zlib-stream consumption. Invalid
+resource semantics remain contextual errors at that boundary. Unknown outer
+flag bytes remain hard errors. The same size decision governs eager and lazy
+readers; an actual framing error terminates lazy iteration at the unproven
+boundary. Regression coverage must include empty-binary-plus-208-byte-text,
+valid oversized D0 with a following block, and malformed resource semantics
+checked by the embedded-object layer.
+
+### Implemented extension validation
+
+The extension reader and embedded-specific writer are now implemented. This
+supersedes the earlier bounded writer-cap limitation. Writer length arithmetic
+rejects envelopes above `0x01FFFFFF` rather than masking them. Generic text and
+binary writers remain unchanged.
+
+The empty-binary-plus-208-byte-text case failed against the initial overly strict
+reader, then passed after correction. Final targeted tests pass 17/17 for framing
+and 20/20 for envelopes. The latter includes a deterministic incompressible source
+whose compressed envelope exceeds 16 MiB, followed by another entry; it requires
+exact decoded contents and correct following-entry boundaries. It is a synthetic
+framing test, not a real native image or an image-codec oracle.
+
+Both implementations passed independent review. Final default core-library tests
+pass 392/392, legacy spec tests pass 168/168, and the CLI builds. All 13 original
+image-bearing SchLibs still validate; the deliberately text-tagged resource in
+the copied ICs library remains rejected. Validation results are recorded in
+`/tmp/altium-large-image-validation.json`. Typed image resources remain open.

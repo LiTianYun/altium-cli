@@ -20,6 +20,23 @@ bits  0..23: payload length
 bits 24..31: format flag (0x00 text, 0x01 binary)
 ```
 
+Embedded `0xD0` objects have a verified extension. Let `E` be the complete
+envelope length, including its tag, one-byte identifier length, identifier,
+four-byte compressed length, and compressed data. Altium writes
+`H = E | 0x01000000`. For binary mode, the reader retains the full header as the
+length only when a complete, checked envelope prefix proves `E == H`; otherwise
+it uses the ordinary low 24 bits. This preserves valid empty binary blocks whose
+following frame happens to begin with `0xD0`. The selected payload must fit in
+the stream, and unknown format flags fail.
+
+The embedded-object stream writer supports envelopes through `0x01FFFFFF`
+bytes (32 MiB minus one), rejecting larger values instead of truncating them.
+The extended writer path is specific to embedded-object streams. Framing does
+not validate compressed contents: the envelope parser separately checks its
+full nonnegative signed 32-bit compressed length, exact byte consumption, and
+complete zlib stream/checksum. Identifier encoding is fixed Windows-1252 without
+BOM sniffing; serialization rejects unmappable names and names over 255 bytes.
+
 See [`block_stream.rs`](../../crates/altium-format/src/block_stream.rs) and the named constants in [`constants/parsing.rs`](../../crates/altium-format-types/src/constants/parsing.rs).
 
 This framing is not universal. PCB raw binary sections, prefixed parameter sections, WideStrings tables, and other typed sidecars have their own parsers. Never apply block framing based only on the fact that data is stored in CFB.
@@ -47,4 +64,3 @@ raw = integer * 100_000 + fraction
 The 100,000 value is the schematic split base, not the global units-per-mil value.
 
 Colors use Win32 `COLORREF` byte order `0x00BBGGRR` and the domain [`Color`](../../crates/altium-format-types/src/color.rs) type.
-
