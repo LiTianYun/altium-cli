@@ -4,6 +4,7 @@
 mod anchors;
 mod compile;
 mod fields;
+mod footprint_exports;
 mod graphics;
 mod imports;
 

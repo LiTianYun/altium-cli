@@ -124,7 +124,7 @@ pub fn compile_captured_schlib(graph: &CapturedSourceGraph) -> Result<CompiledSc
                             }
                             let name = decl.name.node.as_str();
                             declare(&mut names, &name, decl.name.span)?;
-                            let value = footprint_exports(path, decl, &scope)?;
+                            let value = super::footprint_exports::export(path, decl, &scope)?;
                             exposed.insert(name.clone(), value.clone());
                             if let Some(binding) = &decl.binding {
                                 if binding.node != name {
@@ -199,54 +199,6 @@ fn declare(names: &mut BTreeMap<String, Span>, name: &str, span: Span) -> Result
         ));
     }
     Ok(())
-}
-fn footprint_exports(
-    source: &std::path::Path,
-    decl: &FootprintDecl,
-    parent: &ScopeStack,
-) -> Result<Value, SpecError> {
-    let mut scope = parent.clone();
-    scope.push();
-    let mut fields = IndexMap::new();
-    let mut names = BTreeMap::new();
-    for item in &decl.body {
-        match &item.node {
-            FootprintItem::LetBinding(binding) => {
-                declare(&mut names, &binding.name.node, binding.name.span)?;
-                scope.mark_evaluating(&binding.name.node);
-                scope.define(
-                    binding.name.node.clone(),
-                    eval_expr(&binding.value, &scope)?,
-                );
-            }
-            FootprintItem::Pad(pad) => {
-                let name = pad.name.node.as_str();
-                declare(&mut names, &name, pad.name.span)?;
-                fields.insert(name.clone(), name.clone());
-                if let Some(binding) = &pad.binding {
-                    if binding.node != name {
-                        declare(&mut names, &binding.node, binding.span)?;
-                        fields.insert(binding.node.clone(), name);
-                    }
-                }
-            }
-            FootprintItem::Row(_) | FootprintItem::Column(_) | FootprintItem::Grid(_) => {
-                return Err(error(
-                    "generated footprint pad exports require typed PcbLib intent compilation",
-                    item.span,
-                ));
-            }
-            FootprintItem::Property(_) | FootprintItem::Graphic(_) => {
-                // Geometry is not consumed as SchLib output; the captured source
-                // remains the provenance for the referenced footprint definition.
-            }
-        }
-    }
-    Ok(Value::Definition(DefinitionReference::Footprint {
-        source: source.to_path_buf(),
-        name: decl.name.node.as_str(),
-        pads: fields,
-    }))
 }
 
 fn component_reference(source: &std::path::Path, name: &str) -> Value {

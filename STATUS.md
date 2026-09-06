@@ -41,7 +41,7 @@ is parsed and preserved by the CST; legacy commands explicitly reject collection
 scope instead of ignoring it. The typed SchLib intent core now preserves field operations/spans, collection
 scope, typed definition references, imported source provenance, and nested spread
 origins. It compiles captured transitive values without reopening imports. Full
-step 1 remains open: generated footprint-pad imports, graphic default/clear policies, and typed image
+step 1 remains open: graphic default/clear policies and typed image
 resources. Anchored pins/auto-sized boxes now retain typed dependencies; the layout
 evaluator uses effective target/base/default geometry without erasing absence.
 Independent pin x/y operations preserve omitted target/base axes and distinguish
@@ -53,6 +53,13 @@ Axis/layout validation: 340 language tests passed, followed by 17 solver tests
 including the final interval-intersection regression; 168 legacy spec tests and
 CLI compilation passed. Both deltas passed independent review. The five real
 SchLib-derived intent dumps again compile deterministically with unchanged counts.
+Captured footprint imports now export pad names from rows, columns, and grids,
+including skip/perimeter naming and explicit generated-pad overrides. Counts,
+coordinates, generator properties, and name collisions are checked. This exports
+the SchLib mapping namespace; it does not materialize a native PcbLib footprint.
+Seven fixture-free generated-import tests passed, including captured transitive
+imports after source deletion and signed edge-coordinate overflow cases. The
+implementation passed independent review.
 Coordinate literals and dimensional float conversions now reject nonfinite/overflow
 values; signed-minimum division, negation, and abs return errors instead of panics. `altium-sync` remains a dependency scaffold. No state subsystem
 existed to remove. Obsolete design notes and scaffold identity

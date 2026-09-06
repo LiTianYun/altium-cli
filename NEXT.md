@@ -33,8 +33,8 @@ Import resolution and immutable transitive source capture also live in the
 language crate. Collection scope and contextual operations parse into explicit
 AST/CST forms. The typed SchLib intent core compiles captured imports and retains
 field operations, collection scope, source provenance, and spread origins. Full
-step 1 is still open for graphic policies/image resources and generated
-footprint-pad imports. Independent pin axes and owner-local auto-size constraints
+step 1 is still open for graphic policies/image resources. Captured footprint
+imports now export generated pad names. Independent pin axes and owner-local auto-size constraints
 now resolve over effective target/base geometry. CLI plan still renders an ECO while apply recompiles
 the spec and invokes a different executor; preview/apply agreement is not guaranteed.
 `altium-sync` contains a dependency scaffold only. There is

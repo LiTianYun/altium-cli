@@ -72,9 +72,8 @@ cargo run -p altium-spec-lang --example check_schlib_intent -- design.schlib-spe
 ```
 
 This is a front-end API, not the replacement CLI planner. Full step 1 still needs
-generated footprint-pad imports, graphic default and clear policies, and typed
-image-resource support. Unsupported image_data and
-generated pad references fail explicitly. Graphic fields are intent, not proof of
+graphic default and clear policies and typed image-resource support.
+Unsupported image_data fails explicitly. Graphic fields are intent, not proof of
 a native mapping: line-width enum conversion and fields without a native counterpart
 must be resolved before materialization. Later steps must verify ownership,
 materialize/project equality, scope enforcement, and native serialization.
@@ -86,6 +85,15 @@ the resolved instance base or definition default when creating a pin. Instance
 `inherit` selects the base axis; `reset` selects zero. Coordinates cannot be
 cleared. Paired coordinates, independent axes, and anchored placement are mutually
 exclusive, including when supplied through spreads.
+
+Captured PcbLib imports export explicit and generated pad names for SchLib
+footprint mappings. Rows, columns, and numeric/alphanumeric grids preserve naming,
+skip, perimeter, and explicit generated-pad override semantics. Bound box edges
+support forward references. Invalid generator properties, counts, coordinates,
+and duplicate names fail contextually; expansion is limited to one million
+generated positions per footprint before allocation. Compilation uses captured
+contents and retains the referenced definition's source path. This is a pad-name
+projection, not full PcbLib intent or native footprint materialization.
 
 ## Retained layout dependencies
 
