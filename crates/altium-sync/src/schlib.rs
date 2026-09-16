@@ -10,7 +10,21 @@ use altium_format::{
     SchLib,
     api::{SchLibComponentSnapshot, SchLibSnapshot},
 };
-use altium_spec_lang::intent::{FieldIntent, OPTIONAL_DESCRIPTION};
+use altium_format_types::ComponentKind;
+use altium_spec_lang::intent::{
+    COMPONENT_DESIGNATOR, COMPONENT_KIND, FieldIntent, FieldPolicy, OPTIONAL_DESCRIPTION,
+};
+
+/// Explicit scope for the supported library-definition scalar properties.
+/// Child collections and part-count edits are intentionally separate inputs to
+/// the full planner; this type never implies permission to change them.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ComponentPropertiesIntent {
+    pub description: FieldIntent<Option<String>>,
+    pub designator: FieldIntent<Option<String>>,
+    pub component_kind: FieldIntent<ComponentKind>,
+    pub show_hidden_pins: FieldIntent<bool>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SchLibPatchError {
@@ -20,9 +34,10 @@ pub enum SchLibPatchError {
         #[source]
         source: altium_format::AltiumFormatError,
     },
-    #[error("component #{index} description: {source}")]
+    #[error("component #{index} {field}: {source}")]
     Intent {
         index: usize,
+        field: &'static str,
         #[source]
         source: altium_spec_lang::SpecError,
     },
@@ -69,6 +84,27 @@ impl SchLibPatch {
         input: &SchLibSnapshot,
         fields: impl IntoIterator<Item = (usize, FieldIntent<Option<String>>)>,
     ) -> Result<Self, SchLibPatchError> {
+        Self::component_properties(
+            input,
+            fields.into_iter().map(|(index, description)| {
+                (
+                    index,
+                    ComponentPropertiesIntent {
+                        description,
+                        ..Default::default()
+                    },
+                )
+            }),
+        )
+    }
+
+    /// Resolve only explicitly supplied component properties. Absent values
+    /// preserve the existing complete aggregate; definition inherit/reset use
+    /// declared defaults. This is not a full SchLibIntent or instance planner.
+    pub fn component_properties(
+        input: &SchLibSnapshot,
+        fields: impl IntoIterator<Item = (usize, ComponentPropertiesIntent)>,
+    ) -> Result<Self, SchLibPatchError> {
         let mut seen = std::collections::BTreeSet::new();
         let mut replacements = Vec::new();
         for (index, intent) in fields {
@@ -81,22 +117,43 @@ impl SchLibPatch {
                     context: format!("resolving input component #{index}"),
                     source,
                 })?;
-            if matches!(intent, FieldIntent::Absent) {
-                continue;
+            let mut after = before.clone();
+            macro_rules! property {
+                ($field:ident, $policy:expr, $setter:ident) => {
+                    if intent.$field.is_authored() {
+                        let value = $policy.definition(&intent.$field).map_err(|source| {
+                            SchLibPatchError::Intent {
+                                index,
+                                field: stringify!($field),
+                                source,
+                            }
+                        })?;
+                        after =
+                            after
+                                .$setter(value)
+                                .map_err(|source| SchLibPatchError::Format {
+                                    context: format!(
+                                        "elaborating {} of component #{index} '{}'",
+                                        stringify!($field),
+                                        before.lib_reference()
+                                    ),
+                                    source,
+                                })?;
+                    }
+                };
             }
-            let value = OPTIONAL_DESCRIPTION
-                .definition(&intent)
-                .map_err(|source| SchLibPatchError::Intent { index, source })?;
-            let after =
-                before
-                    .with_description(value)
-                    .map_err(|source| SchLibPatchError::Format {
-                        context: format!(
-                            "elaborating description of component #{index} '{}'",
-                            before.lib_reference()
-                        ),
-                        source,
-                    })?;
+            property!(description, OPTIONAL_DESCRIPTION, with_description);
+            property!(designator, COMPONENT_DESIGNATOR, with_designator);
+            property!(component_kind, COMPONENT_KIND, with_component_kind);
+            property!(
+                show_hidden_pins,
+                FieldPolicy {
+                    name: "component.show_hidden_pins",
+                    default: Some(|| false),
+                    clear: None,
+                },
+                with_show_hidden_pins
+            );
             if after != before {
                 replacements.push(ComponentReplacement { index, after });
             }
@@ -133,7 +190,7 @@ impl SchLibPatch {
                 }),
                 PlannedItem::New { .. } => {
                     return Err(SchLibPatchError::Collection {
-                        detail: "description-only patch cannot create a component".into(),
+                        detail: "component-property patch cannot create a component".into(),
                     });
                 }
             }
@@ -197,6 +254,94 @@ mod tests {
 
     fn set(value: &str) -> FieldIntent<Option<String>> {
         FieldIntent::Set(Spanned::new(Some(value.into()), Span::new(0, 1)))
+    }
+
+    #[test]
+    fn component_properties_survive_native_save_and_replan_without_changes() {
+        let mut doc = SchLib::new_blank_ad26().unwrap();
+        let input = doc.snapshot().unwrap();
+        let properties = ComponentPropertiesIntent {
+            description: set("complete property edit"),
+            designator: set("R?"),
+            component_kind: FieldIntent::Set(Spanned::new(ComponentKind::Jumper, Span::new(0, 1))),
+            show_hidden_pins: FieldIntent::Set(Spanned::new(true, Span::new(0, 1))),
+        };
+        let patch = SchLibPatch::component_properties(&input, [(0, properties.clone())]).unwrap();
+        let expected = patch.resulting_snapshot().unwrap();
+        let component = expected.component(0).unwrap();
+        assert_eq!(component.component_kind(), ComponentKind::Jumper);
+        assert_eq!(component.designator().unwrap(), Some("R?"));
+        assert!(component.show_hidden_pins());
+        patch.apply_in_memory(&mut doc).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("properties.SchLib");
+        doc.save(&path).unwrap();
+        let reopened = SchLib::open(&path).unwrap().snapshot().unwrap();
+        assert_eq!(reopened, expected);
+        assert!(
+            SchLibPatch::component_properties(&reopened, [(0, properties)])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            SchLibPatch::component_properties(
+                &reopened,
+                [(0, ComponentPropertiesIntent::default())]
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn clear_and_reset_only_change_explicit_component_properties() {
+        let doc = SchLib::new_blank_ad26().unwrap();
+        let original = doc.snapshot().unwrap();
+        let authored = SchLibPatch::component_properties(
+            &original,
+            [(
+                0,
+                ComponentPropertiesIntent {
+                    description: set("retained"),
+                    designator: set("X?"),
+                    show_hidden_pins: FieldIntent::Set(Spanned::new(true, Span::new(0, 1))),
+                    ..Default::default()
+                },
+            )],
+        )
+        .unwrap()
+        .resulting_snapshot()
+        .unwrap();
+        let result = SchLibPatch::component_properties(
+            &authored,
+            [(
+                0,
+                ComponentPropertiesIntent {
+                    designator: FieldIntent::Clear(Span::new(0, 1)),
+                    show_hidden_pins: FieldIntent::Reset(Span::new(0, 1)),
+                    ..Default::default()
+                },
+            )],
+        )
+        .unwrap()
+        .resulting_snapshot()
+        .unwrap();
+        let component = result.component(0).unwrap();
+        assert_eq!(component.designator().unwrap(), None);
+        assert_eq!(component.description(), Some("retained"));
+        assert!(!component.show_hidden_pins());
+        let error = SchLibPatch::component_properties(
+            &result,
+            [(
+                0,
+                ComponentPropertiesIntent {
+                    show_hidden_pins: FieldIntent::Clear(Span::new(0, 1)),
+                    ..Default::default()
+                },
+            )],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("show_hidden_pins"), "{error}");
     }
 
     #[test]

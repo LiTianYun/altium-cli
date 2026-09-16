@@ -1,3 +1,4 @@
+mod ownership;
 mod snapshot;
 pub use snapshot::{SchLibComponentSnapshot, SchLibSnapshot};
 
@@ -1838,6 +1839,7 @@ impl SchLib {
                 base: SchPrimitiveBase {
                     owner_index: 0,
                     is_not_accessible: false,
+                    owner_index_additional_list: false,
                     index_in_sheet: 0,
                     owner_part_id: 0,
                     owner_part_display_mode: 0,
@@ -1876,6 +1878,7 @@ impl SchLib {
                 base: SchPrimitiveBase {
                     owner_index: 0,
                     is_not_accessible: false,
+                    owner_index_additional_list: false,
                     index_in_sheet: 0,
                     owner_part_id: 0,
                     owner_part_display_mode: 0,

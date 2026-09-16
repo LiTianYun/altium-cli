@@ -131,3 +131,28 @@ streams; their logical address/index rules still need source-backed confirmation
 Structural editing must resolve the complete owner graph, build final ordered
 collections from original addresses, remap references once, reject retained
 orphans and validate save/reopen before completing step 2.
+
+## Scalar and ownership increment
+
+The next increment expands explicit component-property patches to description,
+designator, component kind and hidden-pin visibility. Omitted fields retain their
+complete native state. Kind projection follows the original AD26 compatibility
+field precedence; updates emit the matching legacy/version2/version3 tuple.
+Designator text edits preserve attributes. Creation captures a native ID in the
+planned after-state, while creation/removal uses immutable record addresses to
+rebuild Data and Additional owners. Header weight changes by the checked Data
+record/alias count delta, preserving the input's accepted exporter convention.
+
+The dual-stream graph implementation supersedes the unresolved address-formula
+question above. Data uses a separate root at zero and child index plus one;
+Additional has no root and uses zero-based addresses when its selector is set.
+Both original and assembled graphs reject invalid addresses, cycles, forward
+same-stream parents, retained orphans, nested Component boundaries and known
+implementation-parent mismatches. IndexInSheet remains unchanged. See
+[next-ownership-2026-09-05.md](next-ownership-2026-09-05.md) for original-source
+provenance and the distinction between programmatic Additional roundtrips and
+real corpus evidence.
+
+This is still a bounded step-2 increment. Complete intent elaboration, all child
+collections, part/display and font/image-reference validation, Additional pin
+sidecars, saved-plan serialization and transaction execution remain outstanding.

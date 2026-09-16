@@ -67,9 +67,9 @@ use altium_format_types::{
         },
         record_structure::{
             ASSIGNED_INTERFACE, ASSIGNED_INTERFACE_SIGNAL, COLLAPSED, DISTANCE_FROM_TOP,
-            INDEX_IN_SHEET, IS_IMAGE_PARAMETER, OWNER_INDEX, OWNER_PART_DISPLAY_MODE,
-            OWNER_PART_ID, PARAM_TYPE, RECORD, RECORD_EX, SELECTION_MEMORY, UNION_INDEX, UNIQUE_ID,
-            URL,
+            INDEX_IN_SHEET, IS_IMAGE_PARAMETER, OWNER_INDEX, OWNER_INDEX_ADDITIONAL_LIST,
+            OWNER_PART_DISPLAY_MODE, OWNER_PART_ID, PARAM_TYPE, RECORD, RECORD_EX,
+            SELECTION_MEMORY, UNION_INDEX, UNIQUE_ID, URL,
         },
         sheet::{
             AREA_COLOR, AUTHOR, BORDER_ON, CUSTOM_MARGIN_WIDTH, CUSTOM_X, CUSTOM_X_FRAC,
@@ -125,6 +125,8 @@ pub(crate) struct SchPrimitiveBase {
     pub owner_index: i32,
     #[param(key = IS_NOT_ACCESSIBLE, default = false)]
     pub is_not_accessible: bool,
+    #[param(key = OWNER_INDEX_ADDITIONAL_LIST, default = false)]
+    pub owner_index_additional_list: bool,
     #[param(key = INDEX_IN_SHEET, default = 0i32)]
     pub index_in_sheet: i32,
     #[param(key = OWNER_PART_ID, default = 0i32)]
@@ -4064,5 +4066,27 @@ mod tests {
         assert_eq!(pin2.pin_length, Coord::from_internal(2 * 100_000));
         assert_eq!(pin2.location.x, Coord::from_internal(5 * 100_000));
         assert_eq!(pin2.location.y, Coord::from_internal(-3 * 100_000));
+    }
+
+    #[test]
+    fn text_owner_address_space_defaults_and_roundtrips() {
+        use crate::block_stream::parse_blocks;
+        for (source, expected) in [
+            ("|OwnerIndex=0|", false),
+            ("|OwnerIndex=0|OwnerIndexAdditionalList=F|", false),
+            ("|OwnerIndex=0|OwnerIndexAdditionalList=T|", true),
+        ] {
+            let mut params = pc(source);
+            let line = SchLine::from_params(&mut params).unwrap();
+            params.assert_exhausted().unwrap();
+            assert_eq!(line.base.owner_index_additional_list, expected);
+            let bytes = serialize_record(&SchRecord::Line(line.clone())).unwrap();
+            let blocks = parse_blocks(&bytes).unwrap();
+            let mut params = ParameterCollection::from_bytes(&blocks[0].data).unwrap();
+            let _: i32 = params.remove_required(RECORD).unwrap();
+            let reopened = SchLine::from_params(&mut params).unwrap();
+            params.assert_exhausted().unwrap();
+            assert_eq!(reopened, line, "owner address space from {source}");
+        }
     }
 }

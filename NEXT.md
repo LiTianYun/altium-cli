@@ -43,11 +43,13 @@ now resolve over effective target/base geometry. Physical line widths map exactl
 to the original AD26 0/10/30/50mil table. CLI plan still renders an ECO while apply recompiles
 the spec and invokes a different executor; preview/apply agreement is not guaranteed.
 `altium-sync` now captures image asset bytes, hashes and path preconditions and
-applies initial description-only patches against complete typed SchLib snapshots.
+applies description, designator, component-kind and hidden-pin patches against
+complete typed SchLib snapshots.
 The native snapshot layer retains all parsed state privately; original-index
 collection assembly enforces explicit deletion permissions. Complete source
-elaboration, structural ownership repair and saved-plan/transaction execution
-are still outstanding. See the [step-2 evidence](docs/worklogs/next-snapshots-2026-09-05.md). There is
+elaboration and saved-plan/transaction execution are still outstanding. Native
+Data/Additional ownership assembly now supports designator creation/removal with
+reference remapping and orphan rejection; broader structural edits remain ahead. See the [step-2 evidence](docs/worklogs/next-snapshots-2026-09-05.md). There is
 no executable external state subsystem to migrate or delete.
 
 The recorded SchLib / Altium 26.2 GUI-save experiment (2026-06-21) found:

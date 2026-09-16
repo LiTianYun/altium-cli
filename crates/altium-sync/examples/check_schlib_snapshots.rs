@@ -1,11 +1,12 @@
 //! Real-file probe for complete typed snapshots and explicit scalar patches.
 //! Writes only temporary documents. This is not a user-facing saved-plan command.
 use altium_format::SchLib;
+use altium_format_types::ComponentKind;
 use altium_spec_lang::{
     diagnostic::{Span, Spanned},
     intent::FieldIntent,
 };
-use altium_sync::schlib::SchLibPatch;
+use altium_sync::schlib::{ComponentPropertiesIntent, SchLibPatch};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut checked = 0;
@@ -15,7 +16,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let result = check(&path).map_err(|error| {
             std::io::Error::other(format!("checking snapshot '{}': {error}", path.display()))
         })?;
-        if result["native_typed_noop_equal"] != true || result["native_typed_patch_equal"] != true {
+        if result["native_typed_noop_equal"] != true
+            || result["native_typed_patch_equal"] != true
+            || result["replan_empty"] != true
+        {
             failures += 1;
         }
         println!("{}", serde_json::to_string(&result)?);
@@ -45,16 +49,24 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
     materialized.save(&noop_path)?;
     let noop_equal = SchLib::open(&noop_path)?.snapshot()? == input;
 
-    let fields = (0..input.component_count()).map(|index| {
-        (
+    let mut fields = Vec::new();
+    for index in 0..input.component_count() {
+        let component = input.component(index)?;
+        fields.push((
             index,
-            FieldIntent::Set(Spanned::new(
-                Some(format!("snapshot validation component {index}")),
-                Span::new(0, 0),
-            )),
-        )
-    });
-    let patch = SchLibPatch::descriptions(&input, fields)?;
+            ComponentPropertiesIntent {
+                description: authored(Some(format!("snapshot validation component {index}"))),
+                designator: authored(Some(format!("X{index}?"))),
+                component_kind: authored(if index % 2 == 0 {
+                    ComponentKind::Jumper
+                } else {
+                    ComponentKind::StandardNoBom
+                }),
+                show_hidden_pins: authored(!component.show_hidden_pins()),
+            },
+        ));
+    }
+    let patch = SchLibPatch::component_properties(&input, fields.clone())?;
     let expected = patch.resulting_snapshot()?;
     patch.apply_in_memory(&mut doc)?;
     if doc.snapshot()? != expected {
@@ -63,6 +75,7 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
     let edited_path = temp.path().join("edited.SchLib");
     doc.save(&edited_path)?;
     let reopened = SchLib::open(&edited_path)?.snapshot()?;
+    let replan_empty = SchLibPatch::component_properties(&reopened, fields)?.is_empty();
     Ok(serde_json::json!({
         "file": path,
         "components": input.component_count(),
@@ -71,5 +84,11 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
         "in_memory_patch_equal": true,
         "native_typed_noop_equal": noop_equal,
         "native_typed_patch_equal": reopened == expected,
+        "replan_empty": replan_empty,
+        "properties": ["description", "designator", "component_kind", "show_hidden_pins"],
     }))
+}
+
+fn authored<T>(value: T) -> FieldIntent<T> {
+    FieldIntent::Set(Spanned::new(value, Span::new(0, 0)))
 }

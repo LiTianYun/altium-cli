@@ -48,15 +48,18 @@ replacement. Native record fields, Data/Additional separation, global settings,
 aliases and image resources remain private and intact. Cross-namespace component
 replacement is rejected using the captured native library/font/style/image/alias
 context; this does not replace ownership validation or reference relocation.
-The first sync scalar path applies explicitly addressed component descriptions,
-preserves all other typed fields, binds execution to complete typed input equality,
+The sync scalar path applies explicitly addressed descriptions, designators,
+component kinds and hidden-pin flags, preserves other typed fields, binds execution
+to complete typed input equality,
 and publishes only a validated candidate. The shared collection planner checks
 original indices, partial preservation, complete order, deletion permission and
-conflicting edits. Full field/collection elaboration, structural ownership repair,
+conflicting edits. Native Data/Additional ownership assembly remaps references
+for designator creation/removal, preserves sibling metadata, and rejects retained
+orphans and loader-incompatible ownership. Full field/collection elaboration,
 saved-plan serialization, filesystem transactions and CLI migration remain ahead.
 Real snapshot checks pass on Connectors, ICs and STM32F4: 223 components retain
-complete typed equality through native no-op save/reopen and 223 description
-replacements. The ICs check exposed and fixed an unjustified pin-count cache
+complete typed equality through native no-op save/reopen and 223 component
+replacements covering all four scalar properties, with empty replans. The ICs check exposed and fixed an unjustified pin-count cache
 recalculation; the original AD26 exporter uses the stored data-object value.
 See the [snapshot investigation](docs/worklogs/next-snapshots-2026-09-05.md).
 Snapshot increment validation: 403 core, 168 legacy spec and 12 sync tests pass;

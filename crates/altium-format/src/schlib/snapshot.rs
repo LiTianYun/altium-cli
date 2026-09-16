@@ -1,6 +1,8 @@
 //! Complete typed state for SchLib planning. No native record internals escape
 //! this module; source scope and authorization belong to the planner.
 
+mod fields;
+
 use super::{SchLib, SchLibComponent, SchLibComponentIndex};
 use crate::{AltiumFormatError, Result, ResultExt};
 use std::sync::Arc;
@@ -63,15 +65,26 @@ pub struct SchLibComponentSnapshot {
 }
 
 impl SchLib {
-    /// Captures complete typed state after checking current library invariants.
+    /// Captures complete typed state after checking library invariants and the
+    /// full Data/Additional ownership graph.
     pub fn snapshot(&self) -> Result<SchLibSnapshot> {
-        self.validate_invariants()
-            .context("capturing SchLib snapshot")?;
+        validate_snapshot_library(self).context("capturing SchLib snapshot")?;
         Ok(SchLibSnapshot {
             library: self.clone(),
             reference_context: Arc::new(ReferenceContext::capture(self)),
         })
     }
+}
+
+fn validate_snapshot_library(library: &SchLib) -> Result<()> {
+    library
+        .validate_invariants()
+        .context("validating snapshot library invariants")?;
+    for (index, component) in library.components.iter().enumerate() {
+        super::ownership::validate_component_ownership(component)
+            .with_context(|| format!("validating snapshot component[{index}] ownership"))?;
+    }
+    Ok(())
 }
 
 impl SchLibSnapshot {
@@ -132,8 +145,11 @@ impl SchLibSnapshot {
         &self,
         replacements: impl IntoIterator<Item = (usize, SchLibComponentSnapshot)>,
     ) -> Result<Self> {
+        validate_snapshot_library(&self.library)
+            .context("validating original SchLib snapshot before component replacement")?;
         let replacements: Vec<_> = replacements.into_iter().collect();
         let mut seen = std::collections::HashSet::new();
+        let mut weight_delta = 0i64;
         for (index, replacement) in &replacements {
             if !seen.insert(*index) {
                 return Err(AltiumFormatError::InvalidParamValue {
@@ -168,15 +184,53 @@ impl SchLibSnapshot {
                     ),
                 });
             }
+            super::ownership::validate_component_ownership(&replacement.component)
+                .with_context(|| format!("validating replacement component[{index}] ownership"))?;
+            // Retain the input's accepted native exporter weight convention.
+            // Only actual Data/alias cardinality changes affect the count; scalar
+            // edits must not recanonicalize an otherwise valid stored header.
+            let old_count = self.library.components[*index]
+                .records
+                .len()
+                .checked_add(existing.aliases.len());
+            let new_count = replacement
+                .component
+                .records
+                .len()
+                .checked_add(replacement.index.aliases.len());
+            let counts = old_count
+                .and_then(|old| i64::try_from(old).ok())
+                .zip(new_count.and_then(|new| i64::try_from(new).ok()));
+            let Some((old_count, new_count)) = counts else {
+                return Err(AltiumFormatError::InvalidParamValue {
+                    key: "weight".to_owned(),
+                    detail: format!(
+                        "replacing SchLib component[{index}]: record/alias count exceeds supported range"
+                    ),
+                });
+            };
+            weight_delta = weight_delta
+                .checked_add(new_count - old_count)
+                .ok_or_else(|| AltiumFormatError::InvalidParamValue {
+                    key: "weight".to_owned(),
+                    detail: "replacing SchLib components: cardinality delta overflow".to_owned(),
+                })?;
         }
+        let weight = i64::from(self.library.header.weight)
+            .checked_add(weight_delta)
+            .and_then(|weight| i32::try_from(weight).ok())
+            .ok_or_else(|| AltiumFormatError::InvalidParamValue {
+                key: "weight".to_owned(),
+                detail: "replacing SchLib components: resulting native header weight overflow"
+                    .to_owned(),
+            })?;
         let mut candidate = self.library.clone();
+        candidate.header.weight = weight;
         for (index, replacement) in replacements {
             candidate.components[index] = replacement.component;
             candidate.header.components[index] = replacement.index;
         }
-        candidate
-            .validate_invariants()
-            .context("replacing SchLib snapshot components")?;
+        validate_snapshot_library(&candidate).context("replacing SchLib snapshot components")?;
         Ok(Self {
             library: candidate,
             reference_context: Arc::clone(&self.reference_context),
@@ -186,9 +240,7 @@ impl SchLibSnapshot {
     /// Materializes exactly the captured typed state, without using the lossy
     /// semantic Component API. Validation covers current native invariants.
     pub fn materialize(&self) -> Result<SchLib> {
-        self.library
-            .validate_invariants()
-            .context("materializing SchLib snapshot")?;
+        validate_snapshot_library(&self.library).context("materializing SchLib snapshot")?;
         Ok(self.library.clone())
     }
 }
@@ -267,6 +319,11 @@ mod tests {
         aggregate.records.push(SchRecord::Pin(pin));
         let mut line = SchLine::from_params(&mut ParameterCollection::new()).unwrap();
         line.base.index_in_sheet = 17;
+        aggregate
+            .additional_records
+            .push(SchRecord::Line(line.clone()));
+        line.base.owner_index_additional_list = true;
+        line.base.owner_index = 0;
         aggregate.additional_records.push(SchRecord::Line(line));
         let name = aggregate.component.lib_reference.clone();
         library.header.components[0].aliases.push(name.clone());
@@ -396,6 +453,83 @@ mod tests {
         invalid.index.part_count += 1;
         assert!(snapshot.replace_components([(1, invalid)]).is_err());
         assert_eq!(snapshot.materialize().unwrap(), original);
+    }
+
+    #[test]
+    fn all_snapshot_boundaries_reject_invalid_complete_ownership() {
+        let original = rich_library().snapshot().unwrap();
+        for case in 0..5 {
+            let mut invalid = original.clone();
+            let component = &mut invalid.library.components[0];
+            let expected = match case {
+                0 | 1 | 4 => {
+                    let SchRecord::Line(line) = &mut component.additional_records[1] else {
+                        unreachable!()
+                    };
+                    line.base.owner_index = match case {
+                        0 => 1,
+                        1 => 99,
+                        _ => -1,
+                    };
+                    match case {
+                        0 => "cycle",
+                        1 => "exceeds stream record count",
+                        _ => "negative owner index",
+                    }
+                }
+                2 => {
+                    let implementation = component
+                        .records
+                        .iter_mut()
+                        .find_map(|record| match record {
+                            SchRecord::Implementation(implementation) => Some(implementation),
+                            _ => None,
+                        })
+                        .unwrap();
+                    implementation.base.owner_index = 0;
+                    "required parent kind ImplementationList"
+                }
+                _ => {
+                    let pin = component
+                        .records
+                        .iter_mut()
+                        .find_map(|record| match record {
+                            SchRecord::Pin(pin) => Some(pin),
+                            _ => None,
+                        })
+                        .unwrap();
+                    pin.owner_index = 0;
+                    pin.owner_index_additional_list = true;
+                    "Data records selecting Additional ownership are unsupported"
+                }
+            };
+            // These invalid graphs escaped the old Data-only invariant check.
+            invalid.library.validate_invariants().unwrap();
+            for error in [
+                invalid.library.snapshot().unwrap_err(),
+                invalid.materialize().unwrap_err(),
+                invalid.replace_components([]).unwrap_err(),
+            ] {
+                let message = error.to_string();
+                assert!(message.contains(expected), "case {case}: {message}");
+                assert!(message.contains("component[0]"), "case {case}: {message}");
+                assert!(
+                    message.contains(original.component(0).unwrap().lib_reference()),
+                    "case {case}: {message}"
+                );
+            }
+            let mut replacement = original.component(0).unwrap();
+            replacement.component = invalid.library.components[0].clone();
+            let error = original
+                .replace_component(0, replacement)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "candidate case {case}: {error}");
+            assert_eq!(
+                original.materialize().unwrap().snapshot().unwrap(),
+                original
+            );
+        }
     }
 
     #[test]
