@@ -4,9 +4,10 @@
 //! Writes only temporary documents. This is not a user-facing saved-plan command.
 use altium_format::SchLib;
 use altium_format::schlib::{
-    SchAliasOp, SchChildBatch, SchGraphicEdit, SchGraphicInit, SchGraphicShape,
-    SchLibComponentEdit, SchLibComponentSnapshot, SchLibEdit, SchLibSnapshot, SchNewComponent,
-    SchOwnerGroup, SchParameterEdit, SchParameterInit, SchPinEdit, SchPinInit,
+    SchAliasOp, SchChildBatch, SchFootprintEdit, SchFootprintInit, SchGraphicEdit, SchGraphicInit,
+    SchGraphicShape, SchLibComponentEdit, SchLibComponentSnapshot, SchLibEdit, SchLibSnapshot,
+    SchNewComponent, SchOwnerGroup, SchParameterEdit, SchParameterInit, SchPinEdit, SchPinInit,
+    SchPinPadMapInit,
 };
 use altium_format_types::{
     Color, ComponentKind, Coord, CoordPoint, LineStyle, PenWidth, PinElectricalType, RotationBy90,
@@ -41,6 +42,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || result["structural_part_shrink_equal"] != true
             || result["structural_part_report_correct"] != true
             || result["structural_part_restore_equal"] != true
+            || result["structural_footprint_replace_equal"] != true
+            || result["structural_footprint_probe_equal"] != true
+            || result["structural_footprint_removal_equal"] != true
+            || result["structural_footprint_projection_equal"] != true
+            || result["structural_footprint_non_pcblib_invariant"] != true
             || result["namespace_alias_add_equal"] != true
             || result["namespace_alias_remove_equal"] != true
             || result["namespace_clone_equal"] != true
@@ -127,6 +133,14 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
     // original snapshot state exactly.
     let namespace = namespace_pass(SchLib::open(path)?.snapshot()?, temp.path())?;
 
+    // Footprint structural pass (increment D2): per component, replace the
+    // first footprint's description, add a probe footprint (with one pin-pad
+    // map from an existing pin when possible), then remove it and restore the
+    // description, asserting footprint_maps() projection equality, native
+    // save/reopen typed equality, and the non-PCBLIB implementation count
+    // invariant at every stage.
+    let footprints = footprint_structural_pass(SchLib::open(path)?.snapshot()?, temp.path())?;
+
     Ok(serde_json::json!({
         "file": path,
         "components": input.component_count(),
@@ -151,6 +165,12 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
         "structural_part_shrink_equal": parts.shrink_equal,
         "structural_part_report_correct": parts.report_correct,
         "structural_part_restore_equal": parts.restore_equal,
+        "structural_footprint_replace_equal": footprints.replace_equal,
+        "structural_footprint_probe_equal": footprints.probe_equal,
+        "structural_footprint_removal_equal": footprints.removal_equal,
+        "structural_footprint_projection_equal": footprints.projection_equal,
+        "structural_footprint_non_pcblib_invariant": footprints.non_pcblib_invariant,
+        "structural_footprints_replaced": footprints.replaced_descriptions,
         "namespace_alias_add_equal": namespace.alias_add_equal,
         "namespace_alias_remove_equal": namespace.alias_remove_equal,
         "namespace_clone_equal": namespace.clone_equal,
@@ -271,6 +291,7 @@ fn structural_pass(
             parameters: Some(parameter_edits),
             graphics: Some(graphic_edits),
             pins: None,
+            footprints: None,
             allow_deletion: false,
         })?;
         expected_projections.push((expected_parameters, expected_graphic_kinds, recolored));
@@ -337,6 +358,7 @@ fn structural_pass(
             parameters: None,
             graphics: Some(order.into_iter().map(SchGraphicEdit::Keep).collect()),
             pins: None,
+            footprints: None,
             allow_deletion: false,
         })?;
         reorders.push((index, swapped));
@@ -396,6 +418,7 @@ fn structural_pass(
             parameters: Some(keeps),
             graphics: Some(graphic_keeps),
             pins: None,
+            footprints: None,
             allow_deletion: true,
         })?;
         removals.push((index, removed));
@@ -498,6 +521,7 @@ fn pin_structural_pass(
             parameters: None,
             graphics: None,
             pins: Some(edits),
+            footprints: None,
             allow_deletion: false,
         })?;
         inserts.push((index, edited));
@@ -541,6 +565,7 @@ fn pin_structural_pass(
             parameters: None,
             graphics: None,
             pins: Some(order.into_iter().map(SchPinEdit::Keep).collect()),
+            footprints: None,
             allow_deletion: false,
         })?;
         reorders.push((index, swapped));
@@ -581,6 +606,7 @@ fn pin_structural_pass(
             parameters: None,
             graphics: None,
             pins: Some(keeps),
+            footprints: None,
             allow_deletion: true,
         })?;
         removals.push((index, removed));
@@ -706,6 +732,227 @@ fn part_structural_pass(
         shrink_equal,
         report_correct,
         restore_equal,
+    })
+}
+
+struct FootprintStructuralOutcome {
+    replace_equal: bool,
+    probe_equal: bool,
+    removal_equal: bool,
+    projection_equal: bool,
+    non_pcblib_invariant: bool,
+    replaced_descriptions: usize,
+}
+
+const FOOTPRINT_PROBE_NAME: &str = "PROBE_STEP2D2";
+const FOOTPRINT_PROBE_DESCRIPTION: &str = "STEP2D2 replaced description";
+
+/// (model_name, description, is_current, pin→pads) tuples of the footprint
+/// projection plus the preserved non-PCBLIB implementation count.
+type FootprintFingerprint = (
+    Vec<(String, String, bool, Vec<(String, Vec<String>)>)>,
+    usize,
+);
+
+fn footprint_fingerprint(
+    component: &SchLibComponentSnapshot,
+) -> Result<FootprintFingerprint, Box<dyn std::error::Error>> {
+    let maps = component.footprint_maps()?;
+    Ok((
+        maps.footprints
+            .iter()
+            .map(|footprint| {
+                (
+                    footprint.model_name.to_owned(),
+                    footprint.description.to_owned(),
+                    footprint.is_current,
+                    footprint
+                        .pin_pad_maps
+                        .iter()
+                        .map(|map| (map.pin.to_owned(), map.pads.to_vec()))
+                        .collect(),
+                )
+            })
+            .collect(),
+        maps.preserved_non_pcblib_implementations,
+    ))
+}
+
+fn footprint_structural_pass(
+    input: SchLibSnapshot,
+    temp: &std::path::Path,
+) -> Result<FootprintStructuralOutcome, Box<dyn std::error::Error>> {
+    let mut projection_equal = true;
+    let mut non_pcblib_invariant = true;
+    let mut replaced_descriptions = 0usize;
+
+    // Baselines from the immutable input. Every component participates: the
+    // batch API passes wild current-states (e.g. STM32F4's keyless ISCURRENT
+    // ⇒ zero currents) through verbatim as long as no current value is
+    // written, so value-preserving Replaces and non-current probe News work
+    // on every stored shape.
+    let mut baselines = Vec::new();
+    for index in 0..input.component_count() {
+        let component = input.component(index)?;
+        baselines.push(footprint_fingerprint(&component)?);
+    }
+
+    // Stage 1: replace the first footprint's description (pin_pad_maps left
+    // unaddressed — the definers must survive verbatim; is_current keeps the
+    // stored value).
+    let mut replacements = Vec::new();
+    for index in 0..input.component_count() {
+        if baselines[index].0.is_empty() {
+            continue;
+        }
+        let component = input.component(index)?;
+        let maps = component.footprint_maps()?;
+        let first = &maps.footprints[0];
+        let mut edits: Vec<SchFootprintEdit> = (0..maps.footprints.len())
+            .map(SchFootprintEdit::Keep)
+            .collect();
+        edits[0] = SchFootprintEdit::Replace(
+            0,
+            SchFootprintInit {
+                model_name: first.model_name.to_owned(),
+                description: FOOTPRINT_PROBE_DESCRIPTION.to_owned(),
+                is_current: first.is_current,
+                pin_pad_maps: None,
+            },
+        );
+        let edited = component.with_children(SchChildBatch {
+            parameters: None,
+            graphics: None,
+            pins: None,
+            footprints: Some(edits),
+            allow_deletion: false,
+        })?;
+        replaced_descriptions += 1;
+        replacements.push((index, edited));
+    }
+    let expected_replaced = input.replace_components(replacements)?;
+    let replaced_path = temp.join("structural-footprint-replaced.SchLib");
+    expected_replaced.materialize()?.save(&replaced_path)?;
+    let reopened_replaced = SchLib::open(&replaced_path)?.snapshot()?;
+    let replace_equal = reopened_replaced == expected_replaced;
+    for index in 0..reopened_replaced.component_count() {
+        let component = reopened_replaced.component(index)?;
+        let fingerprint = footprint_fingerprint(&component)?;
+        non_pcblib_invariant &= fingerprint.1 == baselines[index].1;
+        if baselines[index].0.is_empty() {
+            projection_equal &= fingerprint == baselines[index];
+        } else {
+            let mut expected = baselines[index].clone();
+            expected.0[0].1 = FOOTPRINT_PROBE_DESCRIPTION.to_owned();
+            projection_equal &= fingerprint == expected;
+        }
+    }
+
+    // Stage 2: add the probe footprint to every component, with one pin-pad
+    // map from an existing pin when the component has pins.
+    let mut inserts = Vec::new();
+    for index in 0..reopened_replaced.component_count() {
+        let component = reopened_replaced.component(index)?;
+        let maps = component.footprint_maps()?;
+        let pin_pad_maps = match component.pins().first() {
+            Some(pin) if !pin.designator.is_empty() => vec![SchPinPadMapInit {
+                pin: pin.designator.to_owned(),
+                pads: vec!["STEP2D2_PAD".to_owned()],
+            }],
+            _ => Vec::new(),
+        };
+        let edits: Vec<SchFootprintEdit> = (0..maps.footprints.len())
+            .map(SchFootprintEdit::Keep)
+            .chain([SchFootprintEdit::New(SchFootprintInit {
+                model_name: FOOTPRINT_PROBE_NAME.to_owned(),
+                description: "step2 D2 probe".to_owned(),
+                // The sole footprint must be the current one; alongside an
+                // existing current the probe stays non-current.
+                is_current: maps.footprints.is_empty(),
+                pin_pad_maps: Some(pin_pad_maps),
+            })])
+            .collect();
+        let edited = component.with_children(SchChildBatch {
+            parameters: None,
+            graphics: None,
+            pins: None,
+            footprints: Some(edits),
+            allow_deletion: false,
+        })?;
+        inserts.push((index, edited));
+    }
+    let expected_probed = reopened_replaced.replace_components(inserts)?;
+    let probed_path = temp.join("structural-footprint-probed.SchLib");
+    expected_probed.materialize()?.save(&probed_path)?;
+    let reopened_probed = SchLib::open(&probed_path)?.snapshot()?;
+    let probe_equal = reopened_probed == expected_probed;
+    for index in 0..reopened_probed.component_count() {
+        let component = reopened_probed.component(index)?;
+        let fingerprint = footprint_fingerprint(&component)?;
+        non_pcblib_invariant &= fingerprint.1 == baselines[index].1;
+        let probe = fingerprint.0.last();
+        projection_equal &= fingerprint.0.len() == baselines[index].0.len() + 1
+            && probe.is_some_and(|(name, _, current, _)| {
+                name == FOOTPRINT_PROBE_NAME && *current == baselines[index].0.is_empty()
+            });
+    }
+
+    // Stage 3: remove the probe (authorized) and restore the description; the
+    // final snapshot must equal the original input exactly.
+    let mut removals = Vec::new();
+    for index in 0..reopened_probed.component_count() {
+        let component = reopened_probed.component(index)?;
+        let maps = component.footprint_maps()?;
+        let count = maps.footprints.len();
+        if maps.footprints[count - 1].model_name != FOOTPRINT_PROBE_NAME {
+            return Err(format!(
+                "component {index}: footprints[{}] is not the probe footprint",
+                count - 1
+            )
+            .into());
+        }
+        let mut edits: Vec<SchFootprintEdit> = (0..count - 1).map(SchFootprintEdit::Keep).collect();
+        if !baselines[index].0.is_empty() {
+            let original = &baselines[index].0[0];
+            edits[0] = SchFootprintEdit::Replace(
+                0,
+                SchFootprintInit {
+                    model_name: original.0.to_owned(),
+                    description: original.1.to_owned(),
+                    is_current: original.2,
+                    pin_pad_maps: None,
+                },
+            );
+        }
+        let edited = component.with_children(SchChildBatch {
+            parameters: None,
+            graphics: None,
+            pins: None,
+            footprints: Some(edits),
+            allow_deletion: true,
+        })?;
+        removals.push((index, edited));
+    }
+    let expected_removed = reopened_probed.replace_components(removals)?;
+    let removed_path = temp.join("structural-footprint-removed.SchLib");
+    expected_removed.materialize()?.save(&removed_path)?;
+    let reopened_removed = SchLib::open(&removed_path)?.snapshot()?;
+    let mut removal_equal = reopened_removed == expected_removed;
+    removal_equal &= reopened_removed == input;
+    for index in 0..reopened_removed.component_count() {
+        let component = reopened_removed.component(index)?;
+        let fingerprint = footprint_fingerprint(&component)?;
+        projection_equal &= fingerprint == baselines[index];
+        non_pcblib_invariant &= fingerprint.1 == baselines[index].1;
+    }
+
+    Ok(FootprintStructuralOutcome {
+        replace_equal,
+        probe_equal,
+        removal_equal,
+        projection_equal,
+        non_pcblib_invariant,
+        replaced_descriptions,
     })
 }
 

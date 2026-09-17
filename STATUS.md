@@ -243,6 +243,52 @@ were re-scoped to increment E by the 2026-09-16 orchestrator decision
 (recorded in the plan and worklog; elaboration consumes the D1 format API).
 Post-fix validation: 474 format, 18 sync tests pass; CLI builds; corpus gate
 all-true, exit 0.
+Step-2 increment D2 (2026-09-17) extended the batch engine to the footprint/
+implementation chain: `SchChildBatch.footprints` with
+`SchFootprintEdit::{Keep, Replace, New}` over the A2
+`footprint_maps().footprints` projection (PCBLIB implementations only); each
+member is the Implementation record plus its whole owned subtree, handled as
+a unit, and the serialized compatibility-container chain (ImplementationList
+→ Implementation → ImplementationMap → MapDefiner, ParameterList) is
+preserved as serialized, never flattened. Non-PCBLIB implementations
+(SIM/PCB3D/SI/…) are OUTSIDE the collection: preserved verbatim in their
+original relative slots under every footprint edit including complete
+replacement with deletion authorized (the red-team [12] SIM-preservation test
+exists); reordering permutes only footprint slots. `SchFootprintInit` covers
+model_name/description/is_current/pin_pad_maps (`Option`; `None` =
+unaddressed → definers preserved verbatim on Replace); Replace preserves
+everything unaddressed (unique_id, datafile links, GUIDs, stored model_type
+casing, the ParameterList subtree); creation materializes the full native
+chain per decompiled-source + fixture-byte evidence — shared
+ImplementationList reused (created only when none exists; AD26 emits exactly
+one per component unconditionally), Implementation with model_type PCBLIB,
+fresh UniqueId, IndexInSheet −1, owner_part_id 0, and the native single
+default datafile link (entity = model name, kind "PCBLib"), plus one
+ImplementationMap and one ParameterList (both emitted unconditionally by
+AD26; fixture 45/46/48 counts are 1:1:1) and one MapDefiner per pin-pad map.
+MapDefiners were reclassified as objectList children (native 0-based map
+ordinals via the shared memo-§6 renumbering; wild-byte verified) and
+ParameterList-owned parameters as non-objectList (−1) content. Duplicate pin
+designators are rejected (AD26 silently drops case-insensitive duplicate
+definers on load). is_current: the native single-current-per-model-type
+invariant (AD26's importer repairs it silently at load) is enforced at the
+mutation boundary as a no-new-divergence rule — a batch may neither break a
+coherent input nor author an active current claim into an incoherent final
+state; pre-existing wild states (keyless ISCURRENT ⇒ zero currents — two of
+the three gate fixtures, lucashudson-Connectors and STM32F4) pass through
+verbatim when no current value is written and are resolvable in the same
+batch. Additional-stream chain records freeze the
+collection to the all-positional-Keep no-op (native exporter cannot emit
+them; zero corpus occurrences). Footprint subtrees containing pins are hard
+errors; subtree records that are graphics members conflict when both
+collections are edited in one batch.
+D2 validation: 481 format, 18 sync, 362 spec-lang and 168 format-spec tests
+pass; the CLI builds; `cargo fmt --check` clean; the corpus gate adds a
+footprint structural pass (per component: first-footprint description
+replace, PROBE_STEP2D2 add with a pin-pad map from an existing pin,
+authorized removal + description restore to exact input equality, with
+projection equality and the non-PCBLIB count invariant at every stage) — all
+checks true on all 223 components of the three gate libraries, exit 0.
 Full image codecs were removed from the gate by the user's 2026-09-05 scope change.
 Graphic field policies now cover all 13 kinds against the existing typed Rust
 API/creation defaults, including optional arc endpoints and named PenWidth values.

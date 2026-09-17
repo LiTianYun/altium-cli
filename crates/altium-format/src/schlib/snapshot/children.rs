@@ -66,12 +66,16 @@
 //! Objects that natively never live in an owner's objectList occupy no sibling
 //! slot and are never renumbered: Designator records and root-owned Parameter
 //! records named "Comment" (component field objects), pin-owned special
-//! parameters (DefaultNet/HiddenNetName/PinSelectionMemory/PinUniqueId), and
-//! the implementation compatibility chain (ImplementationList, Implementation,
-//! ImplementationMap, MapDefiner, ParameterList — implementations are removed
-//! from the objectList before AD26's save-time numbering). Newly created field
-//! objects are written with −1 (memo §6 rule 1); other new children receive
-//! their final sibling position through the renumbering above.
+//! parameters (DefaultNet/HiddenNetName/PinSelectionMemory/PinUniqueId), the
+//! implementation compatibility CONTAINERS (ImplementationList, Implementation,
+//! ImplementationMap, ParameterList — implementations are removed from the
+//! objectList before AD26's save-time numbering, and the wrapper ctors pin
+//! their own values), and ParameterList-owned parameters (the native
+//! IndexOf-mismatch serializes −1; wild fixture bytes confirm). MapDefiners DO
+//! occupy a slot in their map's objectList and carry 0-based ordinals
+//! natively. Newly created field objects are written with −1 (memo §6 rule 1);
+//! other new children receive their final sibling position through the
+//! renumbering above.
 //!
 //! Documented deviation from AD26's import dispatch: `SchDataParameter.
 //! UpdateOwner` selects its special-name branches by NAME ALONE (DefaultNet /
@@ -147,6 +151,95 @@
 //! carries no such field and the native pin-owned-Parameter storage form is
 //! preserved-only, so a written value would be silently lost on save.
 //!
+//! # Footprints (increment D2)
+//!
+//! `footprints()` membership is the A2 `footprint_maps()` projection: PCBLIB
+//! implementations only (case-insensitive model type). Each member is the
+//! Implementation record PLUS its whole transitively-owned subtree
+//! (ImplementationMap, MapDefiners, ParameterList, implementation-owned
+//! parameters, and any wild descendants), moved, replaced, or deleted as a
+//! unit. The serialized compatibility-container chain (ImplementationList →
+//! Implementation → ImplementationMap → MapDefiner, ParameterList) is
+//! preserved as serialized, never flattened (ownership worklog 2026-09-05).
+//!
+//! - **Non-PCBLIB implementations (SIM, PCB3D, SI, …) are OUTSIDE the
+//!   collection**: their subtrees are preserved verbatim in their original
+//!   relative stream slots under every footprint edit, including complete
+//!   replacement with deletion authorized. Footprint reordering permutes only
+//!   the footprint slots (a member's final sequence entry is emitted at the
+//!   original member's Implementation position); the shared ImplementationList
+//!   and interleaved non-PCBLIB siblings keep their positions.
+//! - **Creation** materializes the full native chain: the Implementation
+//!   (model_type `PCBLIB`, a fresh UniqueId, the native single default
+//!   datafile link `{location: "", entity: model_name, kind: "PCBLib"}` —
+//!   AD26 synthesizes exactly that for a link-less PCBLIB implementation,
+//!   EngineObjects/SchImplementation.cs `HandleAfterImportEvent`, and every
+//!   corpus footprint carries it), one ImplementationMap, one MapDefiner per
+//!   pin-pad map, and one ParameterList (AD26 emits map and parameter list
+//!   UNCONDITIONALLY per implementation — SchDataImplementation.cs ctor +
+//!   `AddToListForSave`; gate fixtures: RECORD 45/46/48 counts are 1:1:1).
+//!   New implementations attach to the component's existing shared
+//!   ImplementationList (AD26 emits exactly one per component,
+//!   SchDataComponent.AddToListForSave; every gate-fixture component carries
+//!   RECORD=44 even with zero models); a list is created only when the
+//!   component has none at all — owner root, owner_part_id 0 and
+//!   index_in_sheet 0 per the ctor (Objects/SchDataImplementationList.cs:9-14)
+//!   and the fixture bytes (bare `|RECORD=44`). The whole chain hard-codes
+//!   owner_part_id 0 (memo §1); Implementation records serialize
+//!   INDEXINSHEET=-1 (fixture bytes; the native IndexOf-mismatch mechanism),
+//!   ImplementationMap/ParameterList 0 (ctors), and MapDefiners carry their
+//!   0-based sibling ordinal within the map (wild bytes: Custom.SchLib
+//!   `RECORD=47 … INDEXINSHEET=1`), assigned through the shared memo-§6
+//!   touched-owner renumbering.
+//! - **Replace** writes exactly the addressed axes (model_name, description,
+//!   is_current, pin_pad_maps); everything else — unique_id, datafile links,
+//!   GUIDs, model_location, lock/database flags, stored model_type casing,
+//!   the ParameterList subtree — is preserved verbatim. `pin_pad_maps: None`
+//!   is unaddressed (definers preserved verbatim); `Some(maps)` rebuilds the
+//!   MapDefiner records under the implementation's single map (creating the
+//!   map only when none exists and `maps` is non-empty; several maps make the
+//!   rebuild unaddressable and hard-error). Duplicate pin designators
+//!   (case-insensitive) are rejected: AD26's `AddMapDefiner` silently DROPS
+//!   case-insensitive duplicates on load (SchDataImplementationMap.cs), so
+//!   writing them would be silent data loss. A `pin_pad_maps` rebuild
+//!   recreates the definers with native ctor base state (native definers
+//!   only ever carry ctor base state; AD26 creates them fresh through
+//!   `AddMapDefiner`): a wild non-default base-field value on a replaced
+//!   definer (e.g. `graphically_locked`) is NOT carried over — leave
+//!   `pin_pad_maps` unaddressed (`None`) to preserve such definers verbatim.
+//! - **is_current** (single-current invariant): AD26's SchLib importer itself
+//!   enforces exactly one current implementation per model type at load
+//!   (`ValidateImplementationsCurrentState`, called from
+//!   SchDataImporterLibraryV5.cs:239,385) by silently repairing the state,
+//!   and the wild class is real (two of the three gate fixtures —
+//!   lucashudson-Connectors, 58 footprints, and arthurbenemann-STM32F4, 381 —
+//!   store every footprint with no ISCURRENT key at all). We never repair
+//!   silently:
+//!   loaded wild states capture verbatim, and the mutation boundary blocks
+//!   only NEW divergence — a batch may neither break a coherent input's
+//!   single-current state (by flipping, deleting, or out-creating the
+//!   current footprint) nor author an ACTIVE current claim (a Replace
+//!   changing the stored value, or a New with is_current true) into an
+//!   incoherent final state. A pre-existing wild state passes through
+//!   verbatim when the batch writes no current value (Keeps, value-equal
+//!   Replaces, and non-current News): AD26's load repair of it is unchanged
+//!   by such an edit. Wild states are resolvable in the same batch by
+//!   authoring is_current explicitly into a coherent final assignment.
+//! - **Deletion** removes the member's whole owned subtree — never leaves
+//!   orphans — and requires `allow_deletion`. The shared ImplementationList is
+//!   NOT deleted when the last implementation goes: it is outside-collection
+//!   container state, and AD26 emits one per component unconditionally.
+//! - **Additional-stream chain records freeze the collection** (same
+//!   conservative shape as pins): the native exporter cannot emit chain
+//!   records into Additional (implementation kinds are not in the
+//!   Additional-root object set, ownership worklog; zero corpus occurrences),
+//!   so while any chain record lives there the only accepted footprints edit
+//!   is the all-positional-Keep no-op.
+//! - A footprint subtree containing a Pin record is unaddressable wild state
+//!   (hard error — pin sidecar ordering couples to the frozen pins
+//!   contract), and a subtree record that is simultaneously a member of
+//!   another collection edited in the same batch is a conflict (hard error).
+//!
 //! The optional init fields (`owner_part_display_mode`, and `font_id` on
 //! Label/TextFrame) mean "unaddressed" when `None`: on `New` they resolve the
 //! creation default (mode 0; the native default font), on `Replace` they
@@ -174,10 +267,11 @@ use super::{SchGraphicDetail, SchGraphicView, SchLibComponentSnapshot, SchOwnerG
 use crate::param_collection::ParameterCollection;
 use crate::param_value::SchAngle;
 use crate::sch_records::{
-    SchArc, SchBezier, SchEllipse, SchEllipticalArc, SchImage, SchLabel, SchLibComponent, SchLine,
-    SchParameter, SchPie, SchPin, SchPolygon, SchPolyline, SchRecord, SchRectangle,
-    SchRoundRectangle, SchTextFrame, encode_swap_id_part_and_part_pin, parse_text_pin,
-    split_swap_id_part_and_part_pin,
+    ModelDatafileLink, SchArc, SchBezier, SchEllipse, SchEllipticalArc, SchImage,
+    SchImplementation, SchImplementationList, SchImplementationMap, SchLabel, SchLibComponent,
+    SchLine, SchMapDefiner, SchParameter, SchParameterList, SchPie, SchPin, SchPolygon,
+    SchPolyline, SchRecord, SchRectangle, SchRoundRectangle, SchTextFrame,
+    encode_swap_id_part_and_part_pin, parse_text_pin, split_swap_id_part_and_part_pin,
 };
 use crate::schlib::ownership::{
     RecordAddress, RecordItem, RecordOwner, RecordStream, assemble_records, owner_of,
@@ -194,10 +288,10 @@ use altium_format_types::{
     RotationBy90, TextJustification,
 };
 
-/// One batch of structural edits over the parameters, graphics, and pins
-/// collections, applied through a single assembly pass. `None` leaves a
-/// collection completely untouched; `Some(vec![])` deletes every member
-/// (authorization required).
+/// One batch of structural edits over the parameters, graphics, pins, and
+/// footprints collections, applied through a single assembly pass. `None`
+/// leaves a collection completely untouched; `Some(vec![])` deletes every
+/// member (authorization required).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SchChildBatch {
     /// Final ordered `parameters()` sequence, or `None` to leave it untouched.
@@ -206,6 +300,10 @@ pub struct SchChildBatch {
     pub graphics: Option<Vec<SchGraphicEdit>>,
     /// Final ordered `pins()` sequence, or `None` to leave it untouched.
     pub pins: Option<Vec<SchPinEdit>>,
+    /// Final ordered `footprint_maps().footprints` sequence, or `None` to
+    /// leave it untouched. Non-PCBLIB implementations are outside the
+    /// collection and preserved verbatim under every footprint edit.
+    pub footprints: Option<Vec<SchFootprintEdit>>,
     /// Explicit per-call deletion authorization: an original collection member
     /// omitted from a final sequence is rejected unless this is set.
     pub allow_deletion: bool,
@@ -355,6 +453,78 @@ impl SchPinInit {
             part_pin_swap_suffix: Some(view.part_pin_swap_suffix.unwrap_or("").to_owned()),
             pair_swap_group: view.pair_swap_group.to_owned(),
         })
+    }
+}
+
+/// One item of the final `footprint_maps().footprints` sequence. Each member
+/// is the PCBLIB Implementation record plus its whole owned subtree, handled
+/// as a unit (module docs, "Footprints").
+#[derive(Debug, Clone, PartialEq)]
+pub enum SchFootprintEdit {
+    /// The original member at `footprint_maps().footprints[i]`, its whole
+    /// subtree preserved verbatim.
+    Keep(usize),
+    /// The original member at `footprint_maps().footprints[i]` with the
+    /// intent-addressable axes replaced; every other field and the rest of
+    /// the subtree are preserved verbatim (definers rebuilt only when
+    /// `pin_pad_maps` is addressed).
+    Replace(usize, SchFootprintInit),
+    /// A newly created footprint: the full native chain is materialized under
+    /// the component's shared ImplementationList (created only when the
+    /// component has none).
+    New(SchFootprintInit),
+}
+
+/// Intent-addressable footprint fields (the `SchFootprintMapView` surface).
+///
+/// The implementation chain hard-codes `owner_part_id` 0 natively (memo §1),
+/// so no owner axis exists. `pin_pad_maps: None` means unaddressed: on `New`
+/// it resolves to no mappings, on `Replace` it preserves the original
+/// MapDefiner records verbatim; `Some(maps)` rebuilds the definers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SchFootprintInit {
+    /// PCB footprint model name. Must be non-empty on `New` (the native
+    /// default datafile link derives its entity name from it).
+    pub model_name: String,
+    pub description: String,
+    /// Whether this footprint is the component's current PCBLIB model. A
+    /// batch that changes the collection must land with exactly one current
+    /// footprint when the final set is non-empty (module docs).
+    pub is_current: bool,
+    /// Pin designator → ordered pad designators, one MapDefiner each.
+    /// Duplicate pin designators (case-insensitive) are rejected: AD26's
+    /// loader silently drops them.
+    pub pin_pad_maps: Option<Vec<SchPinPadMapInit>>,
+}
+
+/// One authored MapDefiner: a pin designator mapped to its ordered pad
+/// designators (`DesIntf` → `DesImp{i}`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SchPinPadMapInit {
+    pub pin: String,
+    pub pads: Vec<String>,
+}
+
+impl SchFootprintInit {
+    /// Copies the intent-addressable axes out of a projected view, populating
+    /// `pin_pad_maps` explicitly (a `Replace` built `from_view` therefore
+    /// rebuilds the definer records; leave `pin_pad_maps` as `None` to
+    /// preserve them verbatim instead).
+    pub fn from_view(view: &super::SchFootprintMapView<'_>) -> Self {
+        Self {
+            model_name: view.model_name.to_owned(),
+            description: view.description.to_owned(),
+            is_current: view.is_current,
+            pin_pad_maps: Some(
+                view.pin_pad_maps
+                    .iter()
+                    .map(|map| SchPinPadMapInit {
+                        pin: map.pin.to_owned(),
+                        pads: map.pads.to_vec(),
+                    })
+                    .collect(),
+            ),
+        }
     }
 }
 
@@ -806,12 +976,13 @@ impl SchGraphicShape {
     }
 }
 
-/// The three structurally editable collections.
+/// The four structurally editable collections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Collection {
     Parameters,
     Graphics,
     Pins,
+    Footprints,
 }
 
 impl Collection {
@@ -820,6 +991,7 @@ impl Collection {
             Self::Parameters => "parameters",
             Self::Graphics => "graphics",
             Self::Pins => "pins",
+            Self::Footprints => "footprints",
         }
     }
 }
@@ -879,7 +1051,7 @@ enum EditMode {
 
 impl SchLibComponentSnapshot {
     /// Applies one batch of structural edits to the parameters, graphics,
-    /// and pins collections; see the module documentation for the complete contract
+    /// pins, and footprints collections; see the module documentation for the complete contract
     /// (final-sequence semantics, the stream-order rule, deletion
     /// authorization, creation defaults, and the IndexInSheet policy). The
     /// input snapshot is never modified; errors leave no partial state.
@@ -916,6 +1088,15 @@ impl SchLibComponentSnapshot {
             }
             None => None,
         };
+        let footprint_plan = match batch.footprints {
+            Some(edits) => self.resolve_footprint_edits(
+                edits,
+                batch.allow_deletion,
+                &graphic_members,
+                graphic_finals.is_some(),
+            )?,
+            None => None,
+        };
 
         // Working copy with Replace field-mutations applied in place: indices
         // and the ownership graph are unchanged, so every later resolution
@@ -935,6 +1116,11 @@ impl SchLibComponentSnapshot {
                 }
             }
         }
+        if let Some(plan) = &footprint_plan {
+            for (address, record) in &plan.replacements {
+                *record_slot_mut(&mut working, *address) = record.clone();
+            }
+        }
 
         let plan = plan_streams(
             component,
@@ -944,6 +1130,7 @@ impl SchLibComponentSnapshot {
             param_finals,
             graphic_finals,
             pin_finals,
+            footprint_plan,
         )?;
         let (data_items, data_ids) = to_items(&plan.data)?;
         let (additional_items, additional_ids) = {
@@ -954,8 +1141,9 @@ impl SchLibComponentSnapshot {
                         key: "record stream".to_owned(),
                         detail: format!(
                             "final arrangement places created record {id:?} in the Additional \
-                             stream; creating new parameters/graphics/pins in the Additional \
-                             stream is unsupported (no verified native creation path exists)"
+                             stream; creating new parameters/graphics/pins/footprints in the \
+                             Additional stream is unsupported (no verified native creation \
+                             path exists)"
                         ),
                     });
                 }
@@ -1219,6 +1407,529 @@ impl SchLibComponentSnapshot {
         }
         check_deletions(Collection::Pins, members.len(), &referenced, allow_deletion)?;
         Ok(finals)
+    }
+
+    /// Resolves a footprints edit into a [`FootprintPlan`] (module docs,
+    /// "Footprints"). Returns `None` for the frozen all-positional-Keep no-op
+    /// accepted while Additional-stream chain records exist.
+    fn resolve_footprint_edits(
+        &self,
+        edits: Vec<SchFootprintEdit>,
+        allow_deletion: bool,
+        graphic_members: &[RecordAddress],
+        graphics_edited: bool,
+    ) -> Result<Option<FootprintPlan>> {
+        let component = &self.component;
+
+        // Membership mirrors footprint_maps(): PCBLIB implementations in
+        // encounter order.
+        let mut member_addresses = Vec::new();
+        for (address, record) in all_records(component) {
+            if let SchRecord::Implementation(implementation) = record {
+                if implementation
+                    .model_type
+                    .eq_ignore_ascii_case(MODEL_TYPE_PCBLIB)
+                {
+                    member_addresses.push(address);
+                }
+            }
+        }
+
+        // Whole-subtree scope: a member's Implementation record plus every
+        // transitive descendant. Owners precede children in encounter order
+        // (validated graph), so one forward pass closes the set.
+        let mut scope_member: HashMap<RecordAddress, usize> = member_addresses
+            .iter()
+            .enumerate()
+            .map(|(ordinal, address)| (*address, ordinal))
+            .collect();
+        for (address, record) in all_records(component) {
+            if scope_member.contains_key(&address) {
+                continue;
+            }
+            if let Some(owner) = owner_of(component, address, record)? {
+                if let Some(&ordinal) = scope_member.get(&owner) {
+                    scope_member.insert(address, ordinal);
+                }
+            }
+        }
+
+        // Additional-stream chain records freeze the collection to the
+        // all-positional-Keep no-op (module docs: the native exporter cannot
+        // emit chain records into Additional; zero corpus occurrences).
+        let chain_in_additional = component.additional_records.iter().any(|record| {
+            matches!(
+                record,
+                SchRecord::ImplementationList(_)
+                    | SchRecord::Implementation(_)
+                    | SchRecord::ImplementationMap(_)
+                    | SchRecord::MapDefiner(_)
+                    | SchRecord::ParameterList(_)
+            )
+        }) || scope_member
+            .keys()
+            .any(|address| address.stream == RecordStream::Additional);
+        if chain_in_additional {
+            let positional_keep = edits.len() == member_addresses.len()
+                && edits.iter().enumerate().all(
+                    |(position, edit)| matches!(edit, SchFootprintEdit::Keep(i) if *i == position),
+                );
+            if !positional_keep {
+                return Err(AltiumFormatError::InvalidParamValue {
+                    key: "footprints".to_owned(),
+                    detail: "implementation-chain records live in the Additional stream; \
+                             structural footprint edits are unsupported there (the native \
+                             exporter never emits chain records into Additional and no \
+                             sidecar/order evidence exists) — the collection is frozen, so \
+                             only the all-positional-Keep arrangement is accepted"
+                        .to_owned(),
+                });
+            }
+            return Ok(None);
+        }
+
+        // Per-member subtrees in encounter order; the Implementation record is
+        // always first (owners precede children).
+        let mut subtrees: Vec<Vec<RecordAddress>> = vec![Vec::new(); member_addresses.len()];
+        let mut last_scope_address = None;
+        for (address, record) in all_records(component) {
+            let Some(&ordinal) = scope_member.get(&address) else {
+                continue;
+            };
+            subtrees[ordinal].push(address);
+            last_scope_address = Some(address);
+            // Conflict checks: a pin inside a footprint subtree is
+            // unaddressable wild state; a graphics member inside the scope
+            // conflicts with a graphics edit in the same batch.
+            if matches!(record, SchRecord::Pin(_)) {
+                return Err(AltiumFormatError::InvalidParamValue {
+                    key: "footprints".to_owned(),
+                    detail: format!(
+                        "footprint_maps().footprints[{ordinal}] owns a Pin record \
+                         (/{:?} record[{}]); footprint edits over subtrees containing pins \
+                         are unsupported (pin sidecar ordering is outside the footprint \
+                         collection's contract)",
+                        address.stream, address.index
+                    ),
+                });
+            }
+            if graphics_edited
+                && address != member_addresses[ordinal]
+                && graphic_members.contains(&address)
+            {
+                return Err(AltiumFormatError::InvalidParamValue {
+                    key: "footprints".to_owned(),
+                    detail: format!(
+                        "/{:?} record[{}] is both a graphics() member and part of \
+                         footprint_maps().footprints[{ordinal}]'s subtree; editing both \
+                         collections in one batch conflicts over it",
+                        address.stream, address.index
+                    ),
+                });
+            }
+        }
+
+        // Shared-ImplementationList resolution for New footprints: reuse the
+        // list owning the existing implementations (AD26 emits exactly one per
+        // component), else the first bare list, else create one.
+        let creates = edits
+            .iter()
+            .any(|edit| matches!(edit, SchFootprintEdit::New(_)));
+        let mut next_local_id = 0usize;
+        let mut created_list_entry = None;
+        let list_owner = if creates {
+            let mut implementation_list_owners = Vec::new();
+            let mut first_bare_list = None;
+            for (address, record) in all_records(component) {
+                match record {
+                    SchRecord::Implementation(_) => {
+                        let owner = owner_of(component, address, record)?.ok_or_else(|| {
+                            AltiumFormatError::InvalidParamValue {
+                                key: "footprints".to_owned(),
+                                detail: format!(
+                                    "/{:?} record[{}] is an Implementation with no owner",
+                                    address.stream, address.index
+                                ),
+                            }
+                        })?;
+                        if !implementation_list_owners.contains(&owner) {
+                            implementation_list_owners.push(owner);
+                        }
+                    }
+                    SchRecord::ImplementationList(_) if first_bare_list.is_none() => {
+                        first_bare_list = Some(address);
+                    }
+                    _ => {}
+                }
+            }
+            if implementation_list_owners.len() > 1 {
+                return Err(AltiumFormatError::InvalidParamValue {
+                    key: "footprints".to_owned(),
+                    detail: format!(
+                        "existing implementations are owned by {} distinct \
+                         ImplementationList records; the native model has exactly one \
+                         shared list per component, so this wild state must be resolved \
+                         before footprints can be created",
+                        implementation_list_owners.len()
+                    ),
+                });
+            }
+            match implementation_list_owners
+                .first()
+                .copied()
+                .or(first_bare_list)
+            {
+                Some(address) => PlannedOwner::Original(address),
+                None => {
+                    // AD26 creates the synthetic list unconditionally per
+                    // component (SchDataComponent.AddToListForSave); its ctor
+                    // hard-codes owner_part_id 0 and IndexInSheet 0
+                    // (Objects/SchDataImplementationList.cs:9-14; fixture
+                    // bytes: bare `|RECORD=44`).
+                    let record = SchRecord::ImplementationList(
+                        SchImplementationList::from_params(&mut ParameterCollection::new())
+                            .context("creating ImplementationList from typed wire defaults")?,
+                    );
+                    let local_id = next_local_id;
+                    next_local_id += 1;
+                    created_list_entry = Some(PlannedEntry::Created {
+                        local_id,
+                        record,
+                        owner: PlannedOwner::Root,
+                    });
+                    PlannedOwner::Created(local_id)
+                }
+            }
+        } else {
+            PlannedOwner::Root // unused
+        };
+
+        // Resolve the final sequence.
+        let mut referenced = HashSet::new();
+        let mut final_entries = Vec::with_capacity(edits.len());
+        let mut final_currents = Vec::with_capacity(edits.len());
+        let mut active_current_writes = false;
+        let mut replacements = Vec::new();
+        for (position, edit) in edits.into_iter().enumerate() {
+            match edit {
+                SchFootprintEdit::Keep(index) => {
+                    let address = resolve_member(
+                        Collection::Footprints,
+                        &member_addresses,
+                        index,
+                        position,
+                        &mut referenced,
+                    )?;
+                    let ordinal = scope_member[&address];
+                    final_currents.push(footprint_is_current(component, address));
+                    final_entries.push(
+                        subtrees[ordinal]
+                            .iter()
+                            .map(|address| PlannedEntry::Original(*address))
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                SchFootprintEdit::Replace(index, init) => {
+                    let address = resolve_member(
+                        Collection::Footprints,
+                        &member_addresses,
+                        index,
+                        position,
+                        &mut referenced,
+                    )?;
+                    let ordinal = scope_member[&address];
+                    active_current_writes |=
+                        init.is_current != footprint_is_current(component, address);
+                    final_currents.push(init.is_current);
+                    let entries = self
+                        .replace_footprint(
+                            address,
+                            &subtrees[ordinal],
+                            init,
+                            &mut replacements,
+                            &mut next_local_id,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "replacing footprint_maps().footprints[{index}] (final \
+                                 position {position})"
+                            )
+                        })?;
+                    final_entries.push(entries);
+                }
+                SchFootprintEdit::New(init) => {
+                    active_current_writes |= init.is_current;
+                    final_currents.push(init.is_current);
+                    let entries = self
+                        .build_footprint(init, list_owner, &mut next_local_id)
+                        .with_context(|| {
+                            format!("creating footprint at final position {position}")
+                        })?;
+                    final_entries.push(entries);
+                }
+            }
+        }
+        check_deletions(
+            Collection::Footprints,
+            member_addresses.len(),
+            &referenced,
+            allow_deletion,
+        )?;
+
+        // Single-current invariant over the final PCBLIB set (module docs,
+        // "is_current"): a batch may never BREAK a coherent input, nor author
+        // an active current claim (a changed Replace value, or a New with
+        // is_current true) into an incoherent final state. Pre-existing wild
+        // states pass through verbatim when no current value is touched —
+        // AD26's own load repair of them is unchanged by such an edit.
+        let input_currents = member_addresses
+            .iter()
+            .filter(|address| footprint_is_current(component, **address))
+            .count();
+        let input_coherent = member_addresses.is_empty() || input_currents == 1;
+        let final_current_count = final_currents.iter().filter(|current| **current).count();
+        let final_incoherent = !final_currents.is_empty() && final_current_count != 1;
+        if final_incoherent && (input_coherent || active_current_writes) {
+            return Err(AltiumFormatError::InvalidParamValue {
+                key: "footprints".to_owned(),
+                detail: format!(
+                    "the final footprint set has {final_current_count} current footprints \
+                     across {} members; the native model keeps exactly one current \
+                     implementation per model type (AD26 \
+                     ValidateImplementationsCurrentState) — author is_current explicitly \
+                     so exactly one footprint is current (a pre-existing wild current \
+                     state passes through only when the batch writes no current value)",
+                    final_currents.len()
+                ),
+            });
+        }
+
+        // Slot the finals: entries for final position m sit at original member
+        // m's Implementation address; extras follow the last scope record (or
+        // the Data end when no members existed), preceded by a created list.
+        let mut finals: Vec<Option<Vec<PlannedEntry>>> = final_entries
+            .drain(..member_addresses.len().min(final_entries.len()))
+            .map(Some)
+            .collect();
+        finals.resize_with(member_addresses.len(), || None);
+        let mut extras: Vec<PlannedEntry> = created_list_entry.into_iter().collect();
+        extras.extend(final_entries.into_iter().flatten());
+
+        Ok(Some(FootprintPlan {
+            scope: scope_member.keys().copied().collect(),
+            slots: member_addresses
+                .iter()
+                .enumerate()
+                .map(|(ordinal, address)| (*address, ordinal))
+                .collect(),
+            finals,
+            extras,
+            last_scope_address,
+            replacements,
+            next_local_id,
+        }))
+    }
+
+    /// Field-level footprint Replace: writes exactly the addressed axes into a
+    /// clone of the original Implementation record (recorded for the working
+    /// copy) and rebuilds the MapDefiner records when `pin_pad_maps` is
+    /// addressed; every other subtree record is preserved verbatim.
+    fn replace_footprint(
+        &self,
+        implementation: RecordAddress,
+        subtree: &[RecordAddress],
+        init: SchFootprintInit,
+        replacements: &mut Vec<(RecordAddress, SchRecord)>,
+        next_local_id: &mut usize,
+    ) -> Result<Vec<PlannedEntry>> {
+        let component = &self.component;
+        let SchRecord::Implementation(original) = record_slot(component, implementation) else {
+            unreachable!("footprint members are Implementation records")
+        };
+        let mut replaced = original.clone();
+        replaced.model_name = init.model_name;
+        replaced.description = init.description;
+        replaced.is_current = init.is_current;
+        // The stored model_type (casing included), unique_id, datafile links,
+        // GUIDs, locks, and location are preserved verbatim.
+        check_style_id_write(Some(original.base.style_id), replaced.base.style_id)?;
+        replacements.push((implementation, SchRecord::Implementation(replaced)));
+
+        let Some(maps) = init.pin_pad_maps else {
+            // Unaddressed: the whole subtree (definers included) is preserved.
+            return Ok(subtree.iter().map(|a| PlannedEntry::Original(*a)).collect());
+        };
+        check_pin_pad_maps(&maps)?;
+
+        // The rebuild target is the implementation's single ImplementationMap.
+        let mut implementation_maps: Vec<RecordAddress> = Vec::new();
+        for address in subtree {
+            if matches!(
+                record_slot(component, *address),
+                SchRecord::ImplementationMap(_)
+            ) && owner_address_of(component, *address)? == Some(implementation)
+            {
+                implementation_maps.push(*address);
+            }
+        }
+        if implementation_maps.len() > 1 {
+            return Err(AltiumFormatError::InvalidParamValue {
+                key: "footprints".to_owned(),
+                detail: format!(
+                    "the implementation owns {} ImplementationMap records; the native model \
+                     has exactly one map per implementation, so pin_pad_maps cannot be \
+                     rebuilt over this wild state (leave pin_pad_maps unaddressed to \
+                     preserve it verbatim)",
+                    implementation_maps.len()
+                ),
+            });
+        }
+        let target_map = implementation_maps.first().copied();
+
+        // Original definers of the target map are replaced; a definer owning
+        // descendants is unaddressable wild state (deleting it would orphan
+        // or silently delete records the axes never addressed).
+        let mut doomed_definers = HashSet::new();
+        if let Some(map_address) = target_map {
+            for address in subtree {
+                if matches!(record_slot(component, *address), SchRecord::MapDefiner(_))
+                    && owner_address_of(component, *address)?.as_ref() == Some(&map_address)
+                {
+                    doomed_definers.insert(*address);
+                }
+            }
+            for address in subtree {
+                if let Some(owner) = owner_address_of(component, *address)? {
+                    if doomed_definers.contains(&owner) {
+                        return Err(AltiumFormatError::InvalidParamValue {
+                            key: "footprints".to_owned(),
+                            detail: format!(
+                                "MapDefiner /{:?} record[{}] owns descendants; rebuilding \
+                                 pin_pad_maps would delete records the addressed axes never \
+                                 covered (leave pin_pad_maps unaddressed to preserve them)",
+                                owner.stream, owner.index
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut entries = Vec::new();
+        for address in subtree {
+            if doomed_definers.contains(address) {
+                continue;
+            }
+            entries.push(PlannedEntry::Original(*address));
+            if *address == implementation && target_map.is_none() && !maps.is_empty() {
+                // No map exists: materialize one right after the
+                // implementation (native subtree order), then the definers.
+                let map_id = *next_local_id;
+                *next_local_id += 1;
+                entries.push(PlannedEntry::Created {
+                    local_id: map_id,
+                    record: build_implementation_map()?,
+                    owner: PlannedOwner::Original(implementation),
+                });
+                for map in &maps {
+                    let local_id = *next_local_id;
+                    *next_local_id += 1;
+                    entries.push(PlannedEntry::Created {
+                        local_id,
+                        record: build_map_definer(map)?,
+                        owner: PlannedOwner::Created(map_id),
+                    });
+                }
+            }
+            if Some(*address) == target_map {
+                for map in &maps {
+                    let local_id = *next_local_id;
+                    *next_local_id += 1;
+                    entries.push(PlannedEntry::Created {
+                        local_id,
+                        record: build_map_definer(map)?,
+                        owner: PlannedOwner::Original(*address),
+                    });
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Materializes the full native chain for a new footprint: Implementation,
+    /// ImplementationMap, one MapDefiner per pin-pad map, and ParameterList
+    /// (module docs, "Footprints" — creation evidence).
+    fn build_footprint(
+        &self,
+        init: SchFootprintInit,
+        list_owner: PlannedOwner,
+        next_local_id: &mut usize,
+    ) -> Result<Vec<PlannedEntry>> {
+        if init.model_name.is_empty() {
+            return Err(AltiumFormatError::InvalidParamValue {
+                key: "ModelName".to_owned(),
+                detail: "a new footprint requires a non-empty model name (the native \
+                         default datafile link derives its entity name from it)"
+                    .to_owned(),
+            });
+        }
+        let maps = init.pin_pad_maps.as_deref().unwrap_or(&[]);
+        check_pin_pad_maps(maps)?;
+
+        let mut implementation = SchImplementation::from_params(&mut ParameterCollection::new())
+            .context("creating Implementation from typed wire defaults")?;
+        implementation.model_name = init.model_name.clone();
+        implementation.model_type = MODEL_TYPE_PCBLIB.to_owned();
+        implementation.description = init.description;
+        implementation.is_current = init.is_current;
+        implementation.unique_id = generate_unique_id();
+        // The native single default datafile link for a PCBLIB implementation
+        // (EngineObjects/SchImplementation.cs HandleAfterImportEvent; every
+        // corpus footprint carries exactly this shape).
+        implementation.datafile_links = vec![ModelDatafileLink {
+            location: String::new(),
+            entity_name: init.model_name,
+            file_kind: MODEL_DATAFILE_KIND_PCBLIB.to_owned(),
+        }];
+        // Chain sentinels: owner_part_id 0 (memo §1) and the Implementation's
+        // INDEXINSHEET=-1 (fixture bytes; the native IndexOf-mismatch).
+        implementation.base.owner_part_id = 0;
+        implementation.base.index_in_sheet = -1;
+        check_style_id_write(None, implementation.base.style_id)?;
+
+        let implementation_id = *next_local_id;
+        *next_local_id += 1;
+        let mut entries = vec![PlannedEntry::Created {
+            local_id: implementation_id,
+            record: SchRecord::Implementation(implementation),
+            owner: list_owner,
+        }];
+        let map_id = *next_local_id;
+        *next_local_id += 1;
+        entries.push(PlannedEntry::Created {
+            local_id: map_id,
+            record: build_implementation_map()?,
+            owner: PlannedOwner::Created(implementation_id),
+        });
+        for map in maps {
+            let local_id = *next_local_id;
+            *next_local_id += 1;
+            entries.push(PlannedEntry::Created {
+                local_id,
+                record: build_map_definer(map)?,
+                owner: PlannedOwner::Created(map_id),
+            });
+        }
+        let parameter_list_id = *next_local_id;
+        *next_local_id += 1;
+        let parameter_list = SchParameterList::from_params(&mut ParameterCollection::new())
+            .context("creating ParameterList from typed wire defaults")?;
+        entries.push(PlannedEntry::Created {
+            local_id: parameter_list_id,
+            record: SchRecord::ParameterList(parameter_list),
+            owner: PlannedOwner::Created(implementation_id),
+        });
+        Ok(entries)
     }
 
     /// Builds a new root-owned pin from typed wire defaults plus the init's
@@ -1819,6 +2530,76 @@ impl SchLibComponentSnapshot {
     }
 }
 
+/// Native PCBLIB model-type string (`ModelTypePCBLIB = "PCBLIB"`,
+/// EngineObjects/SchImplementation.cs:31). Local to altium-format for now —
+/// FLAGGED for promotion into `altium-format-types::constants` after user
+/// discussion (same class as the `"|&|"` swap separator).
+const MODEL_TYPE_PCBLIB: &str = "PCBLIB";
+/// Native default datafile-link kind for a PCBLIB implementation (exact
+/// casing; EngineObjects/SchImplementation.cs `HandleAfterImportEvent` and the
+/// corpus wire bytes `MODELDATAFILEKIND0=PCBLib`). Same promotion flag.
+const MODEL_DATAFILE_KIND_PCBLIB: &str = "PCBLib";
+
+/// Stored `is_current` of a footprint member's Implementation record.
+fn footprint_is_current(component: &SchLibComponent, address: RecordAddress) -> bool {
+    match record_slot(component, address) {
+        SchRecord::Implementation(implementation) => implementation.is_current,
+        _ => unreachable!("footprint members are Implementation records"),
+    }
+}
+
+/// Owner address of the record at `address`.
+fn owner_address_of(
+    component: &SchLibComponent,
+    address: RecordAddress,
+) -> Result<Option<RecordAddress>> {
+    owner_of(component, address, record_slot(component, address))
+}
+
+/// Rejects duplicate pin designators (case-insensitive): AD26's
+/// `AddMapDefiner` silently DROPS a definer whose designator interface is
+/// already mapped (SchDataImplementationMap.cs, OrdinalIgnoreCase), so
+/// serializing duplicates would be silent data loss on the next AD26 load.
+fn check_pin_pad_maps(maps: &[SchPinPadMapInit]) -> Result<()> {
+    let mut seen = HashSet::new();
+    for map in maps {
+        if !seen.insert(map.pin.to_ascii_lowercase()) {
+            return Err(AltiumFormatError::InvalidParamValue {
+                key: "DesIntf".to_owned(),
+                detail: format!(
+                    "pin_pad_maps maps pin designator '{}' more than once \
+                     (case-insensitive); AD26 silently drops duplicate map definers on \
+                     load, so writing them would lose data",
+                    map.pin
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// New ImplementationMap with the native ctor state: owner_part_id 0 and
+/// IndexInSheet 0 (SchDataImplementationMap.cs ctor; fixture bytes: bare
+/// `|RECORD=46|OWNERINDEX=n`), no UniqueId.
+fn build_implementation_map() -> Result<SchRecord> {
+    let map = SchImplementationMap::from_params(&mut ParameterCollection::new())
+        .context("creating ImplementationMap from typed wire defaults")?;
+    Ok(SchRecord::ImplementationMap(map))
+}
+
+/// New MapDefiner for one authored pin-pad map. owner_part_id stays 0 (the
+/// chain hard-codes it, memo §1); IndexInSheet is assigned by the memo-§6
+/// touched-owner renumbering — definers ARE objectList children of their map
+/// and carry 0-based sibling ordinals natively (wild bytes: Custom.SchLib
+/// `RECORD=47 … INDEXINSHEET=1`).
+fn build_map_definer(map: &SchPinPadMapInit) -> Result<SchRecord> {
+    let mut definer = SchMapDefiner::from_params(&mut ParameterCollection::new())
+        .context("creating MapDefiner from typed wire defaults")?;
+    definer.des_intf = map.pin.clone();
+    definer.des_imps = map.pads.clone();
+    Ok(SchRecord::MapDefiner(definer))
+}
+
 fn graphic_kind_name(record: &SchRecord) -> &'static str {
     match record {
         SchRecord::Line(_) => "Line",
@@ -1972,12 +2753,27 @@ fn check_deletions(
     })
 }
 
+/// Owner of a created record inside one batch plan, resolved to a final
+/// stream position by `to_items`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlannedOwner {
+    Root,
+    Original(RecordAddress),
+    /// The created record with this batch-local id.
+    Created(usize),
+}
+
 /// Planned final content of one stream.
 enum PlannedEntry {
     /// An original input record (possibly field-replaced in the working copy).
     Original(RecordAddress),
-    /// A record created by this batch.
-    Created(SchRecord),
+    /// A record created by this batch, with a batch-local id so other created
+    /// records can name it as their owner.
+    Created {
+        local_id: usize,
+        record: SchRecord,
+        owner: PlannedOwner,
+    },
 }
 
 struct PlannedStreams {
@@ -1985,11 +2781,38 @@ struct PlannedStreams {
     additional: Vec<PlannedEntry>,
 }
 
+/// The resolved footprint half of a batch (module docs, "Footprints"): every
+/// member subtree record is consumed by the plan; the final entry list for
+/// member ordinal `m` is emitted at the original member `m`'s Implementation
+/// position, and extras (new footprints, preceded by a created
+/// ImplementationList when the component had none) follow the last
+/// member-subtree record — or the end of the Data stream when no members
+/// existed.
+struct FootprintPlan {
+    /// Every record address consumed by the collection (all member subtrees).
+    scope: HashSet<RecordAddress>,
+    /// Member ordinal by the member's Implementation record address.
+    slots: HashMap<RecordAddress, usize>,
+    /// Final entry list per original member ordinal (`None` once taken or for
+    /// a deleted member).
+    finals: Vec<Option<Vec<PlannedEntry>>>,
+    /// New footprint subtrees (and a created ImplementationList, first).
+    extras: Vec<PlannedEntry>,
+    /// The last member-subtree record in encounter order; extras attach after
+    /// it. `None` when the input had no members (extras go to the Data end).
+    last_scope_address: Option<RecordAddress>,
+    /// Field-level Replace results applied to the working copy.
+    replacements: Vec<(RecordAddress, SchRecord)>,
+    /// Next unused batch-local created-record id.
+    next_local_id: usize,
+}
+
 /// Applies the stream-order rule: non-members keep their original relative
 /// order; each edited collection's final sequence occupies its members'
 /// original stream positions in encounter order, extras following the last
 /// original member (or the end of the Data stream for an empty membership,
-/// parameters before graphics before pins).
+/// parameters before graphics before pins before footprints).
+#[allow(clippy::too_many_arguments)]
 fn plan_streams(
     component: &SchLibComponent,
     param_members: &[RecordAddress],
@@ -1998,6 +2821,7 @@ fn plan_streams(
     param_finals: Option<Vec<FinalRecord>>,
     graphic_finals: Option<Vec<FinalRecord>>,
     pin_finals: Option<Vec<FinalRecord>>,
+    footprint_plan: Option<FootprintPlan>,
 ) -> Result<PlannedStreams> {
     let member_ordinals = |members: &[RecordAddress]| -> HashMap<RecordAddress, usize> {
         members
@@ -2034,6 +2858,11 @@ fn plan_streams(
     let mut params = split(param_members, param_finals);
     let mut graphics = split(graphic_members, graphic_finals);
     let mut pins = split(pin_members, pin_finals);
+    let mut footprints = footprint_plan;
+    let mut next_local_id = footprints
+        .as_ref()
+        .map(|plan| plan.next_local_id)
+        .unwrap_or(0);
 
     let mut data = Vec::new();
     let mut additional = Vec::new();
@@ -2042,6 +2871,22 @@ fn plan_streams(
             RecordStream::Data => &mut data,
             RecordStream::Additional => &mut additional,
         };
+        // Footprint-scope records are consumed as whole member subtrees; the
+        // final assigned to a slot is emitted at the member's Implementation
+        // position and extras follow the last scope record.
+        if let Some(plan) = footprints.as_mut() {
+            if plan.scope.contains(&address) {
+                if let Some(&ordinal) = plan.slots.get(&address) {
+                    if let Some(entries) = plan.finals[ordinal].take() {
+                        output.extend(entries);
+                    }
+                }
+                if plan.last_scope_address == Some(address) {
+                    output.append(&mut plan.extras);
+                }
+                continue;
+            }
+        }
         let slot = if let Some(ordinal) = param_ordinals.get(&address) {
             params.as_mut().map(|collection| (collection, *ordinal))
         } else if let Some(ordinal) = graphic_ordinals.get(&address) {
@@ -2057,40 +2902,66 @@ fn plan_streams(
             continue;
         };
         if let Some(item) = collection.finals[ordinal].take() {
-            output.push(planned(item));
+            output.push(planned(item, &mut next_local_id));
         }
         // Extras follow the last original member of their collection.
         if ordinal + 1 == collection.members.len() {
             for item in std::mem::take(&mut collection.extras) {
-                output.push(planned(item));
+                output.push(planned(item, &mut next_local_id));
             }
         }
     }
     // Previously empty collections append their extras at the end of the Data
-    // stream, parameters before graphics before pins.
+    // stream, parameters before graphics before pins before footprints.
     for collection in [&mut params, &mut graphics, &mut pins]
         .into_iter()
         .flatten()
     {
         if collection.members.is_empty() {
             for item in std::mem::take(&mut collection.extras) {
-                data.push(planned(item));
+                data.push(planned(item, &mut next_local_id));
             }
+        }
+    }
+    if let Some(plan) = footprints.as_mut() {
+        if plan.last_scope_address.is_none() {
+            data.append(&mut plan.extras);
         }
     }
     Ok(PlannedStreams { data, additional })
 }
 
-fn planned(item: FinalRecord) -> PlannedEntry {
+fn planned(item: FinalRecord, next_local_id: &mut usize) -> PlannedEntry {
     match item {
         FinalRecord::Existing { address, .. } => PlannedEntry::Original(address),
-        FinalRecord::Created(record) => PlannedEntry::Created(record),
+        FinalRecord::Created(record) => {
+            let local_id = *next_local_id;
+            *next_local_id += 1;
+            PlannedEntry::Created {
+                local_id,
+                record,
+                owner: PlannedOwner::Root,
+            }
+        }
     }
 }
 
 /// Converts one planned stream into assembly items plus the parallel identity
-/// list used by the IndexInSheet renumbering.
+/// list used by the IndexInSheet renumbering. Batch-local created-record ids
+/// resolve to final stream positions (creation is Data-only, so the id space
+/// never spans streams).
 fn to_items(entries: &[PlannedEntry]) -> Result<(Vec<RecordItem>, Vec<Identity>)> {
+    let mut positions_by_local_id = HashMap::new();
+    for (position, entry) in entries.iter().enumerate() {
+        if let PlannedEntry::Created { local_id, .. } = entry {
+            if positions_by_local_id.insert(*local_id, position).is_some() {
+                return Err(AltiumFormatError::InvalidParamValue {
+                    key: "record stream".to_owned(),
+                    detail: format!("duplicate batch-local created-record id {local_id}"),
+                });
+            }
+        }
+    }
     let mut items = Vec::with_capacity(entries.len());
     let mut ids = Vec::with_capacity(entries.len());
     for (position, entry) in entries.iter().enumerate() {
@@ -2099,11 +2970,35 @@ fn to_items(entries: &[PlannedEntry]) -> Result<(Vec<RecordItem>, Vec<Identity>)
                 items.push(RecordItem::Original(*address));
                 ids.push(identity_of(*address));
             }
-            PlannedEntry::Created(record) => {
+            PlannedEntry::Created {
+                record,
+                owner,
+                local_id: _,
+            } => {
+                let owner = match owner {
+                    PlannedOwner::Root => RecordOwner::Root,
+                    PlannedOwner::Original(address) => RecordOwner::Original(*address),
+                    PlannedOwner::Created(local_id) => {
+                        let owner_position =
+                            positions_by_local_id.get(local_id).ok_or_else(|| {
+                                AltiumFormatError::InvalidParamValue {
+                                    key: "record stream".to_owned(),
+                                    detail: format!(
+                                        "created record at position {position} names absent \
+                                     batch-local owner id {local_id}"
+                                    ),
+                                }
+                            })?;
+                        RecordOwner::New {
+                            stream: RecordStream::Data,
+                            id: *owner_position,
+                        }
+                    }
+                };
                 items.push(RecordItem::New {
                     id: position,
                     record: record.clone(),
-                    owner: RecordOwner::Root,
+                    owner,
                 });
                 ids.push(Identity::New(position));
             }
@@ -2174,14 +3069,9 @@ pub(super) fn renumber_touched_owners(
         if !touched.contains(owner) {
             continue;
         }
-        let owner_is_root = owner_address.is_none();
-        let owner_is_pin = owner_address.is_some_and(|owner_address| {
-            matches!(
-                record_slot(final_component, owner_address),
-                SchRecord::Pin(_)
-            )
-        });
-        if !occupies_object_list_slot(record, owner_is_root, owner_is_pin) {
+        let owner_record =
+            owner_address.map(|owner_address| record_slot(final_component, owner_address));
+        if !occupies_object_list_slot(record, owner_record) {
             continue;
         }
         let ordinal = ordinals.entry(*owner).or_insert(0);
@@ -2208,28 +3098,38 @@ pub(super) fn renumber_touched_owners(
 
 /// Whether a child occupies a slot in its owner's native objectList (and so
 /// participates in save-time IndexInSheet numbering). Field objects, the
-/// implementation compatibility chain, and pin-owned special parameters never
-/// do — AD26 either never attaches them to an objectList or removes them
-/// before numbering (memo §6; SchDataParameter/SchDataDesignator UpdateOwner;
-/// SchDataComponent.AddToListForSave). The name checks are deliberately
+/// implementation compatibility CONTAINERS, ParameterList-owned parameters,
+/// and pin-owned special parameters never do — AD26 either never attaches
+/// them to an objectList or removes them before numbering (memo §6 incl. the
+/// errata; SchDataParameter/SchDataDesignator UpdateOwner;
+/// SchDataComponent/SchDataImplementation.AddToListForSave — the Implementation
+/// and the ParameterList-owned parameters serialize INDEXINSHEET=-1 through the
+/// native IndexOf-mismatch, and the ImplementationList/ImplementationMap/
+/// ParameterList ctors pin theirs at 0; all confirmed in fixture bytes).
+/// MapDefiners DO occupy a slot: they are objectList children of their map and
+/// carry 0-based sibling ordinals natively (wild bytes: Custom.SchLib
+/// `RECORD=47 … INDEXINSHEET=1`). The name checks are deliberately
 /// owner-conditional, NARROWER than AD26's name-first import dispatch: a
 /// special-named parameter whose owner lacks the matching interface is
 /// attached nowhere by AD26 and silently dropped on its next save; we
 /// preserve such records and number them as ordinary siblings instead (see
 /// the module-level IndexInSheet deviation note).
-fn occupies_object_list_slot(record: &SchRecord, owner_is_root: bool, owner_is_pin: bool) -> bool {
+fn occupies_object_list_slot(record: &SchRecord, owner: Option<&SchRecord>) -> bool {
     match record {
         SchRecord::Designator(_) => false,
         SchRecord::ImplementationList(_)
         | SchRecord::Implementation(_)
         | SchRecord::ImplementationMap(_)
-        | SchRecord::MapDefiner(_)
         | SchRecord::ParameterList(_) => false,
+        SchRecord::MapDefiner(_) => true,
         SchRecord::Parameter(parameter) => {
-            if owner_is_root && parameter.name.eq_ignore_ascii_case("Comment") {
+            if owner.is_none() && parameter.name.eq_ignore_ascii_case("Comment") {
                 return false;
             }
-            if owner_is_pin
+            if matches!(owner, Some(SchRecord::ParameterList(_))) {
+                return false;
+            }
+            if matches!(owner, Some(SchRecord::Pin(_)))
                 && [
                     "DefaultNet",
                     "HiddenNetName",
@@ -2394,6 +3294,7 @@ mod tests {
                     SchGraphicEdit::Keep(3),
                 ]),
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2486,6 +3387,7 @@ mod tests {
                 parameters: Some(vec![SchParameterEdit::Keep(0), SchParameterEdit::Keep(1)]),
                 graphics: Some((0..4).map(SchGraphicEdit::Keep).collect()),
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2509,6 +3411,7 @@ mod tests {
                     SchGraphicEdit::Keep(3),
                 ]),
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2552,6 +3455,7 @@ mod tests {
                 ]),
                 graphics: None,
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2577,6 +3481,7 @@ mod tests {
                 parameters: Some(vec![SchParameterEdit::Keep(0)]),
                 graphics: None,
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -2590,6 +3495,7 @@ mod tests {
                 parameters: Some(vec![SchParameterEdit::Keep(0)]),
                 graphics: None,
                 pins: None,
+                footprints: None,
                 allow_deletion: true,
             })
             .unwrap();
@@ -2606,6 +3512,7 @@ mod tests {
                 parameters: Some(vec![SchParameterEdit::Keep(0), SchParameterEdit::Keep(0)]),
                 graphics: None,
                 pins: None,
+                footprints: None,
                 allow_deletion: true,
             })
             .unwrap_err()
@@ -2618,6 +3525,7 @@ mod tests {
                 parameters: Some(vec![SchParameterEdit::Keep(7)]),
                 graphics: None,
                 pins: None,
+                footprints: None,
                 allow_deletion: true,
             })
             .unwrap_err()
@@ -2638,6 +3546,7 @@ mod tests {
                     SchGraphicEdit::Keep(3),
                 ]),
                 pins: None,
+                footprints: None,
                 allow_deletion: true,
             })
             .unwrap_err()
@@ -2660,6 +3569,7 @@ mod tests {
                 ]),
                 graphics: None,
                 pins: None,
+                footprints: None,
                 allow_deletion: true,
             })
             .unwrap();
@@ -2680,6 +3590,7 @@ mod tests {
                     SchGraphicEdit::Keep(3),
                 ]),
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -2700,6 +3611,7 @@ mod tests {
                     SchGraphicEdit::Replace(3, rect_init(1)),
                 ]),
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -2726,6 +3638,7 @@ mod tests {
                     SchGraphicEdit::Keep(3),
                 ]),
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2756,6 +3669,7 @@ mod tests {
                     .collect(),
             ),
             pins: None,
+            footprints: None,
             allow_deletion: false,
         };
 
@@ -2873,6 +3787,7 @@ mod tests {
                 ]),
                 graphics: None,
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2927,6 +3842,7 @@ mod tests {
                 ]),
                 graphics: None,
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2984,6 +3900,7 @@ mod tests {
                 ]),
                 graphics: None,
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -2998,6 +3915,7 @@ mod tests {
                 parameters: Some(vec![SchParameterEdit::Keep(1), SchParameterEdit::Keep(0)]),
                 graphics: None,
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -3035,6 +3953,7 @@ mod tests {
                     SchGraphicEdit::New(rect_init(1)),
                 ]),
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -3133,6 +4052,7 @@ mod tests {
                 ]),
                 graphics: None,
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -3150,6 +4070,7 @@ mod tests {
                 ),
                 graphics: None,
                 pins: None,
+                footprints: None,
                 allow_deletion: true,
             })
             .unwrap();
@@ -3260,6 +4181,7 @@ mod tests {
                     SchGraphicEdit::Keep(2),
                 ]),
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -3294,6 +4216,7 @@ mod tests {
                     SchGraphicEdit::Keep(2),
                 ]),
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -3319,6 +4242,7 @@ mod tests {
                     }),
                 ]),
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -3475,6 +4399,7 @@ mod tests {
                 parameters: None,
                 graphics: Some(edits),
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -3540,6 +4465,7 @@ mod tests {
                     SchGraphicEdit::Replace(2, polyline_init.clone()),
                 ]),
                 pins: None,
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -3708,6 +4634,7 @@ mod tests {
                     SchPinEdit::Replace(2, replaced_init.clone()),
                     SchPinEdit::Keep(1),
                 ]),
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -3779,6 +4706,7 @@ mod tests {
                 parameters: None,
                 graphics: None,
                 pins: Some(vec![SchPinEdit::Keep(1), SchPinEdit::Keep(2)]),
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -3790,6 +4718,7 @@ mod tests {
                 parameters: None,
                 graphics: None,
                 pins: Some(vec![SchPinEdit::Keep(1), SchPinEdit::Keep(2)]),
+                footprints: None,
                 allow_deletion: true,
             })
             .unwrap();
@@ -3827,6 +4756,7 @@ mod tests {
                         SchPinEdit::Keep(0),
                         SchPinEdit::Keep(2),
                     ]),
+                    footprints: None,
                     allow_deletion: true,
                 })
                 .unwrap();
@@ -3841,11 +4771,12 @@ mod tests {
     }
 
     #[test]
-    fn multi_collection_batch_edits_all_three_collections_against_immutable_input() {
+    fn multi_collection_batch_edits_all_four_collections_against_immutable_input() {
         let library = library();
         let snapshot = library.snapshot().unwrap();
         let component = snapshot.component(0).unwrap();
         assert_eq!(pin_designators(&component), ["1"]);
+        assert!(component.footprint_maps().unwrap().footprints.is_empty());
 
         let edited = component
             .with_children(SchChildBatch {
@@ -3865,6 +4796,15 @@ mod tests {
                         .collect(),
                 ),
                 pins: Some(vec![SchPinEdit::New(pin_init(1, "P")), SchPinEdit::Keep(0)]),
+                footprints: Some(vec![SchFootprintEdit::New(SchFootprintInit {
+                    model_name: "R0805".to_owned(),
+                    description: "resistor body".to_owned(),
+                    is_current: true,
+                    pin_pad_maps: Some(vec![SchPinPadMapInit {
+                        pin: "1".to_owned(),
+                        pads: vec!["A1".to_owned()],
+                    }]),
+                })]),
                 allow_deletion: false,
             })
             .unwrap();
@@ -3874,6 +4814,11 @@ mod tests {
             ["Rectangle", "Line", "Line", "Symbol", "Rectangle"]
         );
         assert_eq!(pin_designators(&edited), ["P", "1"]);
+        let maps = edited.footprint_maps().unwrap();
+        assert_eq!(maps.preserved_non_pcblib_implementations, 0);
+        assert_eq!(maps.footprints.len(), 1);
+        assert_eq!(maps.footprints[0].model_name, "R0805");
+        assert_eq!(maps.footprints[0].pin_pad_maps.len(), 1);
 
         let replaced = snapshot.replace_component(0, edited).unwrap();
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -3914,6 +4859,7 @@ mod tests {
                 parameters: None,
                 graphics: None,
                 pins: Some(vec![SchPinEdit::New(pin_init(1, "P")), SchPinEdit::Keep(0)]),
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -3960,6 +4906,7 @@ mod tests {
                 parameters: None,
                 graphics: None,
                 pins: Some(vec![SchPinEdit::Keep(0), SchPinEdit::Replace(1, init)]),
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -3973,6 +4920,7 @@ mod tests {
                 parameters: None,
                 graphics: None,
                 pins: Some(vec![SchPinEdit::Keep(1), SchPinEdit::Keep(0)]),
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -3985,6 +4933,7 @@ mod tests {
                 parameters: None,
                 graphics: None,
                 pins: Some(vec![SchPinEdit::Keep(0)]),
+                footprints: None,
                 allow_deletion: true,
             })
             .unwrap_err()
@@ -4001,6 +4950,7 @@ mod tests {
                     SchPinEdit::Keep(1),
                     SchPinEdit::New(pin_init(1, "P")),
                 ]),
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -4018,6 +4968,7 @@ mod tests {
                 parameters: None,
                 graphics: None,
                 pins: Some(vec![SchPinEdit::Replace(0, data_init), SchPinEdit::Keep(1)]),
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -4033,6 +4984,7 @@ mod tests {
                 parameters: None,
                 graphics: None,
                 pins: Some(vec![SchPinEdit::Keep(0), SchPinEdit::Keep(1)]),
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -4069,6 +5021,7 @@ mod tests {
             parameters: None,
             graphics: None,
             pins: Some(edits),
+            footprints: None,
             allow_deletion: true,
         };
 
@@ -4154,6 +5107,7 @@ mod tests {
                     SchPinEdit::Keep(1),
                     SchPinEdit::Keep(2),
                 ]),
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -4183,6 +5137,7 @@ mod tests {
                     SchPinEdit::Replace(1, prefix_only),
                     SchPinEdit::Replace(2, suffix_only),
                 ]),
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -4210,6 +5165,7 @@ mod tests {
                     SchPinEdit::Keep(1),
                     SchPinEdit::Keep(2),
                 ]),
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -4230,6 +5186,7 @@ mod tests {
             parameters: None,
             graphics: None,
             pins: Some(vec![SchPinEdit::Keep(0), SchPinEdit::New(init)]),
+            footprints: None,
             allow_deletion: false,
         };
 
@@ -4299,6 +5256,7 @@ mod tests {
                 parameters: None,
                 graphics: None,
                 pins: Some(vec![SchPinEdit::Replace(0, from_view.clone())]),
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -4348,6 +5306,7 @@ mod tests {
                     SchPinEdit::New(pin_init(2, "P2")),
                     SchPinEdit::New(pin_init(0, "PS")),
                 ]),
+                footprints: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -4370,5 +5329,1219 @@ mod tests {
         assert_eq!(reopened.snapshot().unwrap(), replaced);
         assert_eq!(reopened.components[0].component.part_count, 3);
         assert_eq!(reopened.header.components[0].part_count, 3);
+    }
+
+    // ── Footprints (increment D2) ─────────────────────────────────────────
+
+    /// Pushes one full implementation chain (Implementation → Map →
+    /// Definers, ParameterList [→ one parameter]) onto a Data record vector,
+    /// with the native chain sentinels (owner_part_id 0, Implementation
+    /// IndexInSheet −1, containers 0, definers at their 0-based ordinal).
+    fn push_chain(
+        records: &mut Vec<SchRecord>,
+        list_native: i32,
+        model_type: &str,
+        model_name: &str,
+        is_current: bool,
+        definers: &[(&str, &[&str])],
+        with_parameter: bool,
+    ) {
+        let implementation_native = records.len() as i32 + 1;
+        let mut implementation =
+            SchImplementation::from_params(&mut ParameterCollection::new()).unwrap();
+        implementation.base.owner_index = list_native;
+        implementation.base.index_in_sheet = -1;
+        implementation.model_type = model_type.to_owned();
+        implementation.model_name = model_name.to_owned();
+        implementation.description = format!("{model_name} description");
+        implementation.is_current = is_current;
+        implementation.unique_id = format!("UI{model_name:.6}");
+        implementation.model_vault_guid = "VAULT-GUID".to_owned();
+        implementation.datafile_links = vec![ModelDatafileLink {
+            location: String::new(),
+            entity_name: model_name.to_owned(),
+            file_kind: "PCBLib".to_owned(),
+        }];
+        records.push(SchRecord::Implementation(implementation));
+
+        let map_native = records.len() as i32 + 1;
+        let mut map = SchImplementationMap::from_params(&mut ParameterCollection::new()).unwrap();
+        map.base.owner_index = implementation_native;
+        records.push(SchRecord::ImplementationMap(map));
+        for (ordinal, (pin, pads)) in definers.iter().enumerate() {
+            let mut definer = SchMapDefiner::from_params(&mut ParameterCollection::new()).unwrap();
+            definer.base.owner_index = map_native;
+            definer.base.index_in_sheet = ordinal as i32;
+            definer.des_intf = (*pin).to_owned();
+            definer.des_imps = pads.iter().map(|pad| (*pad).to_owned()).collect();
+            records.push(SchRecord::MapDefiner(definer));
+        }
+
+        let parameter_list_native = records.len() as i32 + 1;
+        let mut parameter_list =
+            SchParameterList::from_params(&mut ParameterCollection::new()).unwrap();
+        parameter_list.base.owner_index = implementation_native;
+        records.push(SchRecord::ParameterList(parameter_list));
+        if with_parameter {
+            let mut parameter = SchParameter::from_params(&mut ParameterCollection::new()).unwrap();
+            parameter.base.owner_index = parameter_list_native;
+            parameter.base.owner_part_id = -1;
+            parameter.base.index_in_sheet = -1;
+            parameter.name = "ModelParam".to_owned();
+            parameter.text = format!("{model_name} value");
+            parameter.unique_id = format!("UP{model_name:.6}");
+            records.push(SchRecord::Parameter(parameter));
+        }
+    }
+
+    /// Blank + shared ImplementationList + footprint A (one definer, one
+    /// implementation parameter) + a SIM chain (one definer, one parameter)
+    /// INTERLEAVED between the footprint slots + footprint B (bare map +
+    /// list), save/reopened to the native writer's canonical baseline.
+    fn footprint_library() -> SchLib {
+        let mut library = SchLib::new_blank_ad26().unwrap();
+        {
+            let records = &mut library.components[0].records;
+            let list_native = records.len() as i32 + 1;
+            records.push(SchRecord::ImplementationList(
+                SchImplementationList::from_params(&mut ParameterCollection::new()).unwrap(),
+            ));
+            push_chain(
+                records,
+                list_native,
+                "PCBLIB",
+                "FP_A",
+                true,
+                &[("1", &["A1", "B1"])],
+                true,
+            );
+            push_chain(
+                records,
+                list_native,
+                "SIM",
+                "RESISTOR",
+                true,
+                &[("1", &["1"])],
+                true,
+            );
+            // Mixed-case model type: still a footprint member; casing must be
+            // preserved through Keep and Replace.
+            push_chain(records, list_native, "PcbLib", "FP_B", false, &[], false);
+        }
+        let library = finish(library);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        library.save(file.path()).unwrap();
+        SchLib::open(file.path()).unwrap()
+    }
+
+    /// (model_name, description, is_current, pin→pads) tuples of the
+    /// footprint projection, plus the preserved non-PCBLIB count.
+    #[allow(clippy::type_complexity)]
+    fn footprint_projection(
+        snapshot: &SchLibComponentSnapshot,
+    ) -> (
+        Vec<(String, String, bool, Vec<(String, Vec<String>)>)>,
+        usize,
+    ) {
+        let maps = snapshot.footprint_maps().unwrap();
+        (
+            maps.footprints
+                .iter()
+                .map(|footprint| {
+                    (
+                        footprint.model_name.to_owned(),
+                        footprint.description.to_owned(),
+                        footprint.is_current,
+                        footprint
+                            .pin_pad_maps
+                            .iter()
+                            .map(|map| (map.pin.to_owned(), map.pads.to_vec()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            maps.preserved_non_pcblib_implementations,
+        )
+    }
+
+    /// Typed SIM-chain records (Implementation model_type SIM plus its whole
+    /// subtree) in encounter order, for verbatim-preservation assertions.
+    /// `owner_index` is normalized to 0 in the returned clones: it is stream
+    /// address plumbing that assembly legitimately remaps when earlier records
+    /// shift; the chain's PARENT KINDS stay validated by `assemble_records`,
+    /// and every other typed field must compare verbatim.
+    fn sim_chain_records(snapshot: &SchLibComponentSnapshot) -> Vec<SchRecord> {
+        let component = &snapshot.component;
+        let mut sim_addresses = HashSet::new();
+        let mut chain = Vec::new();
+        for (index, record) in component.records.iter().enumerate() {
+            let address = RecordAddress {
+                stream: RecordStream::Data,
+                index,
+            };
+            let in_chain = match record {
+                SchRecord::Implementation(implementation) => {
+                    implementation.model_type.eq_ignore_ascii_case("SIM")
+                }
+                _ => owner_of(component, address, record)
+                    .unwrap()
+                    .is_some_and(|owner| sim_addresses.contains(&owner)),
+            };
+            if in_chain {
+                sim_addresses.insert(address);
+                let mut normalized = record.clone();
+                normalized
+                    .base_mut()
+                    .expect("chain records carry a primitive base")
+                    .owner_index = 0;
+                chain.push(normalized);
+            }
+        }
+        chain
+    }
+
+    fn save_reopen(snapshot: &SchLibSnapshot) -> SchLibSnapshot {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        snapshot.materialize().unwrap().save(file.path()).unwrap();
+        SchLib::open(file.path()).unwrap().snapshot().unwrap()
+    }
+
+    use super::super::SchLibSnapshot;
+
+    #[test]
+    fn footprint_creation_materializes_full_chain_and_list_rules() {
+        // A blank component has NO chain at all: creation materializes the
+        // shared ImplementationList too.
+        let library = library();
+        let snapshot = library.snapshot().unwrap();
+        let component = snapshot.component(0).unwrap();
+        let record_count = component.component.records.len();
+        let created = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![SchFootprintEdit::New(SchFootprintInit {
+                    model_name: "SOT-23-5".to_owned(),
+                    description: "5 leads".to_owned(),
+                    is_current: true,
+                    pin_pad_maps: Some(vec![
+                        SchPinPadMapInit {
+                            pin: "1".to_owned(),
+                            pads: vec!["A1".to_owned(), "B1".to_owned()],
+                        },
+                        SchPinPadMapInit {
+                            pin: "2".to_owned(),
+                            pads: vec!["C2".to_owned()],
+                        },
+                    ]),
+                })]),
+                allow_deletion: false,
+            })
+            .unwrap();
+
+        // Chain appended at the Data end: List, Implementation, Map, two
+        // Definers, ParameterList — with the native sentinels.
+        let records = &created.component.records;
+        assert_eq!(records.len(), record_count + 6);
+        let SchRecord::ImplementationList(list) = &records[record_count] else {
+            panic!("list slot");
+        };
+        assert_eq!(list.base.owner_index, 0);
+        assert_eq!(list.base.owner_part_id, 0);
+        assert_eq!(list.base.index_in_sheet, 0);
+        let SchRecord::Implementation(implementation) = &records[record_count + 1] else {
+            panic!("implementation slot");
+        };
+        assert_eq!(
+            implementation.base.owner_index,
+            record_count as i32 + 1,
+            "implementation owned by the created list"
+        );
+        assert_eq!(implementation.base.owner_part_id, 0);
+        assert_eq!(implementation.base.index_in_sheet, -1);
+        assert_eq!(implementation.model_type, "PCBLIB");
+        assert_eq!(implementation.model_name, "SOT-23-5");
+        assert_eq!(implementation.description, "5 leads");
+        assert!(implementation.is_current);
+        assert_eq!(implementation.unique_id.len(), 8);
+        assert_eq!(
+            implementation.datafile_links,
+            vec![ModelDatafileLink {
+                location: String::new(),
+                entity_name: "SOT-23-5".to_owned(),
+                file_kind: "PCBLib".to_owned(),
+            }],
+            "the native single default datafile link"
+        );
+        let SchRecord::ImplementationMap(map) = &records[record_count + 2] else {
+            panic!("map slot");
+        };
+        assert_eq!(map.base.owner_index, record_count as i32 + 2);
+        assert_eq!(map.base.owner_part_id, 0);
+        assert_eq!(map.base.index_in_sheet, 0);
+        for (offset, ordinal) in [(3usize, 0i32), (4, 1)] {
+            let SchRecord::MapDefiner(definer) = &records[record_count + offset] else {
+                panic!("definer slot {offset}");
+            };
+            assert_eq!(definer.base.owner_index, record_count as i32 + 3);
+            assert_eq!(definer.base.owner_part_id, 0);
+            assert_eq!(
+                definer.base.index_in_sheet, ordinal,
+                "definers carry 0-based map-sibling ordinals"
+            );
+        }
+        let SchRecord::ParameterList(parameter_list) = &records[record_count + 5] else {
+            panic!("parameter list slot");
+        };
+        assert_eq!(parameter_list.base.owner_index, record_count as i32 + 2);
+        assert_eq!(parameter_list.base.owner_part_id, 0);
+        assert_eq!(parameter_list.base.index_in_sheet, 0);
+
+        // Projection equality and save/reopen typed equality.
+        let (footprints, preserved) = footprint_projection(&created);
+        assert_eq!(
+            footprints,
+            vec![(
+                "SOT-23-5".to_owned(),
+                "5 leads".to_owned(),
+                true,
+                vec![
+                    ("1".to_owned(), vec!["A1".to_owned(), "B1".to_owned()]),
+                    ("2".to_owned(), vec!["C2".to_owned()]),
+                ],
+            )]
+        );
+        assert_eq!(preserved, 0);
+        let replaced = snapshot.replace_component(0, created.clone()).unwrap();
+        assert_eq!(save_reopen(&replaced), replaced);
+
+        // A bare existing list (the ICs shape: RECORD=44, zero models) is
+        // REUSED — no second list appears.
+        let mut bare = library.clone();
+        bare.components[0]
+            .records
+            .push(SchRecord::ImplementationList(
+                SchImplementationList::from_params(&mut ParameterCollection::new()).unwrap(),
+            ));
+        let bare = finish(bare);
+        let list_native = bare.components[0].records.len() as i32;
+        let component = bare.snapshot().unwrap().component(0).unwrap();
+        let created = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![SchFootprintEdit::New(SchFootprintInit {
+                    model_name: "R0805".to_owned(),
+                    description: String::new(),
+                    is_current: true,
+                    pin_pad_maps: None,
+                })]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        let lists = created
+            .component
+            .records
+            .iter()
+            .filter(|record| matches!(record, SchRecord::ImplementationList(_)))
+            .count();
+        assert_eq!(lists, 1, "the existing bare list is reused");
+        let SchRecord::Implementation(implementation) =
+            &created.component.records[list_native as usize]
+        else {
+            panic!("implementation follows the reused list at the Data end");
+        };
+        assert_eq!(implementation.base.owner_index, list_native);
+
+        // Creation validation: empty model name, duplicate pin designators
+        // (case-insensitive), and an incoherent current assignment all fail.
+        let component = library.snapshot().unwrap().component(0).unwrap();
+        let creation = |init: SchFootprintInit| SchChildBatch {
+            parameters: None,
+            graphics: None,
+            pins: None,
+            footprints: Some(vec![SchFootprintEdit::New(init)]),
+            allow_deletion: false,
+        };
+        let error = component
+            .with_children(creation(SchFootprintInit {
+                model_name: String::new(),
+                description: String::new(),
+                is_current: true,
+                pin_pad_maps: None,
+            }))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("non-empty model name"), "{error}");
+        let error = component
+            .with_children(creation(SchFootprintInit {
+                model_name: "X".to_owned(),
+                description: String::new(),
+                is_current: true,
+                pin_pad_maps: Some(vec![
+                    SchPinPadMapInit {
+                        pin: "a1".to_owned(),
+                        pads: vec![],
+                    },
+                    SchPinPadMapInit {
+                        pin: "A1".to_owned(),
+                        pads: vec![],
+                    },
+                ]),
+            }))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("more than once"), "{error}");
+        let error = component
+            .with_children(creation(SchFootprintInit {
+                model_name: "X".to_owned(),
+                description: String::new(),
+                is_current: false,
+                pin_pad_maps: None,
+            }))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("0 current footprints"), "{error}");
+    }
+
+    #[test]
+    fn footprint_creation_alongside_sim_reuses_shared_list_and_leaves_sim_untouched() {
+        let library = footprint_library();
+        let snapshot = library.snapshot().unwrap();
+        let component = snapshot.component(0).unwrap();
+        let sim_before = sim_chain_records(&component);
+        assert_eq!(sim_before.len(), 5, "impl + map + definer + list + param");
+        let (footprints_before, preserved_before) = footprint_projection(&component);
+        assert_eq!(footprints_before.len(), 2);
+        assert_eq!(preserved_before, 1);
+        let list_index = component
+            .component
+            .records
+            .iter()
+            .position(|record| matches!(record, SchRecord::ImplementationList(_)))
+            .unwrap();
+
+        let mut edits: Vec<SchFootprintEdit> =
+            vec![SchFootprintEdit::Keep(0), SchFootprintEdit::Keep(1)];
+        edits.push(SchFootprintEdit::New(SchFootprintInit {
+            model_name: "FP_C".to_owned(),
+            description: "third".to_owned(),
+            is_current: false,
+            pin_pad_maps: Some(vec![SchPinPadMapInit {
+                pin: "2".to_owned(),
+                pads: vec!["P2".to_owned()],
+            }]),
+        }));
+        let created = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(edits),
+                allow_deletion: false,
+            })
+            .unwrap();
+
+        // SIM chain verbatim, shared list reused, projection extended.
+        assert_eq!(sim_chain_records(&created), sim_before);
+        let lists = created
+            .component
+            .records
+            .iter()
+            .filter(|record| matches!(record, SchRecord::ImplementationList(_)))
+            .count();
+        assert_eq!(lists, 1);
+        let new_implementation = created
+            .component
+            .records
+            .iter()
+            .find_map(|record| match record {
+                SchRecord::Implementation(implementation)
+                    if implementation.model_name == "FP_C" =>
+                {
+                    Some(implementation)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            new_implementation.base.owner_index,
+            list_index as i32 + 1,
+            "new implementation attaches to the existing shared list"
+        );
+        let (footprints, preserved) = footprint_projection(&created);
+        assert_eq!(preserved, 1);
+        assert_eq!(footprints.len(), 3);
+        assert_eq!(footprints[..2], footprints_before[..]);
+        assert_eq!(
+            footprints[2],
+            (
+                "FP_C".to_owned(),
+                "third".to_owned(),
+                false,
+                vec![("2".to_owned(), vec!["P2".to_owned()])],
+            )
+        );
+        let replaced = snapshot.replace_component(0, created).unwrap();
+        assert_eq!(save_reopen(&replaced), replaced);
+    }
+
+    #[test]
+    fn footprint_replace_rebuilds_definers_and_preserves_unaddressed_state() {
+        let library = footprint_library();
+        let snapshot = library.snapshot().unwrap();
+        let component = snapshot.component(0).unwrap();
+        let (footprints_before, _) = footprint_projection(&component);
+        let SchRecord::Implementation(original_a) = component
+            .component
+            .records
+            .iter()
+            .find(|record| matches!(record, SchRecord::Implementation(i) if i.model_name == "FP_A"))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        let original_a = original_a.clone();
+
+        // Rebuild the definers and change the addressed axes; footprint B is
+        // replaced too (from_view keeps its axes but rebuilds its empty map).
+        let views = component.footprint_maps().unwrap();
+        let mut init_b = SchFootprintInit::from_view(&views.footprints[1]);
+        assert_eq!(init_b.pin_pad_maps.as_deref(), Some(&[][..]));
+        init_b.is_current = false;
+        let edited = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![
+                    SchFootprintEdit::Replace(
+                        0,
+                        SchFootprintInit {
+                            model_name: "FP_A2".to_owned(),
+                            description: "rebuilt".to_owned(),
+                            is_current: true,
+                            pin_pad_maps: Some(vec![
+                                SchPinPadMapInit {
+                                    pin: "3".to_owned(),
+                                    pads: vec!["C3".to_owned()],
+                                },
+                                SchPinPadMapInit {
+                                    pin: "4".to_owned(),
+                                    pads: vec!["D4".to_owned(), "E4".to_owned()],
+                                },
+                            ]),
+                        },
+                    ),
+                    SchFootprintEdit::Replace(1, init_b),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap();
+
+        let (footprints, preserved) = footprint_projection(&edited);
+        assert_eq!(preserved, 1);
+        assert_eq!(
+            footprints[0],
+            (
+                "FP_A2".to_owned(),
+                "rebuilt".to_owned(),
+                true,
+                vec![
+                    ("3".to_owned(), vec!["C3".to_owned()]),
+                    ("4".to_owned(), vec!["D4".to_owned(), "E4".to_owned()]),
+                ],
+            )
+        );
+        assert_eq!(footprints[1].0, "FP_B");
+
+        // Unaddressed axes preserved verbatim on the replaced implementation.
+        let SchRecord::Implementation(replaced_a) = edited
+            .component
+            .records
+            .iter()
+            .find(
+                |record| matches!(record, SchRecord::Implementation(i) if i.model_name == "FP_A2"),
+            )
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(replaced_a.unique_id, original_a.unique_id);
+        assert_eq!(replaced_a.datafile_links, original_a.datafile_links);
+        assert_eq!(replaced_a.model_vault_guid, original_a.model_vault_guid);
+        assert_eq!(replaced_a.model_type, original_a.model_type);
+        let SchRecord::Implementation(replaced_b) = edited
+            .component
+            .records
+            .iter()
+            .find(|record| matches!(record, SchRecord::Implementation(i) if i.model_name == "FP_B"))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(replaced_b.model_type, "PcbLib", "stored casing preserved");
+        // Rebuilt definers carry fresh 0-based map ordinals.
+        let ordinals: Vec<i32> = edited
+            .component
+            .records
+            .iter()
+            .filter_map(|record| match record {
+                SchRecord::MapDefiner(definer)
+                    if definer.des_intf == "3" || definer.des_intf == "4" =>
+                {
+                    Some(definer.base.index_in_sheet)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ordinals, [0, 1]);
+        // The implementation parameter survives untouched (ParameterList
+        // subtree is outside the addressed axes).
+        assert!(
+            edited.component.records.iter().any(|record| {
+                matches!(record, SchRecord::Parameter(p) if p.text == "FP_A value")
+            })
+        );
+        // SIM chain untouched by the double Replace.
+        assert_eq!(sim_chain_records(&edited), sim_chain_records(&component));
+        let replaced = snapshot.replace_component(0, edited).unwrap();
+        assert_eq!(save_reopen(&replaced), replaced);
+
+        // Unaddressed pin_pad_maps (None) preserves the definers verbatim —
+        // the edit is a pure field replace and the subtree stays identical.
+        let renamed = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![
+                    SchFootprintEdit::Replace(
+                        0,
+                        SchFootprintInit {
+                            model_name: "FP_A".to_owned(),
+                            description: "described".to_owned(),
+                            is_current: true,
+                            pin_pad_maps: None,
+                        },
+                    ),
+                    SchFootprintEdit::Keep(1),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        let (footprints, _) = footprint_projection(&renamed);
+        assert_eq!(footprints[0].1, "described");
+        assert_eq!(
+            footprints[0].3, footprints_before[0].3,
+            "definers preserved verbatim when pin_pad_maps is unaddressed"
+        );
+
+        // Replacing the sole current footprint to non-current without moving
+        // the flag is an incoherent final assignment.
+        let error = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![
+                    SchFootprintEdit::Replace(
+                        0,
+                        SchFootprintInit {
+                            model_name: "FP_A".to_owned(),
+                            description: String::new(),
+                            is_current: false,
+                            pin_pad_maps: None,
+                        },
+                    ),
+                    SchFootprintEdit::Keep(1),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("0 current footprints"), "{error}");
+    }
+
+    #[test]
+    fn complete_footprint_replacement_never_touches_the_sim_chain() {
+        // The red-team [12] case: complete footprint replacement with
+        // deletion authorized must preserve the SIM chain and the shared
+        // ImplementationList verbatim.
+        let library = footprint_library();
+        let snapshot = library.snapshot().unwrap();
+        let component = snapshot.component(0).unwrap();
+        let sim_before = sim_chain_records(&component);
+
+        // Unauthorized removal is rejected with the omitted indices.
+        let error = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![]),
+                allow_deletion: false,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("allow_deletion"), "{error}");
+        assert!(error.contains("[0, 1]"), "{error}");
+
+        let removed = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![]),
+                allow_deletion: true,
+            })
+            .unwrap();
+        let (footprints, preserved) = footprint_projection(&removed);
+        assert!(footprints.is_empty());
+        assert_eq!(preserved, 1, "the SIM implementation survives");
+        assert_eq!(sim_chain_records(&removed), sim_before);
+        assert_eq!(
+            removed
+                .component
+                .records
+                .iter()
+                .filter(|record| matches!(record, SchRecord::ImplementationList(_)))
+                .count(),
+            1,
+            "the shared ImplementationList container is preserved"
+        );
+        // No footprint subtree record survives: both implementations, their
+        // maps, definer, parameter list, and implementation parameter are
+        // gone (8 records: 2 impl + 2 maps + 1 definer + 2 lists + 1 param).
+        assert_eq!(
+            component.component.records.len() - removed.component.records.len(),
+            8
+        );
+        let replaced = snapshot.replace_component(0, removed.clone()).unwrap();
+        assert_eq!(save_reopen(&replaced), replaced);
+        // Weight follows cardinality.
+        assert_eq!(
+            i64::from(replaced.materialize().unwrap().header.weight),
+            i64::from(library.header.weight) - 8
+        );
+
+        // Removing one of two footprints keeps the sibling and the SIM chain.
+        let removed_one = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![SchFootprintEdit::Keep(1)]),
+                allow_deletion: true,
+            })
+            .unwrap_err();
+        // Keep(1) alone leaves ZERO current footprints (FP_B stored false):
+        // the membership change enforces the single-current invariant.
+        assert!(
+            removed_one.to_string().contains("0 current footprints"),
+            "{removed_one}"
+        );
+        let removed_one = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![SchFootprintEdit::Keep(0)]),
+                allow_deletion: true,
+            })
+            .unwrap();
+        let (footprints, preserved) = footprint_projection(&removed_one);
+        assert_eq!(footprints.len(), 1);
+        assert_eq!(footprints[0].0, "FP_A");
+        assert_eq!(preserved, 1);
+        assert_eq!(sim_chain_records(&removed_one), sim_before);
+        let replaced = snapshot.replace_component(0, removed_one).unwrap();
+        assert_eq!(save_reopen(&replaced), replaced);
+    }
+
+    #[test]
+    fn footprint_reorder_permutes_only_footprint_slots() {
+        let library = footprint_library();
+        let snapshot = library.snapshot().unwrap();
+        let component = snapshot.component(0).unwrap();
+        let (footprints_before, _) = footprint_projection(&component);
+        let kinds_before: Vec<&'static str> = component
+            .component
+            .records
+            .iter()
+            .map(record_kind_for_test)
+            .collect();
+
+        // A pure Keep permutation: FP_B takes slot 0, FP_A slot 1. This is
+        // legal even though both currents stay stored as-is (no value
+        // changes), and the SIM chain keeps its interleaved position.
+        let reordered = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![SchFootprintEdit::Keep(1), SchFootprintEdit::Keep(0)]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        let (footprints, preserved) = footprint_projection(&reordered);
+        assert_eq!(preserved, 1);
+        assert_eq!(footprints[0], footprints_before[1]);
+        assert_eq!(footprints[1], footprints_before[0]);
+        // The record-kind sequence is unchanged EXCEPT the footprint slot
+        // contents swapped: FP_B's 3-record subtree now sits where FP_A's
+        // 5-record subtree began and vice versa; the list and the SIM chain
+        // keep their relative positions.
+        let kinds_after: Vec<&'static str> = reordered
+            .component
+            .records
+            .iter()
+            .map(record_kind_for_test)
+            .collect();
+        let names: Vec<&str> = reordered
+            .component
+            .records
+            .iter()
+            .filter_map(|record| match record {
+                SchRecord::Implementation(i) => Some(i.model_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["FP_B", "RESISTOR", "FP_A"]);
+        assert_eq!(kinds_before.len(), kinds_after.len());
+        assert_eq!(sim_chain_records(&reordered), sim_chain_records(&component));
+        let replaced = snapshot.replace_component(0, reordered.clone()).unwrap();
+        assert_eq!(save_reopen(&replaced), replaced);
+
+        // Restoring the order hands back the exact original component, and
+        // the all-positional-Keep no-op is an identity.
+        let restored = reordered
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![SchFootprintEdit::Keep(1), SchFootprintEdit::Keep(0)]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        assert_eq!(restored, component);
+        let noop = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![SchFootprintEdit::Keep(0), SchFootprintEdit::Keep(1)]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        assert_eq!(noop, component);
+
+        // Duplicate and out-of-range member references are conflicts.
+        for edits in [
+            vec![SchFootprintEdit::Keep(0), SchFootprintEdit::Keep(0)],
+            vec![SchFootprintEdit::Keep(2), SchFootprintEdit::Keep(1)],
+        ] {
+            let error = component
+                .with_children(SchChildBatch {
+                    parameters: None,
+                    graphics: None,
+                    pins: None,
+                    footprints: Some(edits),
+                    allow_deletion: true,
+                })
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("footprints()["), "{error}");
+        }
+    }
+
+    fn record_kind_for_test(record: &SchRecord) -> &'static str {
+        match record {
+            SchRecord::ImplementationList(_) => "List",
+            SchRecord::Implementation(_) => "Impl",
+            SchRecord::ImplementationMap(_) => "Map",
+            SchRecord::MapDefiner(_) => "Definer",
+            SchRecord::ParameterList(_) => "ParamList",
+            SchRecord::Parameter(_) => "Param",
+            SchRecord::Designator(_) => "Designator",
+            _ => "Other",
+        }
+    }
+
+    #[test]
+    fn additional_stream_chain_records_freeze_footprint_edits() {
+        // Additional-stream chain records are programmatically constructible
+        // (zero corpus occurrences; the native exporter cannot emit them), so
+        // the collection freezes to the all-positional-Keep no-op — the same
+        // conservative shape as the Additional-pin freeze.
+        let mut library = footprint_library();
+        {
+            let aggregate = &mut library.components[0];
+            let mut chain = Vec::new();
+            let list_native = 0i32; // additional[0]
+            chain.push(SchRecord::ImplementationList(
+                SchImplementationList::from_params(&mut ParameterCollection::new()).unwrap(),
+            ));
+            let mut implementation =
+                SchImplementation::from_params(&mut ParameterCollection::new()).unwrap();
+            implementation.base.owner_index = list_native;
+            implementation.base.owner_index_additional_list = true;
+            implementation.model_type = "PCBLIB".to_owned();
+            implementation.model_name = "ADDITIONAL_FP".to_owned();
+            chain.push(SchRecord::Implementation(implementation));
+            aggregate.additional_records = chain;
+        }
+        let library = finish(library);
+        let snapshot = library.snapshot().unwrap();
+        let component = snapshot.component(0).unwrap();
+        let (footprints, _) = footprint_projection(&component);
+        assert_eq!(footprints.len(), 3, "the Additional footprint projects");
+
+        // The positional all-Keep arrangement passes as an identity.
+        let noop = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some((0..3).map(SchFootprintEdit::Keep).collect()),
+                allow_deletion: false,
+            })
+            .unwrap();
+        assert_eq!(noop, component);
+
+        // Everything else is frozen: reorder, Replace, New, and deletion.
+        let frozen_init = SchFootprintInit {
+            model_name: "X".to_owned(),
+            description: String::new(),
+            is_current: false,
+            pin_pad_maps: None,
+        };
+        for edits in [
+            vec![
+                SchFootprintEdit::Keep(1),
+                SchFootprintEdit::Keep(0),
+                SchFootprintEdit::Keep(2),
+            ],
+            vec![
+                SchFootprintEdit::Replace(0, frozen_init.clone()),
+                SchFootprintEdit::Keep(1),
+                SchFootprintEdit::Keep(2),
+            ],
+            (0..3)
+                .map(SchFootprintEdit::Keep)
+                .chain([SchFootprintEdit::New(frozen_init.clone())])
+                .collect(),
+            vec![SchFootprintEdit::Keep(0), SchFootprintEdit::Keep(1)],
+        ] {
+            let error = component
+                .with_children(SchChildBatch {
+                    parameters: None,
+                    graphics: None,
+                    pins: None,
+                    footprints: Some(edits),
+                    allow_deletion: true,
+                })
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("frozen"), "{error}");
+        }
+    }
+
+    #[test]
+    fn footprint_conflicts_and_wild_current_states() {
+        // A pin inside a footprint subtree is unaddressable wild state.
+        let mut library = footprint_library();
+        {
+            let records = &mut library.components[0].records;
+            let implementation_native = records
+                .iter()
+                .position(|record| {
+                    matches!(record, SchRecord::Implementation(i) if i.model_name == "FP_A")
+                })
+                .unwrap() as i32
+                + 1;
+            let mut wild_pin =
+                crate::sch_records::parse_text_pin(&mut ParameterCollection::new()).unwrap();
+            wild_pin.owner_index = implementation_native;
+            wild_pin.owner_part_id = 1;
+            wild_pin.designator = "W".to_owned();
+            records.push(SchRecord::Pin(wild_pin));
+        }
+        let library = finish(library);
+        let component = library.snapshot().unwrap().component(0).unwrap();
+        let error = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![SchFootprintEdit::Keep(0), SchFootprintEdit::Keep(1)]),
+                allow_deletion: false,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("owns a Pin record"), "{error}");
+
+        // A graphics member inside a footprint subtree conflicts with a
+        // graphics edit in the same batch (and only then).
+        let mut library = footprint_library();
+        {
+            let records = &mut library.components[0].records;
+            let implementation_native = records
+                .iter()
+                .position(|record| {
+                    matches!(record, SchRecord::Implementation(i) if i.model_name == "FP_A")
+                })
+                .unwrap() as i32
+                + 1;
+            records.push(line(implementation_native, 0));
+        }
+        let library = finish(library);
+        let component = library.snapshot().unwrap().component(0).unwrap();
+        let graphic_count = component.graphics().len();
+        let error = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: Some((0..graphic_count).map(SchGraphicEdit::Keep).collect()),
+                pins: None,
+                footprints: Some(vec![SchFootprintEdit::Keep(0), SchFootprintEdit::Keep(1)]),
+                allow_deletion: false,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("both a graphics() member"), "{error}");
+        // Without the graphics edit, the footprint edit owns the record: a
+        // member deletion removes the wild graphic with the whole subtree
+        // (FP_A carried the sole current, so the survivor takes the flag).
+        let removed = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![SchFootprintEdit::Replace(
+                    1,
+                    SchFootprintInit {
+                        model_name: "FP_B".to_owned(),
+                        description: "FP_B description".to_owned(),
+                        is_current: true,
+                        pin_pad_maps: None,
+                    },
+                )]),
+                allow_deletion: true,
+            })
+            .unwrap();
+        assert_eq!(removed.graphics().len(), graphic_count - 1);
+
+        // Wild multi-current input: pure Keep arrangements (reorders
+        // included) pass — they cannot change any is_current value — while a
+        // collection-changing batch must land coherent.
+        let mut library = footprint_library();
+        for record in &mut library.components[0].records {
+            if let SchRecord::Implementation(implementation) = record {
+                if implementation.model_name == "FP_B" {
+                    implementation.is_current = true; // second current
+                }
+            }
+        }
+        let library = finish(library);
+        let component = library.snapshot().unwrap().component(0).unwrap();
+        let reordered = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![SchFootprintEdit::Keep(1), SchFootprintEdit::Keep(0)]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        let (footprints, _) = footprint_projection(&reordered);
+        assert!(
+            footprints[0].2 && footprints[1].2,
+            "wild currents preserved"
+        );
+        // A non-current New passes through the wild state untouched (no
+        // current value is written, so AD26's load repair is unchanged) …
+        let extended = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![
+                    SchFootprintEdit::Keep(0),
+                    SchFootprintEdit::Keep(1),
+                    SchFootprintEdit::New(SchFootprintInit {
+                        model_name: "X".to_owned(),
+                        description: String::new(),
+                        is_current: false,
+                        pin_pad_maps: None,
+                    }),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        let (footprints, _) = footprint_projection(&extended);
+        assert_eq!(
+            footprints.iter().map(|f| f.2).collect::<Vec<_>>(),
+            [true, true, false],
+            "wild double-current preserved verbatim under a non-current New"
+        );
+        // … while an ACTIVE current claim into the incoherent state blocks.
+        let error = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![
+                    SchFootprintEdit::Keep(0),
+                    SchFootprintEdit::Keep(1),
+                    SchFootprintEdit::New(SchFootprintInit {
+                        model_name: "X".to_owned(),
+                        description: String::new(),
+                        is_current: true,
+                        pin_pad_maps: None,
+                    }),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("3 current footprints"), "{error}");
+        // The wild state is resolvable in the same batch.
+        let resolved = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![
+                    SchFootprintEdit::Keep(0),
+                    SchFootprintEdit::Replace(
+                        1,
+                        SchFootprintInit {
+                            model_name: "FP_B".to_owned(),
+                            description: "FP_B description".to_owned(),
+                            is_current: false,
+                            pin_pad_maps: None,
+                        },
+                    ),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        let (footprints, _) = footprint_projection(&resolved);
+        assert!(footprints[0].2 && !footprints[1].2);
+
+        // The zero-current wild class (the arthurbenemann-STM32F4 shape: no
+        // ISCURRENT key on any footprint): value-preserving Replaces and
+        // non-current News pass through verbatim; flipping a value into a
+        // still-incoherent state blocks; authoring coherence resolves it.
+        let mut library = footprint_library();
+        for record in &mut library.components[0].records {
+            if let SchRecord::Implementation(implementation) = record {
+                implementation.is_current = false;
+            }
+        }
+        let library = finish(library);
+        let component = library.snapshot().unwrap().component(0).unwrap();
+        let edited = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![
+                    SchFootprintEdit::Replace(
+                        0,
+                        SchFootprintInit {
+                            model_name: "FP_A".to_owned(),
+                            description: "zero-current description edit".to_owned(),
+                            is_current: false,
+                            pin_pad_maps: None,
+                        },
+                    ),
+                    SchFootprintEdit::Keep(1),
+                    SchFootprintEdit::New(SchFootprintInit {
+                        model_name: "PROBE".to_owned(),
+                        description: String::new(),
+                        is_current: false,
+                        pin_pad_maps: None,
+                    }),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        let (footprints, _) = footprint_projection(&edited);
+        assert_eq!(
+            footprints.iter().map(|f| f.2).collect::<Vec<_>>(),
+            [false, false, false],
+            "the zero-current wild state passes through untouched edits"
+        );
+        // Deleting from the zero-current set writes no current value: the
+        // (still zero-current) remainder passes through.
+        let shrunk = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![SchFootprintEdit::Keep(1)]),
+                allow_deletion: true,
+            })
+            .unwrap();
+        let (footprints, _) = footprint_projection(&shrunk);
+        assert_eq!(footprints.len(), 1);
+        assert!(!footprints[0].2);
+        // Active writes must land coherent even over a wild input: two
+        // authored currents block …
+        let error = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![
+                    SchFootprintEdit::Replace(
+                        0,
+                        SchFootprintInit {
+                            model_name: "FP_A".to_owned(),
+                            description: "FP_A description".to_owned(),
+                            is_current: true,
+                            pin_pad_maps: None,
+                        },
+                    ),
+                    SchFootprintEdit::Keep(1),
+                    SchFootprintEdit::New(SchFootprintInit {
+                        model_name: "PROBE".to_owned(),
+                        description: String::new(),
+                        is_current: true,
+                        pin_pad_maps: None,
+                    }),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("2 current footprints"), "{error}");
+        // … while one authored current resolves the wild state (exactly the
+        // repair AD26's own load would apply to the sole/first footprint).
+        let resolved = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![
+                    SchFootprintEdit::Replace(
+                        0,
+                        SchFootprintInit {
+                            model_name: "FP_A".to_owned(),
+                            description: "FP_A description".to_owned(),
+                            is_current: true,
+                            pin_pad_maps: None,
+                        },
+                    ),
+                    SchFootprintEdit::Keep(1),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        let (footprints, _) = footprint_projection(&resolved);
+        assert!(footprints[0].2 && !footprints[1].2);
     }
 }

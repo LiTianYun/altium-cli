@@ -1588,6 +1588,7 @@ mod tests {
         let without_image = component
             .with_children(SchChildBatch {
                 graphics: Some(keeps),
+                footprints: None,
                 allow_deletion: true,
                 ..Default::default()
             })

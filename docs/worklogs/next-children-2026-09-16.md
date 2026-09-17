@@ -1201,3 +1201,320 @@ Post-fix verification (verbatim, after the last edit): see the increment's
 final report — `cargo test -p altium-format --lib` 474 passed;
 `cargo test -p altium-sync` 18 passed; `cargo check -p altium-cli` clean;
 corpus gate exit 0, all checks true on all three fixtures.
+
+## Increment D2 — structural editing of the footprint/implementation chain (implemented)
+
+Contract authority: memo §1/§6 incl. errata item 1 (ImplementationList wire
+IndexInSheet 0), the ownership worklog's serialized compatibility-container
+chain rule (ImplementationList → Implementation → ImplementationMap →
+MapDefiner, ParameterList — preserved as serialized, never flattened), and
+red-team finding [12]. Extends the B/C batch engine in
+`crates/altium-format/src/schlib/snapshot/children.rs`; new types exported
+through `schlib`, `api`, and the snapshot module.
+
+### API shape
+
+- `SchChildBatch` grows `footprints: Option<Vec<SchFootprintEdit>>`;
+  `SchFootprintEdit::{Keep(usize), Replace(usize, SchFootprintInit),
+  New(SchFootprintInit)}` indices are positions in the A2
+  `footprint_maps().footprints` projection of the immutable input (PCBLIB
+  implementations only, case-insensitive model type — same membership
+  predicate as the view). Same final-sequence, deletion-authorization, and
+  atomicity semantics as B/C.
+- `SchFootprintInit { model_name, description, is_current, pin_pad_maps:
+  Option<Vec<SchPinPadMapInit>> }`; `SchPinPadMapInit { pin, pads }` (pin
+  designator → ordered pad designators, one MapDefiner each).
+  `pin_pad_maps: None` = unaddressed (B/C optional-field semantics): on `New`
+  no mappings, on `Replace` the original MapDefiner records are preserved
+  verbatim; `Some(maps)` rebuilds the definers. `from_view` populates all
+  axes explicitly (so a from_view Replace rebuilds definers; leave the field
+  `None` to preserve them). No owner axis exists: the chain hard-codes
+  owner_part_id 0 natively (memo §1).
+- Each member is the Implementation record PLUS its whole transitively-owned
+  subtree (map, definers, parameter list, implementation-owned parameters,
+  wild descendants), moved/replaced/deleted as a unit. Deletion removes the
+  whole subtree — assembly's retained-orphan check guarantees no orphans —
+  and requires `allow_deletion`.
+- The batch-plan machinery grew created-record ownership: `PlannedEntry::
+  Created { local_id, owner: PlannedOwner::{Root, Original(addr),
+  Created(local_id)} }`, resolved to `RecordOwner::New` stream positions by
+  `to_items` (creation stays Data-only; the Additional-creation rejection now
+  names all four collections).
+
+### Non-PCBLIB implementations are outside-collection content (red-team [12])
+
+SIM/PCB3D/SI/… chains are preserved verbatim in their original relative
+stream slots under EVERY footprint edit, including complete replacement with
+deletion authorized. The stream plan consumes member subtrees and emits the
+final entry assigned to slot m at original member m's Implementation
+position; extras (new subtrees) follow the last member-subtree record (or
+the Data end when no members existed), so reordering permutes only footprint
+slots and interleaved non-PCBLIB siblings plus the shared ImplementationList
+keep their positions. The exact red-team [12] test exists:
+`complete_footprint_replacement_never_touches_the_sim_chain` (footprints:
+`Some(vec![])` + `allow_deletion` on a component holding a full SIM chain —
+SIM records verbatim, list preserved, save/reopen typed equality).
+
+### Chain materialization evidence (creation)
+
+All from the decompiled AD26 sources
+(`/home/dev/projects/old-altium-cli/AD26-dotnet/Altium.Sch.DataModel/`) and
+gate-fixture wire bytes (dumped 2026-09-17):
+
+- **One shared ImplementationList per component, emitted UNCONDITIONALLY**
+  by `SchDataComponent.AddToListForSave` (Objects/SchDataComponent.cs:861-885
+  creates the synthetic list even with zero implementations). Fixture bytes:
+  every gate-fixture component carries exactly one bare `|RECORD=44` (ICs 32
+  components / 32 lists / 26 implementations). Creation therefore REUSES the
+  list owning the existing implementations (multiple distinct owner lists =
+  hard error, wild), else the first bare list, and creates one only when the
+  component has none at all — owner root, owner_part_id 0, IndexInSheet 0
+  (ctor `SetOwnerPartId(0)` + `SetIndexInSheetForSave(0)`,
+  Objects/SchDataImplementationList.cs:9-14). Remove-all does NOT delete the
+  list (outside-collection container; AD26 re-emits one regardless).
+- **Implementation record**: model_type `PCBLIB` (EngineObjects/
+  SchImplementation.cs:31 `ModelTypePCBLIB`), fresh 8-char UniqueId (fixture
+  `UNIQUEID=TFUCFNKK` etc.), owner_part_id 0, IndexInSheet −1 (fixture bytes;
+  natively via the IndexOf-mismatch — the implementation is Removed from the
+  component and Added to the synthetic list, so `SetIndexInSheetForSave(
+  IndexOf)` yields −1), and the native single default datafile link
+  `{location: "", entity: model_name, kind: "PCBLib"}` — AD26 synthesizes
+  exactly that for a link-less PCBLIB implementation in
+  `HandleAfterImportEvent` (EngineObjects/SchImplementation.cs:760-766) and
+  every corpus footprint carries it (`DATAFILECOUNT=1|MODELDATAFILEENTITY0=
+  <model>|MODELDATAFILEKIND0=PCBLib`, location key absent).
+- **ImplementationMap and ParameterList are emitted unconditionally per
+  implementation**: the map is a ctor-created field object walked by the
+  save iterator (SchDataImplementation.cs ctor + GetFieldObjects;
+  SchDataContainer.GetIteratedObjectList → ProcessFieldObjects), and
+  `SchDataImplementation.AddToListForSave` creates the synthetic
+  ParameterList unconditionally. Gate fixtures: RECORD 45/46/48 counts are
+  exactly 1:1:1 (26/26/26, 58/58/58, 381/381/381). A new footprint therefore
+  materializes Implementation + Map (owner_part_id 0, IndexInSheet 0 per
+  ctor; no UniqueId — fixture RECORD=46 carries only OWNERINDEX) + one
+  MapDefiner per pin-pad map + ParameterList (0/0), in the native subtree
+  order impl→map→definers→parameter list (wire-confirmed in Custom.SchLib).
+- **MapDefiners ARE objectList children of their map** and carry 0-based
+  sibling ordinals (wild bytes: Custom.SchLib `RECORD=47 …` first definer
+  key-absent ⇒ 0, second `INDEXINSHEET=1`). `occupies_object_list_slot` was
+  corrected: MapDefiner now occupies a slot, so rebuilt/new definers get
+  their ordinals through the shared memo-§6 touched-owner renumbering and
+  untouched maps preserve stored values verbatim. In the same pass,
+  ParameterList-OWNED parameters were reclassified as non-objectList content
+  (they serialize INDEXINSHEET=-1 through the same IndexOf-mismatch — wild
+  bytes in Custom.SchLib show `RECORD=48` followed by `RECORD=41|…|
+  INDEXINSHEET=-1|OWNERPARTID=-1`); previously a touched ParameterList would
+  have renumbered them wrongly (latent — no B/C path ever touched one).
+- **Duplicate pin designators rejected** (case-insensitive): AD26's
+  `AddMapDefiner` silently DROPS a definer whose designator interface is
+  already mapped (Objects/SchDataImplementationMap.cs, OrdinalIgnoreCase
+  dictionary), so writing duplicates would be silent data loss on the next
+  AD26 load. New-footprint model_name must be non-empty (the native default
+  datafile link derives its entity from it); Replace writes the authored
+  name verbatim (from_view round-trips of wild empty-named footprints stay
+  identity-safe).
+
+### is_current resolution (deliverable 3)
+
+The native model HAS a single-current invariant: exactly one current
+implementation per MODEL TYPE, enforced by
+`SchDataComponent.ValidateImplementationsCurrentState`
+(SchDataComponent.cs:974-1030: a type's sole implementation is forced
+current; a count ≠ 1 among several resets all and marks the
+first-encountered one) — and it runs ON THE SCHLIB V5 IMPORT PATH
+(SchDataImporterLibraryV5.cs:239 per-component, :385 whole-warehouse), i.e.
+AD26 silently REPAIRS wild states at load. The wild class is real, and it
+covers TWO of the three gate fixtures: lucashudson-Connectors stores no
+ISCURRENT key anywhere (58 `RECORD=45` implementations, 0 `ISCURRENT`
+occurrences file-wide) and arthurbenemann-STM32F4 likewise (381
+implementations, 0 `ISCURRENT`); only ICs is coherent (26 implementations,
+26 `ISCURRENT`). Our resolution:
+
+- Capture stays verbatim (no load repair, no report — repairing would
+  mutate a third of the gate corpus; the memo sanctions load normalization
+  only where it resolved one explicitly).
+- Mutation boundary blocks only NEW divergence: a batch may neither break a
+  coherent input's single-current state nor author an ACTIVE current claim
+  (a Replace changing the stored value, or a New with is_current true) into
+  an incoherent final state. Pre-existing wild states pass through verbatim
+  when the batch writes no current value (Keeps, value-equal Replaces,
+  non-current News) — AD26's load repair of them is unchanged by such an
+  edit. Wild states are resolvable in the same batch by authoring
+  is_current into a coherent assignment (exactly the repair AD26 would
+  apply). The scope is the PCBLIB collection only; non-PCBLIB types are
+  outside-collection preserved content.
+
+### Additional-stream chain records (deliverable 5 policy)
+
+REJECTED under the same conservative freeze shape as pins, strengthened to
+Keep-only: while any chain-kind record or member-subtree record lives in the
+Additional stream, the only accepted footprints edit is the
+all-positional-Keep no-op. Evidence for rejection over preservation-with-
+edits: the native exporter CANNOT emit chain records into Additional
+(implementation kinds are absent from the Additional-root object set,
+ownership worklog `SchDataConsts.cs:79-91`, and the component save path
+emits the chain through the Data list exclusively), and the corpus carries
+zero Additional streams; member subtrees may also span streams via legal
+Additional→Data links, which the single-stream slot plan does not model.
+Constructible programmatically → covered by
+`additional_stream_chain_records_freeze_footprint_edits`.
+
+### Conflict rules
+
+A footprint subtree containing a Pin record is a hard error under any
+footprints edit (pin sidecar ordering belongs to the frozen pins contract);
+a subtree record that is simultaneously a `graphics()` member conflicts when
+BOTH collections are edited in one batch (hard error naming the record);
+with graphics untouched, the footprint edit owns the record (subtree
+semantics — deletion removes it with the member). Root-owned parameters
+cannot overlap footprint scope by construction.
+
+### Test evidence (fixture-free, default suite)
+
+New/extended tests in `children.rs` (8):
+`footprint_creation_materializes_full_chain_and_list_rules` (blank component
+→ full chain incl. created list with all sentinels asserted field-by-field,
+bare-list reuse [the ICs shape], empty-model-name/duplicate-pin/sole-must-
+be-current rejections, save/reopen typed equality);
+`footprint_creation_alongside_sim_reuses_shared_list_and_leaves_sim_untouched`;
+`footprint_replace_rebuilds_definers_and_preserves_unaddressed_state`
+(rebuilt definers with fresh 0-based ordinals, unique_id/datafile/GUID/
+model_type-casing preservation, unaddressed-pin_pad_maps verbatim
+preservation, implementation-parameter survival, coherence rejection);
+`complete_footprint_replacement_never_touches_the_sim_chain` (red-team [12]:
+remove-all authorized + SIM verbatim + list preserved + weight −8 + the
+unauthorized listing; remove-one keeping the sibling);
+`footprint_reorder_permutes_only_footprint_slots` (slot permutation with the
+SIM chain fixed between slots, restore-to-original equality, all-Keep no-op
+identity, duplicate/range rejections);
+`additional_stream_chain_records_freeze_footprint_edits`;
+`footprint_conflicts_and_wild_current_states` (pin-in-subtree, graphics
+conflict + subtree-owned deletion, wild double-current pass-through/active-
+claim block, zero-current [STM32F4 shape] pass-through + block + same-batch
+resolution); `multi_collection_batch_edits_all_four_collections_against_
+immutable_input` (parameters + graphics + pins + footprints in one batch).
+SIM-verbatim assertions compare typed records with `owner_index` normalized
+(stream-address plumbing that assembly legitimately remaps; parent kinds
+stay validated by `assemble_records`).
+
+### Corpus example (footprint structural pass)
+
+`check_schlib_snapshots.rs` gains `footprint_structural_pass` from a fresh
+open, per component: (1) replace the first footprint's description
+(pin_pad_maps unaddressed, is_current value-preserving) — save/reopen typed
+equality + projection equality; (2) add probe footprint `PROBE_STEP2D2`
+(one pin-pad map from the first existing pin when the component has pins;
+is_current true only when the component had no footprints) — save/reopen +
+probe projection; (3) authorized removal of the probe + description restore
+— save/reopen AND full equality with the ORIGINAL input snapshot; the
+non-PCBLIB implementation count is asserted invariant at every stage. New
+JSON fields enforced in `main()`: `structural_footprint_replace_equal`,
+`structural_footprint_probe_equal`, `structural_footprint_removal_equal`,
+`structural_footprint_projection_equal`,
+`structural_footprint_non_pcblib_invariant` (plus the informational
+`structural_footprints_replaced`). All 223 gate components run all three
+stages — including all 135 STM32F4 components in the zero-current wild
+class (56 + 26 + 135 descriptions replaced).
+
+### Verification (all default suites, fixture-free)
+
+- `cargo test -p altium-format --lib` — 481 passed, 0 failed.
+- `cargo test -p altium-sync` — 18 passed, 0 failed (6 pre-existing
+  `collection.rs` dead-code warnings, unchanged).
+- `cargo test -p altium-spec-lang` — 362 passed, 0 failed.
+- `cargo test -p altium-format-spec` — 168 passed, 0 failed.
+- `cargo check -p altium-cli` — clean.
+- `cargo fmt --check -p altium-format -p altium-sync` — clean.
+- Corpus gate: all checks — incl. the five footprint fields — true for
+  lucashudson-Connectors (56), ICs (32), arthurbenemann-STM32F4 (135);
+  exit 0.
+
+### Known items deferred / flagged out of D2
+
+- `MODEL_TYPE_PCBLIB` (`"PCBLIB"`) and `MODEL_DATAFILE_KIND_PCBLIB`
+  (`"PCBLib"`) are local consts in children.rs — FLAGGED for promotion into
+  `altium-format-types::constants` after user discussion (same class as the
+  `"|&|"` swap separator). The promotion must unify EVERY raw literal site
+  onto the promoted constants: `schlib/snapshot/views.rs:532` (the A2
+  projection membership predicate — the one site that MUST stay in lockstep
+  with the engine predicate at children.rs `resolve_footprint_edits`,
+  because `SchFootprintEdit` index-space equivalence with
+  `footprint_maps().footprints` depends on the two predicates matching),
+  `api/sch_common.rs:410` and `:501`, `api/schdoc_write.rs:527`, and
+  `api/schlib_write.rs:138`. Predicates are character-identical today
+  (`eq_ignore_ascii_case("PCBLIB")`), so no behavior drift exists yet.
+- `new_blank_ad26` components carry NO ImplementationList, whereas an
+  AD26-saved blank always carries one (unconditional emit). Pre-existing
+  blank-factory shape, observed not changed (creation handles both);
+  queued as a user decision alongside the api-layer `default_base()` item.
+- Replace preserves datafile links verbatim even when model_name changes,
+  so a renamed footprint keeps its original link entity (task-mandated
+  preservation; AD26 itself only synthesizes a link when NONE exist).
+- The E obligations (sync-side footprint addresses through the
+  owner_group-filtered mapping; SchLibPatch library-level ops) are
+  unchanged.
+
+## Increment D2 — review findings resolution (2026-09-17)
+
+Independent review returned 7 findings (three were the same issue); each was
+verified against the code/fixtures before acting. All were minor; none
+revealed a behavior defect.
+
+1. **Wrong record count in a test comment (three duplicate findings) —
+   CONFIRMED, FIXED.** `children.rs`
+   `complete_footprint_replacement_never_touches_the_sim_chain`: the comment
+   read "12 records: 2 impl + 2 maps + 1 definer + 2 lists + 1 param" but
+   its own enumeration sums to 8 and both adjacent assertions (record-count
+   delta and header-weight delta) correctly check 8 (FP_A subtree
+   impl+map+definer+ParameterList+parameter = 5, FP_B impl+map+ParameterList
+   = 3). Comment corrected to "8 records"; code unchanged. (The "[12]" in
+   the test's worklog description is the red-team finding NUMBER, not a
+   record count.)
+2. **PCBLIB membership literal in views.rs omitted from the promotion flag
+   — CONFIRMED, FIXED (docs).** The flagged constants-promotion item above
+   now enumerates every raw-literal site — most importantly
+   `schlib/snapshot/views.rs:532`, the A2 projection predicate that must
+   stay in lockstep with the engine's `MODEL_TYPE_PCBLIB` predicate for
+   `SchFootprintEdit` index-space equivalence — plus `api/sch_common.rs:410,
+   :501`, `api/schdoc_write.rs:527`, `api/schlib_write.rs:138`. Verified
+   character-identical predicates today; no behavior defect.
+3. **Zero-current wild-class census understated — CONFIRMED, FIXED (docs).**
+   Re-counted fixture bytes: lucashudson-Connectors has 58 `RECORD=45` and
+   ZERO `ISCURRENT` occurrences (same wild class as STM32F4's 381/0); ICs is
+   26/26. The is_current evidence paragraph above and the children.rs module
+   docs now state that two of three gate fixtures are in the wild class. The
+   engine's no-new-divergence rule already handled both identically (the
+   corpus gate's value-preserving replace stage exercises all 56 Connectors
+   components), so this was an evidence-census correction only.
+4. **pin_pad_maps rebuild resets wild MapDefiner base fields — CONFIRMED,
+   FIXED (docs); optional hard-error DECLINED.** A `Replace` addressing
+   `pin_pad_maps: Some(..)` deletes the original definers and rebuilds from
+   typed wire defaults carrying only `DesIntf`/`DesImp{i}`; a wild
+   non-default `SchPrimitiveBase` field on a replaced definer (e.g.
+   `graphically_locked`, `union_index`) is reset, so a `from_view`
+   round-trip Replace over such a definer is not byte-identity. This is an
+   explicitly authored complete-rebuild axis, `SchMapDefiner` has no other
+   typed fields, native definers only ever carry ctor base state (AD26
+   creates them fresh via `AddMapDefiner`), and `None` preserves verbatim —
+   now stated explicitly in the module docs' Replace bullet. The suggested
+   optional hard-error on non-default doomed-definer base state was
+   considered and declined for D2: unlike the definer-with-descendants guard
+   (which prevents deleting whole RECORDS the axes never addressed), it
+   would freeze `pin_pad_maps` editing on hypothetical wild files with no
+   escape short of hand-clearing base flags, and the structural comparison
+   would need per-field exclusions (owner_index / index_in_sheet ordinals
+   are legitimately definer-specific) — a fragile guard against a state
+   with zero corpus occurrences. Revisit in F if evidence of the wild class
+   appears.
+5. **R7/R8 model-value constants local to altium-format — CONFIRMED as the
+   already-flagged deliberate deferral; NO code change.** Promoting
+   `MODEL_TYPE_PCBLIB`/`MODEL_DATAFILE_KIND_PCBLIB` into
+   `altium-format-types::constants/model.rs` requires the queued user
+   discussion first (plan standing rule; CLAUDE.md). The flagged item above
+   now carries the complete replacement-site list so the post-discussion
+   promotion in F unifies all spellings onto a single source of truth.
+
+Post-fix verification (docs + comment-only changes to Rust files):
+`cargo test -p altium-format --lib` 481 passed; `cargo test -p altium-sync`
+18 passed; `cargo check -p altium-cli` clean; `cargo fmt --check` clean;
+corpus gate exit 0 with all checks true on all three fixtures.

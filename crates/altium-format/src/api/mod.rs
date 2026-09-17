@@ -37,12 +37,13 @@ pub(crate) mod schlib_write;
 
 pub use crate::schlib::{
     SchAliasOp, SchChildBatch, SchCurrentPartIdAdjustment, SchFontAppend, SchFontEntryView,
-    SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail, SchGraphicEdit, SchGraphicInit,
-    SchGraphicShape, SchGraphicView, SchImageAssetEdit, SchLegacyCountNormalization,
-    SchLibComponentEdit, SchLibComponentSnapshot, SchLibEdit, SchLibSnapshot, SchNewComponent,
-    SchNormalizedCountField, SchOwnerGroup, SchParameterEdit, SchParameterInit, SchParameterView,
-    SchPartSwapGroup, SchPartView, SchPartsShrink, SchPinEdit, SchPinInit, SchPinPadMapView,
-    SchPinView, SchRemovedPartChild,
+    SchFootprintEdit, SchFootprintInit, SchFootprintMapView, SchFootprintMapsView,
+    SchGraphicDetail, SchGraphicEdit, SchGraphicInit, SchGraphicShape, SchGraphicView,
+    SchImageAssetEdit, SchLegacyCountNormalization, SchLibComponentEdit, SchLibComponentSnapshot,
+    SchLibEdit, SchLibSnapshot, SchNewComponent, SchNormalizedCountField, SchOwnerGroup,
+    SchParameterEdit, SchParameterInit, SchParameterView, SchPartSwapGroup, SchPartView,
+    SchPartsShrink, SchPinEdit, SchPinInit, SchPinPadMapInit, SchPinPadMapView, SchPinView,
+    SchRemovedPartChild,
 };
 
 // ── SchLib types ─────────────────────────────────────────────────────────────

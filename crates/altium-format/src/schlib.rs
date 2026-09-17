@@ -3,11 +3,12 @@ mod snapshot;
 pub(crate) mod validation;
 pub use snapshot::{
     SchAliasOp, SchChildBatch, SchCurrentPartIdAdjustment, SchFontAppend, SchFontEntryView,
-    SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail, SchGraphicEdit, SchGraphicInit,
-    SchGraphicShape, SchGraphicView, SchImageAssetEdit, SchLibComponentEdit,
-    SchLibComponentSnapshot, SchLibEdit, SchLibSnapshot, SchNewComponent, SchOwnerGroup,
-    SchParameterEdit, SchParameterInit, SchParameterView, SchPartSwapGroup, SchPartView,
-    SchPartsShrink, SchPinEdit, SchPinInit, SchPinPadMapView, SchPinView, SchRemovedPartChild,
+    SchFootprintEdit, SchFootprintInit, SchFootprintMapView, SchFootprintMapsView,
+    SchGraphicDetail, SchGraphicEdit, SchGraphicInit, SchGraphicShape, SchGraphicView,
+    SchImageAssetEdit, SchLibComponentEdit, SchLibComponentSnapshot, SchLibEdit, SchLibSnapshot,
+    SchNewComponent, SchOwnerGroup, SchParameterEdit, SchParameterInit, SchParameterView,
+    SchPartSwapGroup, SchPartView, SchPartsShrink, SchPinEdit, SchPinInit, SchPinPadMapInit,
+    SchPinPadMapView, SchPinView, SchRemovedPartChild,
 };
 
 use std::collections::{HashMap, HashSet};

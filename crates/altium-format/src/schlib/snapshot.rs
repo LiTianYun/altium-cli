@@ -8,8 +8,8 @@ mod parts;
 mod views;
 
 pub use children::{
-    SchChildBatch, SchGraphicEdit, SchGraphicInit, SchGraphicShape, SchParameterEdit,
-    SchParameterInit, SchPinEdit, SchPinInit,
+    SchChildBatch, SchFootprintEdit, SchFootprintInit, SchGraphicEdit, SchGraphicInit,
+    SchGraphicShape, SchParameterEdit, SchParameterInit, SchPinEdit, SchPinInit, SchPinPadMapInit,
 };
 pub use library::{
     SchAliasOp, SchFontAppend, SchImageAssetEdit, SchLibComponentEdit, SchLibEdit, SchNewComponent,
