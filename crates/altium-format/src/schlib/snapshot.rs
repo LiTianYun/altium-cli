@@ -109,6 +109,16 @@ impl SchLibSnapshot {
         self.library.components.len()
     }
 
+    /// Library references in component order. Cheap key access for keyed
+    /// matching — no component aggregates are cloned.
+    pub fn component_lib_references(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.library
+            .header
+            .components
+            .iter()
+            .map(|component| component.lib_ref.as_str())
+    }
+
     /// Returns a complete aggregate by position in this immutable snapshot.
     pub fn component(&self, index: usize) -> Result<SchLibComponentSnapshot> {
         let component = self.library.components.get(index).ok_or_else(|| {

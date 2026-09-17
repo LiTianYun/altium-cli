@@ -13,8 +13,12 @@ use altium_format_types::{
     Color, ComponentKind, Coord, CoordPoint, LineStyle, PenWidth, PinElectricalType, RotationBy90,
 };
 use altium_spec_lang::{
+    ast::{CollectionDelete, CollectionMode},
     diagnostic::{Span, Spanned},
-    intent::FieldIntent,
+    intent::{
+        Collection, CollectionScope, ComponentIntent, FieldIntent, INTENT_SCHEMA_VERSION,
+        ParameterIntent, SchLibIntent,
+    },
 };
 use altium_sync::schlib::{ComponentPropertiesIntent, SchLibPatch};
 
@@ -52,6 +56,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || result["namespace_clone_equal"] != true
             || result["namespace_clone_projection_equal"] != true
             || result["namespace_restore_equal"] != true
+            || result["intent_parameter_equal"] != true
+            || result["intent_parameter_replan_empty"] != true
+            || result["intent_create_equal"] != true
+            || result["intent_create_replan_empty"] != true
+            || result["intent_remove_equal"] != true
+            || result["intent_restore_equal"] != true
         {
             failures += 1;
         }
@@ -133,6 +143,14 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
     // original snapshot state exactly.
     let namespace = namespace_pass(SchLib::open(path)?.snapshot()?, temp.path())?;
 
+    // Intent pass (increment E1): programmatic SchLibIntent elaboration —
+    // (a) partial parameters probe on component 0 with replan-empty, then
+    // (b) partial append of a new Blank component (one parameter, one alias)
+    // and (c) a COMPLETE components intent built from the final library minus
+    // the probe with delete: allow, removing exactly the probe and restoring
+    // the pre-probe state; native save/reopen typed equality after each apply.
+    let intent = intent_pass(SchLib::open(path)?, temp.path())?;
+
     // Footprint structural pass (increment D2): per component, replace the
     // first footprint's description, add a probe footprint (with one pin-pad
     // map from an existing pin when possible), then remove it and restore the
@@ -176,6 +194,12 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
         "namespace_clone_equal": namespace.clone_equal,
         "namespace_clone_projection_equal": namespace.clone_projection_equal,
         "namespace_restore_equal": namespace.restore_equal,
+        "intent_parameter_equal": intent.parameter_equal,
+        "intent_parameter_replan_empty": intent.parameter_replan_empty,
+        "intent_create_equal": intent.create_equal,
+        "intent_create_replan_empty": intent.create_replan_empty,
+        "intent_remove_equal": intent.remove_equal,
+        "intent_restore_equal": intent.restore_equal,
     }))
 }
 
@@ -1089,4 +1113,163 @@ fn namespace_pass(
 
 fn authored<T>(value: T) -> FieldIntent<T> {
     FieldIntent::Set(Spanned::new(value, Span::new(0, 0)))
+}
+
+struct IntentOutcome {
+    parameter_equal: bool,
+    parameter_replan_empty: bool,
+    create_equal: bool,
+    create_replan_empty: bool,
+    remove_equal: bool,
+    restore_equal: bool,
+}
+
+const INTENT_PARAMETER: &str = "STEP2E";
+const INTENT_PROBE: &str = "STEP2E_PROBE";
+const INTENT_PROBE_PARAMETER: &str = "STEP2E_P";
+const INTENT_PROBE_ALIAS: &str = "STEP2E_ALIAS";
+
+fn spanned<T>(value: T) -> Spanned<T> {
+    Spanned::new(value, Span::new(0, 0))
+}
+
+fn blank_component_intent(name: &str) -> ComponentIntent {
+    ComponentIntent {
+        name: spanned(name.to_owned()),
+        annotation: None,
+        designator: FieldIntent::Absent,
+        description: FieldIntent::Absent,
+        component_kind: FieldIntent::Absent,
+        part_count: FieldIntent::Absent,
+        show_hidden_pins: FieldIntent::Absent,
+        pins: Collection::default(),
+        parameters: Collection::default(),
+        aliases: Collection::default(),
+        footprints: Collection::default(),
+        graphics: Collection::default(),
+        parts: Collection::default(),
+    }
+}
+
+fn intent_of(scope: CollectionScope, components: Vec<ComponentIntent>) -> SchLibIntent {
+    SchLibIntent {
+        schema_version: INTENT_SCHEMA_VERSION,
+        components: Collection {
+            scope,
+            items: components,
+        },
+    }
+}
+
+fn intent_pass(
+    mut doc: SchLib,
+    temp: &std::path::Path,
+) -> Result<IntentOutcome, Box<dyn std::error::Error>> {
+    let input = doc.snapshot()?;
+    let component_0 = input.component(0)?.lib_reference().to_owned();
+
+    // Stage (a): partial components intent setting parameter STEP2E on
+    // component 0 (partial parameters: matched slots update, this unmatched
+    // name appends).
+    let mut with_parameter = blank_component_intent(&component_0);
+    with_parameter.parameters = Collection {
+        scope: CollectionScope::default(),
+        items: vec![ParameterIntent {
+            name: spanned(INTENT_PARAMETER.to_owned()),
+            text: authored("intent pass probe".to_owned()),
+            is_hidden: authored(true),
+        }],
+    };
+    let parameter_intent = intent_of(CollectionScope::default(), vec![with_parameter]);
+    let patch = SchLibPatch::from_intent(&input, &parameter_intent)?;
+    let expected = patch.resulting_snapshot()?;
+    patch.apply_in_memory(&mut doc)?;
+    let mut parameter_equal = doc.snapshot()? == expected;
+    parameter_equal &= expected
+        .component(0)?
+        .parameters()?
+        .iter()
+        .any(|view| view.name == INTENT_PARAMETER && view.text == "intent pass probe");
+    let parameter_path = temp.join("intent-parameter.SchLib");
+    doc.save(&parameter_path)?;
+    parameter_equal &= SchLib::open(&parameter_path)?.snapshot()? == expected;
+    let parameter_replan_empty =
+        SchLibPatch::from_intent(&doc.snapshot()?, &parameter_intent)?.is_empty();
+
+    // Stage (b): partial append of a NEW component (Blank, one parameter,
+    // one alias).
+    let state_after_parameter = doc.snapshot()?;
+    let mut probe = blank_component_intent(INTENT_PROBE);
+    probe.parameters = Collection {
+        scope: CollectionScope::default(),
+        items: vec![ParameterIntent {
+            name: spanned(INTENT_PROBE_PARAMETER.to_owned()),
+            text: authored("created by the intent pass".to_owned()),
+            is_hidden: FieldIntent::Absent,
+        }],
+    };
+    probe.aliases = Collection {
+        scope: CollectionScope::default(),
+        items: vec![spanned(INTENT_PROBE_ALIAS.to_owned())],
+    };
+    let create_intent = intent_of(CollectionScope::default(), vec![probe]);
+    let create_patch = SchLibPatch::from_intent(&state_after_parameter, &create_intent)?;
+    let expected_created = create_patch.resulting_snapshot()?;
+    create_patch.apply_in_memory(&mut doc)?;
+    let mut create_equal = doc.snapshot()? == expected_created;
+    create_equal &=
+        expected_created.component_count() == state_after_parameter.component_count() + 1;
+    {
+        let created = expected_created.component(expected_created.component_count() - 1)?;
+        create_equal &= created.lib_reference() == INTENT_PROBE;
+        create_equal &= created
+            .parameters()?
+            .iter()
+            .any(|view| view.name == INTENT_PROBE_PARAMETER);
+        create_equal &= created.aliases().any(|alias| alias == INTENT_PROBE_ALIAS);
+    }
+    let created_path = temp.join("intent-created.SchLib");
+    doc.save(&created_path)?;
+    create_equal &= SchLib::open(&created_path)?.snapshot()? == expected_created;
+    let create_replan_empty =
+        SchLibPatch::from_intent(&doc.snapshot()?, &create_intent)?.is_empty();
+
+    // Stage (c): a COMPLETE components intent constructed from the final
+    // library minus the probe, with delete: allow — removes exactly the
+    // probe (its alias released with the aggregate) and restores stage (a)'s
+    // state.
+    let state_with_probe = doc.snapshot()?;
+    let survivors: Vec<ComponentIntent> = state_with_probe
+        .component_lib_references()
+        .filter(|name| *name != INTENT_PROBE)
+        .map(blank_component_intent)
+        .collect();
+    let remove_intent = intent_of(
+        CollectionScope {
+            mode: CollectionMode::Complete,
+            delete: CollectionDelete::Allow,
+            span: Some(Span::new(0, 0)),
+        },
+        survivors,
+    );
+    let remove_patch = SchLibPatch::from_intent(&state_with_probe, &remove_intent)?;
+    let mut remove_equal = remove_patch.removed_components().len() == 1
+        && remove_patch.removed_components()[0].lib_reference == INTENT_PROBE
+        && remove_patch.replacements().is_empty();
+    let expected_removed = remove_patch.resulting_snapshot()?;
+    remove_patch.apply_in_memory(&mut doc)?;
+    remove_equal &= doc.snapshot()? == expected_removed;
+    let removed_path = temp.join("intent-removed.SchLib");
+    doc.save(&removed_path)?;
+    remove_equal &= SchLib::open(&removed_path)?.snapshot()? == expected_removed;
+    let restore_equal = expected_removed == state_after_parameter;
+
+    Ok(IntentOutcome {
+        parameter_equal,
+        parameter_replan_empty,
+        create_equal,
+        create_replan_empty,
+        remove_equal,
+        restore_equal,
+    })
 }

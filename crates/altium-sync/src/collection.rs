@@ -3,15 +3,75 @@
 //! This helper does not authenticate an input snapshot. Its caller must bind the
 //! aggregate plan to the input snapshot/hash and verify that precondition before
 //! materialization. Matching collection lengths alone never proves input identity.
+//!
+//! # Alignment classes and the partial-scope shape rule
+//!
+//! Every collection kind has a fixed alignment class
+//! (`docs/proposals/snapshot-intent.md`, keyed/positional contract):
+//!
+//! - **Keyed** (components, parts, parameters, aliases, footprints): entries
+//!   align by exact parent-scoped natural keys. The caller resolves keys to
+//!   original indices before planning, so a sparse `Replace` index set is the
+//!   legitimate product of key matching (and of no-op thinning).
+//! - **Positional** (pins, graphics, maps): entries align by index within the
+//!   typed owner collection. A partial positional request with N authored
+//!   entries describes indices `0..N-1`; the planner cannot distinguish that
+//!   contiguous-prefix provenance from a key-matched or no-op-thinned sparse
+//!   `Replace` set, so the authored-prefix rule is enforced where index
+//!   provenance is known — at the elaboration boundary — not here.
+//!
+//! What the planner enforces uniformly for BOTH classes
+//! ([`reject_partial_interior_insert`], the single named enforcement point):
+//! a partial collection updates original slots and appends. Interior insertion
+//! (`Insert` with `before != input_len` — the sparse placement form the request
+//! shape can express) is a hard error; removal is inexpressible by construction
+//! (`IndexedEdit` has no removal variant, because the ratified contract gives a
+//! partial removal no legal authorization: `delete: allow` requires
+//! `mode: complete`, where removal is expressed by omission).
+//!
+//! Class-specific rule: a **complete positional** collection pairs authored
+//! item N with original destination N for preserved fields, so `Keep`/`Replace`
+//! entries must sit at their own original position; re-pairing (`Keep(0)` at
+//! final position 1) is a hard error. Keyed complete collections reorder
+//! freely — surviving keyed entries take source order.
 use std::collections::{BTreeMap, BTreeSet};
 
 use altium_spec_lang::ast::{CollectionDelete, CollectionKind, CollectionMode};
 use altium_spec_lang::intent::CollectionScope;
 
+/// The alignment class of a collection kind. Total: every kind has exactly one
+/// class under the snapshot-intent contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CollectionClass {
+    Keyed,
+    Positional,
+}
+
+/// The fixed keyed/positional classification of every collection kind.
+pub(crate) fn collection_class(kind: CollectionKind) -> CollectionClass {
+    match kind {
+        CollectionKind::Components
+        | CollectionKind::Parts
+        | CollectionKind::Parameters
+        | CollectionKind::Aliases
+        | CollectionKind::Footprints => CollectionClass::Keyed,
+        CollectionKind::Pins | CollectionKind::Graphics | CollectionKind::Maps => {
+            CollectionClass::Positional
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CollectionContext {
     pub owner: String,
     pub kind: CollectionKind,
+}
+
+impl CollectionContext {
+    /// The alignment class the planner learned for this collection.
+    pub fn class(&self) -> CollectionClass {
+        collection_class(self.kind)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +81,12 @@ pub(crate) enum CollectionErrorKind {
     RepeatedMutation,
     DeletionDenied,
     InputLengthChanged,
+    /// A partial request placed an entry anywhere except an original slot or
+    /// the append boundary (both classes; see the module docs).
+    PartialInteriorInsert,
+    /// A complete positional request re-paired an original entry with a
+    /// different final position (positional class only).
+    PositionalCompleteMisalignment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -59,17 +125,18 @@ impl OriginalIndex {
     }
 }
 
+/// One edit of a partial request. Partial scope has no removal form: the
+/// ratified contract permits removal only under `mode: complete` (by
+/// omission), so no `IndexedEdit` constructor can express one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum IndexedEdit<T> {
     Replace {
         index: usize,
         after: T,
     },
-    Remove {
-        index: usize,
-    },
-    /// `before == input_len` appends. Multiple inserts at the same original
-    /// boundary retain request order, even when that original item is removed.
+    /// Only `before == input_len` (the append boundary) is legal; interior
+    /// boundaries are rejected for both alignment classes (module docs).
+    /// Multiple appends retain request order.
     Insert {
         before: usize,
         after: T,
@@ -143,6 +210,31 @@ impl<T: Clone> CollectionPlan<T> {
     }
 }
 
+/// THE named enforcement point for the partial-scope shape rule (both
+/// alignment classes): partial = updates in original slots + appends
+/// (`docs/proposals/snapshot-intent.md`, partial collection contract).
+/// Interior insertion is the sparse placement the request shape can express;
+/// it (like any sparse selection) requires a complete collection.
+fn reject_partial_interior_insert(
+    context: &CollectionContext,
+    before: usize,
+    input_len: usize,
+) -> Result<(), CollectionError> {
+    if before == input_len {
+        return Ok(());
+    }
+    Err(context.error(
+        CollectionErrorKind::PartialInteriorInsert,
+        Some(before),
+        format!(
+            "partial scope over a {:?} collection updates original slots and appends; \
+             interior insertion before original index {before} (append boundary is \
+             {input_len}) is sparse placement and requires a complete collection",
+            context.class(),
+        ),
+    ))
+}
+
 pub(crate) fn plan_collection<T>(
     input_len: usize,
     scope: &CollectionScope,
@@ -178,7 +270,7 @@ pub(crate) fn plan_collection<T>(
         CollectionRequest::Complete(entries) => {
             let mut used = BTreeSet::new();
             let mut items = Vec::with_capacity(entries.len());
-            for entry in entries {
+            for (position, entry) in entries.into_iter().enumerate() {
                 let original = match &entry {
                     FinalItem::Keep { index: value } | FinalItem::Replace { index: value, .. } => {
                         Some(index(*value)?)
@@ -191,6 +283,24 @@ pub(crate) fn plan_collection<T>(
                             CollectionErrorKind::RepeatedMutation,
                             Some(original.get()),
                             "original slot is used more than once in the complete final order",
+                        ));
+                    }
+                    // A complete positional collection pairs authored item N
+                    // with original destination N for preserved fields;
+                    // re-pairing an original with a different final position
+                    // has no preserved-field meaning (module docs).
+                    if context.class() == CollectionClass::Positional && original.get() != position
+                    {
+                        return Err(context.error(
+                            CollectionErrorKind::PositionalCompleteMisalignment,
+                            Some(original.get()),
+                            format!(
+                                "complete positional item {position} references original \
+                                 destination {}; positional item N uses original destination \
+                                 N for preserved fields, so re-pairing requires authoring \
+                                 the entry completely instead",
+                                original.get(),
+                            ),
                         ));
                     }
                 }
@@ -212,11 +322,10 @@ pub(crate) fn plan_collection<T>(
             (items, removed)
         }
         CollectionRequest::Partial(edits) => {
-            // None is an explicit removal; absence from this map preserves input.
-            let mut mutations: BTreeMap<OriginalIndex, Option<T>> = BTreeMap::new();
-            let mut insertions: BTreeMap<usize, Vec<T>> = BTreeMap::new();
+            let mut replacements: BTreeMap<OriginalIndex, T> = BTreeMap::new();
+            let mut appended: Vec<T> = Vec::new();
             for edit in edits {
-                let (original, replacement) = match edit {
+                match edit {
                     IndexedEdit::Insert { before, after } => {
                         if before > input_len {
                             return Err(context.error(
@@ -225,43 +334,37 @@ pub(crate) fn plan_collection<T>(
                                 format!("insertion boundary exceeds input count {input_len}"),
                             ));
                         }
-                        insertions.entry(before).or_default().push(after);
-                        continue;
+                        reject_partial_interior_insert(&context, before, input_len)?;
+                        appended.push(after);
                     }
                     IndexedEdit::Replace {
                         index: value,
                         after,
-                    } => (index(value)?, Some(after)),
-                    IndexedEdit::Remove { index: value } => (index(value)?, None),
-                };
-                if mutations.insert(original, replacement).is_some() {
-                    return Err(context.error(
-                        CollectionErrorKind::RepeatedMutation,
-                        Some(original.get()),
-                        "original slot has overlapping or repeated replacement/removal",
-                    ));
+                    } => {
+                        let original = index(value)?;
+                        if replacements.insert(original, after).is_some() {
+                            return Err(context.error(
+                                CollectionErrorKind::RepeatedMutation,
+                                Some(original.get()),
+                                "original slot has overlapping or repeated replacement",
+                            ));
+                        }
+                    }
                 }
             }
-            let mut items = Vec::new();
-            let mut removed = Vec::new();
+            let mut items = Vec::with_capacity(input_len + appended.len());
             for value in 0..input_len {
-                if let Some(inserted) = insertions.remove(&value) {
-                    items.extend(inserted.into_iter().map(|after| PlannedItem::New { after }));
-                }
                 let original = OriginalIndex(value);
-                match mutations.remove(&original) {
-                    Some(Some(after)) => items.push(PlannedItem::Replace {
+                match replacements.remove(&original) {
+                    Some(after) => items.push(PlannedItem::Replace {
                         index: original,
                         after,
                     }),
-                    Some(None) => removed.push(original),
                     None => items.push(PlannedItem::Keep { index: original }),
                 }
             }
-            if let Some(inserted) = insertions.remove(&input_len) {
-                items.extend(inserted.into_iter().map(|after| PlannedItem::New { after }));
-            }
-            (items, removed)
+            items.extend(appended.into_iter().map(|after| PlannedItem::New { after }));
+            (items, Vec::new())
         }
     };
     if scope.delete != CollectionDelete::Allow {
@@ -292,11 +395,15 @@ mod tests {
             span: None,
         }
     }
-    fn context() -> CollectionContext {
+    fn context_of(kind: CollectionKind) -> CollectionContext {
         CollectionContext {
             owner: "library/component R/part 1".into(),
-            kind: CollectionKind::Graphics,
+            kind,
         }
+    }
+    fn context() -> CollectionContext {
+        // Graphics: a positional collection.
+        context_of(CollectionKind::Graphics)
     }
     fn plan(
         input_len: usize,
@@ -306,40 +413,70 @@ mod tests {
     ) -> Result<CollectionPlan<&'static str>, CollectionError> {
         plan_collection(input_len, &scope(mode, delete), request, context())
     }
+    fn plan_in(
+        kind: CollectionKind,
+        input_len: usize,
+        mode: CollectionMode,
+        delete: CollectionDelete,
+        request: CollectionRequest<&'static str>,
+    ) -> Result<CollectionPlan<&'static str>, CollectionError> {
+        plan_collection(input_len, &scope(mode, delete), request, context_of(kind))
+    }
 
     #[test]
-    fn partial_multi_edits_use_immutable_original_indices_and_keep_omissions() {
+    fn every_collection_kind_has_exactly_one_alignment_class() {
+        for (kind, expected) in [
+            (CollectionKind::Components, CollectionClass::Keyed),
+            (CollectionKind::Parts, CollectionClass::Keyed),
+            (CollectionKind::Parameters, CollectionClass::Keyed),
+            (CollectionKind::Aliases, CollectionClass::Keyed),
+            (CollectionKind::Footprints, CollectionClass::Keyed),
+            (CollectionKind::Pins, CollectionClass::Positional),
+            (CollectionKind::Graphics, CollectionClass::Positional),
+            (CollectionKind::Maps, CollectionClass::Positional),
+        ] {
+            assert_eq!(collection_class(kind), expected, "{kind:?}");
+            assert_eq!(context_of(kind).class(), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn partial_updates_original_slots_and_appends_in_request_order() {
         let input = ["A", "B", "C", "D"];
         let result = plan(
             4,
             CollectionMode::Partial,
-            CollectionDelete::Allow,
+            CollectionDelete::Deny,
             CollectionRequest::Partial(vec![
-                IndexedEdit::Insert {
-                    before: 0,
-                    after: "head",
-                },
-                IndexedEdit::Remove { index: 1 },
                 IndexedEdit::Replace {
                     index: 3,
                     after: "D changed",
                 },
                 IndexedEdit::Insert {
-                    before: 1,
-                    after: "first",
+                    before: 4,
+                    after: "first append",
                 },
-                IndexedEdit::Insert {
-                    before: 1,
-                    after: "second",
+                // Sparse Replace sets are legitimate for both classes: key
+                // matching and no-op thinning both produce them.
+                IndexedEdit::Replace {
+                    index: 1,
+                    after: "B changed",
                 },
                 IndexedEdit::Insert {
                     before: 4,
-                    after: "tail",
+                    after: "second append",
                 },
             ]),
         )
         .unwrap();
-        let expected = vec!["head", "A", "first", "second", "C", "D changed", "tail"];
+        let expected = vec![
+            "A",
+            "B changed",
+            "C",
+            "D changed",
+            "first append",
+            "second append",
+        ];
         assert_eq!(result.materialize(&input).unwrap(), expected);
         assert_eq!(
             result.materialize(&input).unwrap(),
@@ -347,9 +484,9 @@ mod tests {
             "plan is repeatable against unchanged input"
         );
         assert_eq!(input, ["A", "B", "C", "D"]);
-        assert_eq!(result.removed(), &[OriginalIndex(1)]);
+        assert!(result.removed().is_empty());
         assert!(
-            matches!(&result.items()[5], PlannedItem::Replace { index, .. } if index.get() == 3)
+            matches!(&result.items()[3], PlannedItem::Replace { index, .. } if index.get() == 3)
         );
         let untouched = plan(
             4,
@@ -366,8 +503,58 @@ mod tests {
     }
 
     #[test]
-    fn complete_sets_explicit_final_order_and_length_without_similarity() {
-        let result = plan(
+    fn partial_interior_insert_is_rejected_for_both_classes() {
+        for kind in [
+            CollectionKind::Parameters, // keyed
+            CollectionKind::Graphics,   // positional
+        ] {
+            for before in [0usize, 1, 3] {
+                let error = plan_in(
+                    kind,
+                    4,
+                    CollectionMode::Partial,
+                    CollectionDelete::Allow,
+                    CollectionRequest::Partial(vec![IndexedEdit::Insert {
+                        before,
+                        after: "sparse",
+                    }]),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.kind,
+                    CollectionErrorKind::PartialInteriorInsert,
+                    "{kind:?} before {before}"
+                );
+                assert_eq!(error.index, Some(before));
+                assert!(
+                    error.to_string().contains("requires a complete collection"),
+                    "{error}"
+                );
+            }
+            // The append boundary stays legal for both classes.
+            let appended = plan_in(
+                kind,
+                4,
+                CollectionMode::Partial,
+                CollectionDelete::Deny,
+                CollectionRequest::Partial(vec![IndexedEdit::Insert {
+                    before: 4,
+                    after: "tail",
+                }]),
+            )
+            .unwrap();
+            assert_eq!(
+                appended.materialize(&["A", "B", "C", "D"]).unwrap(),
+                ["A", "B", "C", "D", "tail"]
+            );
+        }
+    }
+
+    #[test]
+    fn complete_keyed_reorders_freely_but_positional_pairs_by_position() {
+        // Keyed complete: final order and membership from the request.
+        let result = plan_in(
+            CollectionKind::Parameters,
             4,
             CollectionMode::Complete,
             CollectionDelete::Allow,
@@ -387,8 +574,70 @@ mod tests {
             ["D", "new", "B changed", "A"]
         );
         assert_eq!(result.removed(), &[OriginalIndex(2)]);
-        // Equal-valued items are still distinct original positions.
-        let reorder = plan(
+
+        // Positional complete: Keep/Replace must sit at their own original
+        // position; substitution-in-place and appends are legal.
+        let aligned = plan(
+            3,
+            CollectionMode::Complete,
+            CollectionDelete::Allow,
+            CollectionRequest::Complete(vec![
+                FinalItem::Keep { index: 0 },
+                FinalItem::New {
+                    after: "replaces 1",
+                },
+                FinalItem::Keep { index: 2 },
+                FinalItem::New { after: "appended" },
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            aligned.materialize(&["A", "B", "C"]).unwrap(),
+            ["A", "replaces 1", "C", "appended"]
+        );
+        assert_eq!(aligned.removed(), &[OriginalIndex(1)]);
+        for misaligned in [
+            CollectionRequest::Complete(vec![
+                FinalItem::New { after: "front" },
+                FinalItem::Keep { index: 0 },
+            ]),
+            CollectionRequest::Complete(vec![
+                FinalItem::Keep { index: 1 },
+                FinalItem::Keep { index: 0 },
+            ]),
+            CollectionRequest::Complete(vec![
+                FinalItem::Keep { index: 0 },
+                FinalItem::Replace {
+                    index: 2,
+                    after: "moved",
+                },
+            ]),
+        ] {
+            let error = plan(
+                3,
+                CollectionMode::Complete,
+                CollectionDelete::Allow,
+                misaligned,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.kind,
+                CollectionErrorKind::PositionalCompleteMisalignment,
+                "{error:?}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("uses original destination N for preserved fields"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_keyed_reorder_of_equal_values_keeps_distinct_original_slots() {
+        let reorder = plan_in(
+            CollectionKind::Parameters,
             2,
             CollectionMode::Complete,
             CollectionDelete::Deny,
@@ -416,41 +665,21 @@ mod tests {
     }
 
     #[test]
-    fn omissions_and_explicit_removals_need_deletion_permission() {
-        for (mode, request) in [
-            (
-                CollectionMode::Complete,
-                CollectionRequest::Complete(vec![FinalItem::Keep { index: 0 }]),
-            ),
-            (
-                CollectionMode::Partial,
-                CollectionRequest::Partial(vec![IndexedEdit::Remove { index: 1 }]),
-            ),
-        ] {
-            let error = plan(2, mode, CollectionDelete::Deny, request).unwrap_err();
-            assert_eq!(error.kind, CollectionErrorKind::DeletionDenied);
-            assert_eq!(error.index, Some(1));
-            assert_eq!(error.owner, context().owner);
-            assert_eq!(error.collection, CollectionKind::Graphics);
-        }
-        let complete = plan(
+    fn complete_omission_needs_deletion_permission_and_partial_cannot_remove() {
+        let error = plan(
             2,
             CollectionMode::Complete,
             CollectionDelete::Deny,
-            CollectionRequest::Complete(vec![
-                FinalItem::New { after: "new" },
-                FinalItem::Replace {
-                    index: 1,
-                    after: "updated",
-                },
-                FinalItem::Keep { index: 0 },
-            ]),
+            CollectionRequest::Complete(vec![FinalItem::Keep { index: 0 }]),
         )
-        .unwrap();
-        assert_eq!(
-            complete.materialize(&["A", "B"]).unwrap(),
-            ["new", "updated", "A"]
-        );
+        .unwrap_err();
+        assert_eq!(error.kind, CollectionErrorKind::DeletionDenied);
+        assert_eq!(error.index, Some(1));
+        assert_eq!(error.owner, context().owner);
+        assert_eq!(error.collection, CollectionKind::Graphics);
+        // Partial removal is inexpressible by construction: IndexedEdit has no
+        // removal variant, so the only partial outcomes are updates and
+        // appends — asserted by materializing a full-coverage partial plan.
         let partial = plan(
             2,
             CollectionMode::Partial,
@@ -462,35 +691,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(partial.materialize(&["A", "B"]).unwrap(), ["A", "updated"]);
+        assert!(partial.removed().is_empty());
+        let complete = plan(
+            2,
+            CollectionMode::Complete,
+            CollectionDelete::Deny,
+            CollectionRequest::Complete(vec![
+                FinalItem::Keep { index: 0 },
+                FinalItem::Replace {
+                    index: 1,
+                    after: "updated",
+                },
+                FinalItem::New { after: "new" },
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            complete.materialize(&["A", "B"]).unwrap(),
+            ["A", "updated", "new"]
+        );
     }
 
     #[test]
     fn repeated_original_slots_and_overlapping_mutations_are_rejected() {
-        for first in [
-            IndexedEdit::Remove { index: 0 },
-            IndexedEdit::Replace {
-                index: 0,
-                after: "x",
-            },
-        ] {
-            for second in [
-                IndexedEdit::Remove { index: 0 },
+        let error = plan(
+            1,
+            CollectionMode::Partial,
+            CollectionDelete::Allow,
+            CollectionRequest::Partial(vec![
+                IndexedEdit::Replace {
+                    index: 0,
+                    after: "x",
+                },
                 IndexedEdit::Replace {
                     index: 0,
                     after: "y",
                 },
-            ] {
-                let error = plan(
-                    1,
-                    CollectionMode::Partial,
-                    CollectionDelete::Allow,
-                    CollectionRequest::Partial(vec![first.clone(), second]),
-                )
-                .unwrap_err();
-                assert_eq!(error.kind, CollectionErrorKind::RepeatedMutation);
-                assert_eq!(error.index, Some(0));
-            }
-        }
+            ]),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, CollectionErrorKind::RepeatedMutation);
+        assert_eq!(error.index, Some(0));
         for first in [
             FinalItem::Keep { index: 0 },
             FinalItem::Replace {
@@ -505,7 +746,8 @@ mod tests {
                     after: "y",
                 },
             ] {
-                let error = plan(
+                let error = plan_in(
+                    CollectionKind::Parameters,
                     1,
                     CollectionMode::Complete,
                     CollectionDelete::Allow,
@@ -528,10 +770,6 @@ mod tests {
                         index: bad,
                         after: "x",
                     }]),
-                ),
-                (
-                    CollectionMode::Partial,
-                    CollectionRequest::Partial(vec![IndexedEdit::Remove { index: bad }]),
                 ),
                 (
                     CollectionMode::Complete,

@@ -15,7 +15,7 @@ altium-format          (core: parsing, serialization, high-level API, rendering 
   └→ altium-format-render-png  (PNG rasterization via resvg)
 altium-format-spec     (declarative spec language for Altium documents — being replaced)
 altium-spec-lang       (lossless CST, parser, formatter, expression evaluation)
-altium-sync            (asset capture, initial snapshot-bound patches; planner incomplete)
+altium-sync            (asset capture, snapshot-bound patches, library ops, keyed intent elaboration; positional/E2 elaboration pending)
 altium-cli             (CLI binary)
 ```
 
@@ -289,6 +289,69 @@ replace, PROBE_STEP2D2 add with a pin-pad map from an existing pin,
 authorized removal + description restore to exact input equality, with
 projection equality and the non-PCBLIB count invariant at every stage) — all
 checks true on all 223 components of the three gate libraries, exit 0.
+Step-2 increment E1 (2026-09-17) delivered the sync-side keyed elaboration
+plus the deferred D1 library-level op surface. The crate-private collection
+planner is now class-aware (`CollectionClass::{Keyed, Positional}` derived
+totally from `CollectionKind`): partial scope is "updates in original slots +
+appends" for BOTH classes — interior insertion is a hard error at one named
+enforcement point (`reject_partial_interior_insert`) and partial removal is
+inexpressible by construction (`IndexedEdit::Remove` was deleted: the
+ratified contract gives it no legal authorization since `delete: allow`
+requires `mode: complete`, where removal is omission); complete positional
+requests must pair item N with original destination N
+(`PositionalCompleteMisalignment`), while keyed complete reorders freely.
+The formerly dead planner surface (Insert appends, Complete/FinalItem,
+`materialize`, `items`, `removed`) is production-consumed by elaboration and
+altium-sync builds with zero warnings. `SchLibPatch` gained: a cached
+reviewed result (computed once — creations carry fresh UniqueIds, so
+recomputation would diverge from review), `from_library_ops`
+(`SchLibLibraryOp`: alias add/remove, image-asset insert/replace/remove with
+`CapturedImageAsset` payloads re-verified hash/path at construction AND
+before every apply, font appends, component create Blank/CloneOf and
+explicit by-name remove) lowering to exactly ONE `SchLibEdit` per
+application, and `from_intent(input, &SchLibIntent)` — definition-scope
+keyed elaboration: components keyed by exact lib_reference (partial = update
+matched + append-create in source order; complete = final membership/order,
+omission removes only under delete:allow with the D1 authorization flag and
+auto-releases the removed aggregate's aliases; renames never inferred),
+parameters keyed case-insensitively per the native
+`GetParameterByName`/OrdinalIgnoreCase comparison (authored spelling wins on
+update), aliases keyed exactly (membership semantics; surviving order stays
+destination order per the D1 sorted-set deviation), footprints keyed by
+exact model_name (`source` is provenance, never a key; `explicit_maps=false`
+⇒ definers unaddressed/preserved; explicit maps elaborate positionally
+through the planner incl. `materialize`; an authored maps entry addressing a
+multi-pad destination definer is a hard error — native MapDefiners may carry
+several pads while a pin-pad intent pair expresses one, so narrowing is never
+silent, while unaddressed tails preserve all pads and complete+allow shorter
+lists remove definers explicitly; `is_current` is not intent-expressible —
+preserved on update, first-created-on-empty rule on create; whole-set
+replacement takes two patches: empty via complete+allow, then author),
+scalars via the existing FieldPolicies with Absent-never-writes on
+matched AND created components. Every collection scope in a hand-built
+intent must be self-consistent: non-default mode/delete without a
+declaration span, or partial+`delete: allow` (contract-illegal), hard-error
+at the `from_intent` boundary instead of being silently dropped. Duplicate keys on either side of a managed
+collection block with both locations; unmanaged collections never touch wild
+duplicates. E2 content (pins/graphics incl. placement, parts, part_count,
+swap fan-out, image-source graphics) hard-errors naming the component and
+the staging restriction, on created components too. Application order is the
+D1 two-step: one library edit first, then component content replacements
+captured against its result (replacement indices address the
+post-library-edit sequence). Inspection surface: replacements with
+before/after snapshots + `scalar_changes()` deltas, created/removed
+components, alias/image/font op accessors — the exact-indexed-diff
+foundation, no rendering. No-op detection at every level makes
+apply→re-elaborate replan-empty.
+E1 validation (post findings-fix pass 2026-09-17: multi-pad definer guard +
+programmatic scope validation): 481 format, 35 sync, 362 spec-lang and 168
+format-spec tests pass; the CLI builds; altium-sync builds with zero
+warnings; `cargo fmt --check` clean; the corpus gate adds an intent pass (per file: partial
+parameters probe STEP2E on component 0 with apply/save-reopen equality and
+replan-empty; partial append of Blank STEP2E_PROBE with one parameter and one
+alias, replan-empty; COMPLETE components intent built from the final library
+minus the probe with delete:allow removing exactly the probe and restoring
+the pre-probe state) — all checks true on all three gate libraries, exit 0.
 Full image codecs were removed from the gate by the user's 2026-09-05 scope change.
 Graphic field policies now cover all 13 kinds against the existing typed Rust
 API/creation defaults, including optional arc endpoints and named PenWidth values.

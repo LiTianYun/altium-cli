@@ -1,14 +1,50 @@
-//! Concrete SchLib snapshot-bound component edits.
+//! Concrete SchLib snapshot-bound patches.
 //!
-//! This is the initial scalar elaboration path, not the full source planner.
-//! Child collections, creation/deletion, inherited instances and native-reference
-//! rebuilding remain separate requirements before shipping the SchLib workflow.
+//! A [`SchLibPatch`] binds one immutable typed input snapshot to a reviewed
+//! result snapshot. Three constructors exist:
+//!
+//! - [`SchLibPatch::component_properties`] — the scalar elaboration path over
+//!   explicitly addressed component slots (increment-A era surface, kept).
+//! - [`SchLibPatch::from_library_ops`] — typed library-level namespace ops
+//!   (step-2 increment E1, resolving the D1 deferral): alias add/remove,
+//!   image-asset insert/replace/remove (payload via
+//!   [`crate::image_asset::CapturedImageAsset`]), font appends, and component
+//!   create ([`SchNewComponent::Blank`]/[`SchNewComponent::CloneOf`]) /
+//!   remove. Ops lower to exactly ONE [`SchLibEdit`] per patch application
+//!   through `SchLibSnapshot::with_library_edit`.
+//! - [`SchLibPatch::from_intent`] — definition-scope elaboration of a
+//!   [`altium_spec_lang::intent::SchLibIntent`] over the KEYED collections
+//!   (components, parameters, aliases, footprints incl. their positional
+//!   pin-pad maps) plus the library ops above; see the `elaborate` module
+//!   docs for the exact keyed contract. Positional pins/graphics, parts,
+//!   part_count, layout, swap fan-out, and image-source graphics are
+//!   increment-E2 content and hard-error with context.
+//!
+//! Application order (the D1 two-step composition): the library-level
+//! namespace transition applies FIRST as one `SchLibEdit`; component content
+//! replacements are captured against the RESULT of that edit (the
+//! "intermediate" snapshot with its recomputed reference context) and applied
+//! second through `replace_components`. [`ComponentReplacement::index`]
+//! therefore addresses the post-library-edit component sequence; when the
+//! patch changes no component membership/order this equals the input slot.
+//!
+//! The reviewed result snapshot is computed ONCE at construction and cached:
+//! created components receive fresh `UniqueId`s, so recomputing at apply time
+//! would silently diverge from the reviewed state. `apply_in_memory` executes
+//! exactly the cached result after verifying the whole-input `StaleInput`
+//! precondition and the captured image-asset inputs.
+mod elaborate;
+
 use crate::collection::{
     CollectionContext, CollectionRequest, IndexedEdit, PlannedItem, plan_collection,
 };
+use crate::image_asset::{CapturedImageAsset, ImageAssetError};
 use altium_format::{
     SchLib,
-    api::{SchLibComponentSnapshot, SchLibSnapshot},
+    api::{
+        SchAliasOp, SchFontAppend, SchImageAssetEdit, SchLibComponentEdit, SchLibComponentSnapshot,
+        SchLibEdit, SchLibSnapshot, SchNewComponent,
+    },
 };
 use altium_format_types::ComponentKind;
 use altium_spec_lang::intent::{
@@ -41,29 +77,343 @@ pub enum SchLibPatchError {
         #[source]
         source: altium_spec_lang::SpecError,
     },
+    #[error("{context}: {source}")]
+    Spec {
+        context: String,
+        #[source]
+        source: altium_spec_lang::SpecError,
+    },
     #[error("component #{index} is addressed more than once in the same patch")]
     Overlap { index: usize },
     #[error("SchLib typed input state changed since planning; replan")]
     StaleInput,
     #[error("{detail}")]
     Collection { detail: String },
+    #[error("{context}: {detail}")]
+    Elaboration { context: String, detail: String },
+    #[error("{context}: {source}")]
+    ImageAsset {
+        context: String,
+        #[source]
+        source: ImageAssetError,
+    },
 }
 
-/// One complete component after-state addressed in the immutable input snapshot.
-/// Native snapshot fields remain private to altium-format.
+/// One complete component after-state addressed in the patch's final
+/// (post-library-edit) component sequence, together with the exact before
+/// state it replaces. Native snapshot fields remain private to altium-format.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComponentReplacement {
     index: usize,
+    before: SchLibComponentSnapshot,
     after: SchLibComponentSnapshot,
 }
 
+/// One scalar field difference between a replacement's before and after
+/// states, in Debug-rendered form. This is inspection data for exact-indexed
+/// diff reporting, not an execution input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchComponentFieldDelta {
+    pub field: &'static str,
+    pub before: String,
+    pub after: String,
+}
+
 impl ComponentReplacement {
+    /// Position in the patch's final (post-library-edit) component sequence;
+    /// equals the input slot when the patch changes no component
+    /// membership/order.
     pub fn index(&self) -> usize {
         self.index
+    }
+    pub fn before(&self) -> &SchLibComponentSnapshot {
+        &self.before
     }
     pub fn after(&self) -> &SchLibComponentSnapshot {
         &self.after
     }
+
+    /// The cheap scalar before/after pairs that differ (description,
+    /// designator, component kind, show-hidden-pins). Child-collection
+    /// differences are visible through the public projection views on
+    /// [`Self::before`]/[`Self::after`]; no rendering is attempted here.
+    pub fn scalar_changes(&self) -> Result<Vec<SchComponentFieldDelta>, SchLibPatchError> {
+        let mut changes = Vec::new();
+        let mut push = |field: &'static str, before: String, after: String| {
+            if before != after {
+                changes.push(SchComponentFieldDelta {
+                    field,
+                    before,
+                    after,
+                });
+            }
+        };
+        push(
+            "description",
+            format!("{:?}", self.before.description()),
+            format!("{:?}", self.after.description()),
+        );
+        let designator = |component: &SchLibComponentSnapshot| -> Result<String, SchLibPatchError> {
+            Ok(format!(
+                "{:?}",
+                component
+                    .designator()
+                    .map_err(|source| SchLibPatchError::Format {
+                        context: format!(
+                            "projecting designator of component '{}' for the scalar diff",
+                            component.lib_reference()
+                        ),
+                        source,
+                    })?
+            ))
+        };
+        push(
+            "designator",
+            designator(&self.before)?,
+            designator(&self.after)?,
+        );
+        push(
+            "component_kind",
+            format!("{:?}", self.before.component_kind()),
+            format!("{:?}", self.after.component_kind()),
+        );
+        push(
+            "show_hidden_pins",
+            format!("{:?}", self.before.show_hidden_pins()),
+            format!("{:?}", self.after.show_hidden_pins()),
+        );
+        Ok(changes)
+    }
+}
+
+/// One alias set change carried by a patch, addressed by component
+/// `lib_reference` exactly as the D1 [`SchAliasOp`] surface addresses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchLibAliasChange {
+    pub component: String,
+    pub alias: String,
+}
+
+/// One image-asset store op carried by a patch. The payload is a
+/// [`CapturedImageAsset`]: exact reviewed bytes bound to a canonical path and
+/// content hash, re-verified (`verify_unchanged`) before every apply.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SchLibImageAssetOp {
+    Insert {
+        index: usize,
+        name: String,
+        asset: CapturedImageAsset,
+    },
+    Replace {
+        index: usize,
+        name: String,
+        asset: CapturedImageAsset,
+    },
+    Remove {
+        index: usize,
+    },
+}
+
+impl SchLibImageAssetOp {
+    fn verify_asset(&self) -> Result<(), ImageAssetError> {
+        match self {
+            Self::Insert { asset, .. } | Self::Replace { asset, .. } => asset.verify_unchanged(),
+            Self::Remove { .. } => Ok(()),
+        }
+    }
+    fn to_edit(&self) -> SchImageAssetEdit {
+        match self {
+            Self::Insert { index, name, asset } => SchImageAssetEdit::Insert {
+                index: *index,
+                name: name.clone(),
+                payload: asset.bytes().to_vec(),
+            },
+            Self::Replace { index, name, asset } => SchImageAssetEdit::Replace {
+                index: *index,
+                name: name.clone(),
+                payload: asset.bytes().to_vec(),
+            },
+            Self::Remove { index } => SchImageAssetEdit::Remove { index: *index },
+        }
+    }
+}
+
+/// One component removed by the patch, recorded for inspection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchLibComponentRemoval {
+    pub input_index: usize,
+    pub lib_reference: String,
+}
+
+/// One typed library-level op for [`SchLibPatch::from_library_ops`] (the D1
+/// deferral surface). Ops apply in the D1 `SchLibEdit` order — font appends,
+/// image-asset ops (in the given relative order), component slots, alias
+/// removes then adds — regardless of their order in the input vector, except
+/// that image-asset ops keep their relative order (each op's index addresses
+/// the store as left by the preceding one) and component creations append in
+/// the given order.
+///
+/// `ComponentRemove` is itself the removal authorization: it names the exact
+/// component whose complete aggregate is deleted (this imperative op surface
+/// has no declarative `delete:` scope). Unlike intent elaboration it does NOT
+/// auto-release the removed component's aliases — supply explicit
+/// `AliasRemove` ops, exactly as the D1 format contract requires.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SchLibLibraryOp {
+    AliasAdd(SchLibAliasChange),
+    AliasRemove(SchLibAliasChange),
+    ImageAsset(SchLibImageAssetOp),
+    FontAppend(SchFontAppend),
+    ComponentCreate(SchNewComponent),
+    ComponentRemove { lib_reference: String },
+}
+
+/// One slot of the patch's final component sequence.
+#[derive(Debug, Clone, PartialEq)]
+enum SchLibPatchSlot {
+    /// The input component at this index, preserved (content edits, if any,
+    /// are separate [`ComponentReplacement`]s).
+    Keep(usize),
+    /// A newly created component.
+    New(SchNewComponent),
+}
+
+/// The library-level half of a patch under construction: everything that
+/// lowers into the single `SchLibEdit`.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct PendingLibraryEdit {
+    component_slots: Option<Vec<SchLibPatchSlot>>,
+    allow_component_removal: bool,
+    removed_components: Vec<SchLibComponentRemoval>,
+    alias_additions: Vec<SchLibAliasChange>,
+    alias_removals: Vec<SchLibAliasChange>,
+    image_asset_ops: Vec<SchLibImageAssetOp>,
+    font_appends: Vec<SchFontAppend>,
+}
+
+impl PendingLibraryEdit {
+    fn is_empty(&self) -> bool {
+        self.component_slots.is_none()
+            && self.alias_additions.is_empty()
+            && self.alias_removals.is_empty()
+            && self.image_asset_ops.is_empty()
+            && self.font_appends.is_empty()
+    }
+
+    /// Drops an identity component sequence (all input slots kept in order,
+    /// nothing removed or created) so a content-only patch carries
+    /// `components: None` and a fully no-op patch stays empty.
+    fn normalize_component_slots(&mut self, input_len: usize) {
+        if let Some(slots) = &self.component_slots {
+            let identity = self.removed_components.is_empty()
+                && slots.len() == input_len
+                && slots.iter().enumerate().all(
+                    |(position, slot)| matches!(slot, SchLibPatchSlot::Keep(i) if *i == position),
+                );
+            if identity {
+                self.component_slots = None;
+                self.allow_component_removal = false;
+            }
+        }
+    }
+
+    fn to_edit(&self) -> SchLibEdit {
+        SchLibEdit {
+            components: self.component_slots.as_ref().map(|slots| {
+                slots
+                    .iter()
+                    .map(|slot| match slot {
+                        SchLibPatchSlot::Keep(index) => SchLibComponentEdit::Keep(*index),
+                        SchLibPatchSlot::New(new) => SchLibComponentEdit::New(new.clone()),
+                    })
+                    .collect()
+            }),
+            alias_ops: self
+                .alias_removals
+                .iter()
+                .map(|change| SchAliasOp::Remove {
+                    component: change.component.clone(),
+                    alias: change.alias.clone(),
+                })
+                .chain(self.alias_additions.iter().map(|change| SchAliasOp::Add {
+                    component: change.component.clone(),
+                    alias: change.alias.clone(),
+                }))
+                .collect(),
+            image_assets: self
+                .image_asset_ops
+                .iter()
+                .map(SchLibImageAssetOp::to_edit)
+                .collect(),
+            font_appends: self.font_appends.clone(),
+            allow_component_removal: self.allow_component_removal,
+        }
+    }
+
+    /// Applies the single library edit, or returns `None` when the patch has
+    /// no library-level content (the component sequence is then the input's).
+    fn intermediate(
+        &self,
+        input: &SchLibSnapshot,
+    ) -> Result<Option<SchLibSnapshot>, SchLibPatchError> {
+        if self.is_empty() {
+            return Ok(None);
+        }
+        input
+            .with_library_edit(self.to_edit())
+            .map(Some)
+            .map_err(|source| SchLibPatchError::Format {
+                context: "applying the patch's library-level namespace transition".into(),
+                source,
+            })
+    }
+}
+
+/// Elaborates the four scalar component properties: only authored fields are
+/// applied, through their declared [`FieldPolicy`]s; `Absent` never writes,
+/// on existing and newly created components alike.
+fn elaborate_component_properties(
+    index: usize,
+    before: &SchLibComponentSnapshot,
+    intent: &ComponentPropertiesIntent,
+) -> Result<SchLibComponentSnapshot, SchLibPatchError> {
+    let mut after = before.clone();
+    macro_rules! property {
+        ($field:ident, $policy:expr, $setter:ident) => {
+            if intent.$field.is_authored() {
+                let value = $policy.definition(&intent.$field).map_err(|source| {
+                    SchLibPatchError::Intent {
+                        index,
+                        field: stringify!($field),
+                        source,
+                    }
+                })?;
+                after = after
+                    .$setter(value)
+                    .map_err(|source| SchLibPatchError::Format {
+                        context: format!(
+                            "elaborating {} of component #{index} '{}'",
+                            stringify!($field),
+                            before.lib_reference()
+                        ),
+                        source,
+                    })?;
+            }
+        };
+    }
+    property!(description, OPTIONAL_DESCRIPTION, with_description);
+    property!(designator, COMPONENT_DESIGNATOR, with_designator);
+    property!(component_kind, COMPONENT_KIND, with_component_kind);
+    property!(
+        show_hidden_pins,
+        FieldPolicy {
+            name: "component.show_hidden_pins",
+            default: Some(|| false),
+            clear: None,
+        },
+        with_show_hidden_pins
+    );
+    Ok(after)
 }
 
 /// A checked in-memory patch bound to the entire typed input, including fields
@@ -72,6 +422,10 @@ impl ComponentReplacement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SchLibPatch {
     input: SchLibSnapshot,
+    /// The reviewed result, computed once at construction (created components
+    /// carry fresh `UniqueId`s, so recomputation would diverge from review).
+    result: SchLibSnapshot,
+    pending: PendingLibraryEdit,
     replacements: Vec<ComponentReplacement>,
 }
 
@@ -106,7 +460,7 @@ impl SchLibPatch {
         fields: impl IntoIterator<Item = (usize, ComponentPropertiesIntent)>,
     ) -> Result<Self, SchLibPatchError> {
         let mut seen = std::collections::BTreeSet::new();
-        let mut replacements = Vec::new();
+        let mut edited = Vec::new();
         for (index, intent) in fields {
             if !seen.insert(index) {
                 return Err(SchLibPatchError::Overlap { index });
@@ -117,45 +471,13 @@ impl SchLibPatch {
                     context: format!("resolving input component #{index}"),
                     source,
                 })?;
-            let mut after = before.clone();
-            macro_rules! property {
-                ($field:ident, $policy:expr, $setter:ident) => {
-                    if intent.$field.is_authored() {
-                        let value = $policy.definition(&intent.$field).map_err(|source| {
-                            SchLibPatchError::Intent {
-                                index,
-                                field: stringify!($field),
-                                source,
-                            }
-                        })?;
-                        after =
-                            after
-                                .$setter(value)
-                                .map_err(|source| SchLibPatchError::Format {
-                                    context: format!(
-                                        "elaborating {} of component #{index} '{}'",
-                                        stringify!($field),
-                                        before.lib_reference()
-                                    ),
-                                    source,
-                                })?;
-                    }
-                };
-            }
-            property!(description, OPTIONAL_DESCRIPTION, with_description);
-            property!(designator, COMPONENT_DESIGNATOR, with_designator);
-            property!(component_kind, COMPONENT_KIND, with_component_kind);
-            property!(
-                show_hidden_pins,
-                FieldPolicy {
-                    name: "component.show_hidden_pins",
-                    default: Some(|| false),
-                    clear: None,
-                },
-                with_show_hidden_pins
-            );
+            let after = elaborate_component_properties(index, &before, &intent)?;
             if after != before {
-                replacements.push(ComponentReplacement { index, after });
+                edited.push(ComponentReplacement {
+                    index,
+                    before,
+                    after,
+                });
             }
         }
         // Reuse the collection planner's original-index assembly. This scalar
@@ -164,11 +486,11 @@ impl SchLibPatch {
             input.component_count(),
             &altium_spec_lang::intent::CollectionScope::default(),
             CollectionRequest::Partial(
-                replacements
+                edited
                     .into_iter()
                     .map(|replacement| IndexedEdit::Replace {
                         index: replacement.index,
-                        after: replacement.after,
+                        after: replacement,
                     })
                     .collect(),
             ),
@@ -184,10 +506,7 @@ impl SchLibPatch {
         for item in collection.into_items() {
             match item {
                 PlannedItem::Keep { .. } => {} // Preserved by the complete input snapshot.
-                PlannedItem::Replace { index, after } => replacements.push(ComponentReplacement {
-                    index: index.get(),
-                    after,
-                }),
+                PlannedItem::Replace { after, .. } => replacements.push(after),
                 PlannedItem::New { .. } => {
                     return Err(SchLibPatchError::Collection {
                         detail: "component-property patch cannot create a component".into(),
@@ -195,36 +514,166 @@ impl SchLibPatch {
                 }
             }
         }
-        let patch = Self {
-            input: input.clone(),
-            replacements,
-        };
-        patch.resulting_snapshot()?;
-        Ok(patch)
+        Self::finish(input, PendingLibraryEdit::default(), None, replacements)
     }
 
-    pub fn replacements(&self) -> &[ComponentReplacement] {
-        &self.replacements
-    }
-    pub fn is_empty(&self) -> bool {
-        self.replacements.is_empty()
+    /// Builds a patch from typed library-level namespace ops (see
+    /// [`SchLibLibraryOp`]). The whole batch lowers into exactly one
+    /// `SchLibEdit`; the result is computed and validated eagerly.
+    pub fn from_library_ops(
+        input: &SchLibSnapshot,
+        ops: impl IntoIterator<Item = SchLibLibraryOp>,
+    ) -> Result<Self, SchLibPatchError> {
+        let mut pending = PendingLibraryEdit::default();
+        let mut creations: Vec<SchNewComponent> = Vec::new();
+        let mut removal_names: Vec<String> = Vec::new();
+        for (position, op) in ops.into_iter().enumerate() {
+            match op {
+                SchLibLibraryOp::AliasAdd(change) => pending.alias_additions.push(change),
+                SchLibLibraryOp::AliasRemove(change) => pending.alias_removals.push(change),
+                SchLibLibraryOp::ImageAsset(op) => {
+                    op.verify_asset()
+                        .map_err(|source| SchLibPatchError::ImageAsset {
+                            context: format!(
+                                "library op #{position}: verifying the captured image asset input"
+                            ),
+                            source,
+                        })?;
+                    pending.image_asset_ops.push(op);
+                }
+                SchLibLibraryOp::FontAppend(append) => pending.font_appends.push(append),
+                SchLibLibraryOp::ComponentCreate(new) => creations.push(new),
+                SchLibLibraryOp::ComponentRemove { lib_reference } => {
+                    if removal_names.contains(&lib_reference) {
+                        return Err(SchLibPatchError::Elaboration {
+                            context: format!("library op #{position}"),
+                            detail: format!(
+                                "component '{lib_reference}' is removed more than once"
+                            ),
+                        });
+                    }
+                    removal_names.push(lib_reference);
+                }
+            }
+        }
+        if !creations.is_empty() || !removal_names.is_empty() {
+            let names: Vec<&str> = input.component_lib_references().collect();
+            let mut removed = Vec::new();
+            for name in &removal_names {
+                let Some(index) = names.iter().position(|candidate| candidate == name) else {
+                    return Err(SchLibPatchError::Elaboration {
+                        context: "library component removal".into(),
+                        detail: format!("no component '{name}' exists in the input snapshot"),
+                    });
+                };
+                removed.push(SchLibComponentRemoval {
+                    input_index: index,
+                    lib_reference: name.clone(),
+                });
+            }
+            removed.sort_by_key(|removal| removal.input_index);
+            let removed_indices: std::collections::BTreeSet<usize> =
+                removed.iter().map(|removal| removal.input_index).collect();
+            let mut slots: Vec<SchLibPatchSlot> = (0..names.len())
+                .filter(|index| !removed_indices.contains(index))
+                .map(SchLibPatchSlot::Keep)
+                .collect();
+            slots.extend(creations.into_iter().map(SchLibPatchSlot::New));
+            // The explicit ComponentRemove op IS the removal authorization on
+            // this imperative surface (type docs).
+            pending.allow_component_removal = !removed.is_empty();
+            pending.removed_components = removed;
+            pending.component_slots = Some(slots);
+            pending.normalize_component_slots(names.len());
+        }
+        let intermediate = pending.intermediate(input)?;
+        Self::finish(input, pending, intermediate, Vec::new())
     }
 
-    pub fn resulting_snapshot(&self) -> Result<SchLibSnapshot, SchLibPatchError> {
-        self.input
+    /// Definition-scope elaboration of an authored `SchLibIntent` (increment
+    /// E1: keyed collections + library-level ops). See the `elaborate` module
+    /// docs for the complete contract.
+    pub fn from_intent(
+        input: &SchLibSnapshot,
+        intent: &altium_spec_lang::intent::SchLibIntent,
+    ) -> Result<Self, SchLibPatchError> {
+        elaborate::from_intent(input, intent)
+    }
+
+    /// Validates and seals a patch: computes the reviewed result exactly once.
+    fn finish(
+        input: &SchLibSnapshot,
+        pending: PendingLibraryEdit,
+        intermediate: Option<SchLibSnapshot>,
+        replacements: Vec<ComponentReplacement>,
+    ) -> Result<Self, SchLibPatchError> {
+        let base = intermediate.as_ref().unwrap_or(input);
+        let result = base
             .replace_components(
-                self.replacements
+                replacements
                     .iter()
                     .map(|replacement| (replacement.index, replacement.after.clone())),
             )
             .map_err(|source| SchLibPatchError::Format {
-                context: "replacing original component slots in candidate".into(),
+                context: "replacing component slots in the reviewed candidate".into(),
                 source,
-            })
+            })?;
+        Ok(Self {
+            input: input.clone(),
+            result,
+            pending,
+            replacements,
+        })
     }
 
-    /// Execute the captured replacements only after verifying complete typed
-    /// before-state. Build and validate a separate document before swapping it in.
+    // ── Inspection (the exact-indexed-diff foundation; no rendering) ──────
+
+    /// Component content replacements against the final component sequence.
+    pub fn replacements(&self) -> &[ComponentReplacement] {
+        &self.replacements
+    }
+    /// Components the patch creates, in final-sequence order.
+    pub fn created_components(&self) -> impl Iterator<Item = &SchNewComponent> {
+        self.pending
+            .component_slots
+            .iter()
+            .flatten()
+            .filter_map(|slot| match slot {
+                SchLibPatchSlot::New(new) => Some(new),
+                SchLibPatchSlot::Keep(_) => None,
+            })
+    }
+    /// Components the patch removes (complete aggregates), by input slot.
+    pub fn removed_components(&self) -> &[SchLibComponentRemoval] {
+        &self.pending.removed_components
+    }
+    pub fn alias_additions(&self) -> &[SchLibAliasChange] {
+        &self.pending.alias_additions
+    }
+    pub fn alias_removals(&self) -> &[SchLibAliasChange] {
+        &self.pending.alias_removals
+    }
+    pub fn image_asset_ops(&self) -> &[SchLibImageAssetOp] {
+        &self.pending.image_asset_ops
+    }
+    pub fn font_appends(&self) -> &[SchFontAppend] {
+        &self.pending.font_appends
+    }
+    /// Whether the patch changes nothing: no replacements, no component
+    /// membership/order change, no alias/image/font ops.
+    pub fn is_empty(&self) -> bool {
+        self.replacements.is_empty() && self.pending.is_empty()
+    }
+
+    /// The reviewed result snapshot (cached; identical across calls even for
+    /// patches that create components with fresh `UniqueId`s).
+    pub fn resulting_snapshot(&self) -> Result<SchLibSnapshot, SchLibPatchError> {
+        Ok(self.result.clone())
+    }
+
+    /// Execute the reviewed result only after verifying complete typed
+    /// before-state and every captured image-asset input. The result was
+    /// validated at construction; it is materialized before the swap.
     /// This does not write files or implement a durable filesystem transaction.
     pub fn apply_in_memory(&self, target: &mut SchLib) -> Result<(), SchLibPatchError> {
         let actual = target
@@ -236,12 +685,20 @@ impl SchLibPatch {
         if actual != self.input {
             return Err(SchLibPatchError::StaleInput);
         }
-        let candidate = self.resulting_snapshot()?.materialize().map_err(|source| {
-            SchLibPatchError::Format {
+        for (position, op) in self.pending.image_asset_ops.iter().enumerate() {
+            op.verify_asset()
+                .map_err(|source| SchLibPatchError::ImageAsset {
+                    context: format!("verifying image asset op #{position} input before apply"),
+                    source,
+                })?;
+        }
+        let candidate = self
+            .result
+            .materialize()
+            .map_err(|source| SchLibPatchError::Format {
                 context: "materializing complete SchLib patch result".into(),
                 source,
-            }
-        })?;
+            })?;
         *target = candidate;
         Ok(())
     }
@@ -272,6 +729,17 @@ mod tests {
         assert_eq!(component.component_kind(), ComponentKind::Jumper);
         assert_eq!(component.designator().unwrap(), Some("R?"));
         assert!(component.show_hidden_pins());
+        let changes = patch.replacements()[0].scalar_changes().unwrap();
+        let fields: Vec<&str> = changes.iter().map(|change| change.field).collect();
+        assert_eq!(
+            fields,
+            [
+                "description",
+                "designator",
+                "component_kind",
+                "show_hidden_pins"
+            ]
+        );
         patch.apply_in_memory(&mut doc).unwrap();
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("properties.SchLib");

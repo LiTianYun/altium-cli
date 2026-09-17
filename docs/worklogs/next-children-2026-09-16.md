@@ -1518,3 +1518,375 @@ Post-fix verification (docs + comment-only changes to Rust files):
 `cargo test -p altium-format --lib` 481 passed; `cargo test -p altium-sync`
 18 passed; `cargo check -p altium-cli` clean; `cargo fmt --check` clean;
 corpus gate exit 0 with all checks true on all three fixtures.
+
+## Increment E1 — keyed intent elaboration + library-level ops (implemented, 2026-09-17)
+
+Contract authority: `docs/proposals/snapshot-intent.md` (keyed partial/complete
+alignment, §"Collections"), memo §8a/§8c rule 4, the D1 deferral recorded in
+the D1 findings resolution (item 3), and the B/C-era E obligations that touch
+keyed collections. Positional pins/graphics, parts, layout/auto-size, swap
+fan-out, and image-source graphics remain increment E2 and are clean hard
+errors (below). New module `crates/altium-sync/src/schlib/elaborate.rs`;
+`crates/altium-sync/src/{collection.rs,schlib.rs}` reworked;
+`SchLibSnapshot::component_lib_references()` added in altium-format
+(cheap key access, no aggregate clones).
+
+### Planner class rules (collection.rs)
+
+- `CollectionClass::{Keyed, Positional}` with a total
+  `collection_class(CollectionKind)` mapping (Components/Parts/Parameters/
+  Aliases/Footprints keyed; Pins/Graphics/Maps positional);
+  `CollectionContext::class()` exposes it and error text names it.
+- Partial scope = updates in original slots + appends, for BOTH classes. The
+  single named enforcement point `reject_partial_interior_insert` hard-errors
+  every `Insert` whose boundary is not the append boundary
+  (`PartialInteriorInsert`), citing the contract sentence.
+- INTERPRETATION RECORDED (task wording "interior Insert and sparse selection
+  are hard errors for BOTH classes"): a sparse `Replace` index set is the
+  LEGITIMATE product of keyed matching and of no-op thinning (both classes
+  produce them), so the planner cannot treat Replace-sparsity as an error;
+  the only sparse placements the request shape can express are interior
+  inserts (rejected) and removals. The positional authored-prefix rule
+  ("N entries describe indices 0..N-1") is enforceable only where index
+  provenance is known — the elaboration boundary — and the E1 positional
+  elaborator (footprint maps) produces contiguous prefixes by construction;
+  the pins/graphics elaborators inherit this obligation in E2. Documented in
+  the module docs.
+- DEVIATION RECORDED: `IndexedEdit::Remove` was DELETED, not "activated".
+  The ratified contract leaves it no legal constructor — `delete: allow`
+  requires `mode: complete`, and complete-mode removal is expressed by
+  omission — so partial removal is now inexpressible by construction (the
+  strongest form of the required hard error) instead of a permanently dead
+  enum variant that would keep a build warning alive.
+- New class-specific complete rule: a complete POSITIONAL request must pair
+  item N with original destination N (`PositionalCompleteMisalignment`;
+  snapshot-intent "Positional item N uses original destination N for
+  preserved fields") — substitution-in-place and appends legal, re-pairing
+  (`Keep(0)` at final position 1) rejected. Keyed complete reorders freely.
+- The formerly dead surface (`Insert` appends, `CollectionRequest::Complete`,
+  all of `FinalItem`, `materialize`, `items`, `removed`,
+  `InputLengthChanged`) is now production-consumed by elaboration; all six
+  known dead-code warnings are gone naturally and `cargo build -p
+  altium-sync` is warning-free. No `#[allow(dead_code)]` exists in the crate.
+
+### SchLibPatch library-level ops (the D1 deferral, RESOLVED)
+
+The 2026-09-16 orchestrator decision (D1 findings item 3) obligated E to add
+the sync-side op surface; it now exists:
+
+- `SchLibLibraryOp::{AliasAdd, AliasRemove, ImageAsset(SchLibImageAssetOp::
+  {Insert, Replace, Remove}), FontAppend(SchFontAppend),
+  ComponentCreate(SchNewComponent), ComponentRemove{lib_reference}}` +
+  `SchLibPatch::from_library_ops`. Image payloads are
+  `image_asset::CapturedImageAsset` values — hash/path-verified at
+  construction AND re-verified before every `apply_in_memory` (a tampered
+  bundle blocks apply without mutating the target). `ComponentRemove` is
+  itself the removal authorization on this imperative surface and does NOT
+  auto-release aliases (D1's explicit-release contract; tested); unknown and
+  duplicate removal names are errors.
+- Lowering: every patch application performs exactly ONE
+  `SchLibSnapshot::with_library_edit(SchLibEdit)` (fonts → image ops in
+  relative order → component slots → alias removes-then-adds), then component
+  content replacements against the RESULT (the D1 two-step order).
+  `ComponentReplacement::index` addresses the post-library-edit sequence
+  (documented; equals the input slot when membership/order is unchanged).
+- `SchLibPatch` now caches its reviewed result at construction
+  (`resulting_snapshot()` returns the cache): created components take fresh
+  UniqueIds, so recomputing at apply time would silently diverge from the
+  reviewed state (stability asserted in tests and exercised by the corpus
+  pass). `apply_in_memory` = whole-input `StaleInput` precondition
+  (unchanged) + image-asset re-verification + materialize of the cached
+  result.
+- Inspection surface (exact-indexed-diff foundation, no rendering):
+  `replacements()` (each with `before()`/`after()` snapshots and
+  `scalar_changes()` — Debug-rendered before/after pairs of the four cheap
+  scalars), `created_components()`, `removed_components()`,
+  `alias_additions()`/`alias_removals()`, `image_asset_ops()`,
+  `font_appends()`, `is_empty()` (now covering ALL op kinds, not just
+  replacements).
+
+### Elaboration semantics (`SchLibPatch::from_intent`)
+
+`from_intent(input: &SchLibSnapshot, intent: &SchLibIntent) ->
+Result<SchLibPatch, SchLibPatchError>`; schema_version must equal
+`INTENT_SCHEMA_VERSION`. Definition scope only; `Absent` never writes — on
+matched AND on created components (a created Blank keeps its factory shape
+wherever the intent is silent, including its Comment parameter, which is a
+real keyed destination entry for the created component's parameters
+collection).
+
+- **Components**: keyed by exact `lib_reference`; authored scope enforced by
+  the planner (partial = update matched in slot + append-create in source
+  order, omission preserves; complete = final membership/order, omission
+  removes only under `delete: allow`, lowered to the D1 removal with the
+  authorization flag). Renames are never inferred. A removed component's
+  aliases are released in the same library edit (the removal authorization
+  covers the aggregate; without this, aliased-component removal would be
+  inexpressible). Duplicate authored names block; the destination-side check
+  exists defensively (library invariants already forbid duplicate lib_refs).
+- **Scalars**: the four existing properties via their FieldPolicies through
+  the extracted shared `elaborate_component_properties` (the `property!`
+  elaboration `component_properties` also uses).
+- **Parameters**: keyed CASE-INSENSITIVELY — investigated and resolved:
+  AD26's `SchDataContainer.GetParameterByName` compares with
+  `StringComparison.OrdinalIgnoreCase` (SchDataContainer.cs:633-647), so two
+  case-variant names are ONE native parameter; our fold is per-char simple
+  uppercase (ordinal, no locale). The AUTHORED spelling is written on update
+  (a real byte edit that re-elaborates to a no-op) — this holds for a BARE
+  mention authoring no fields at all: a case-variant bare mention is a
+  rename (idempotent, reviewable via `replacements()`, never silently
+  ignored), so mirror-intent generators must emit destination spellings
+  (recorded consequence; findings resolution below). Unauthored
+  text/is_hidden preserve the destination on update and resolve
+  `definition()` defaults on creation (text clear/default = empty string per
+  the PARAMETER_TEXT registry). Elaborated-equal ⇒ no edit (partial) / Keep
+  (complete).
+- **Aliases**: keyed by exact string; partial appends unmatched entries;
+  complete defines membership with removals under allow. RECORDED
+  LIMITATION: authored ORDER is honored only as append order — surviving
+  aliases keep destination order because the D1 op surface splices/appends
+  and AD26 itself stores a sorted SET (alias order carries no native
+  meaning; D1's recorded deviation).
+- **Footprints**: keyed by exact `model_name`; `source:
+  SourceDefinitionRef` is provenance only, never a matching key.
+  `explicit_maps == false` ⇒ `pin_pad_maps: None` (definers preserved
+  verbatim); maps content without an explicit body is an inconsistent-intent
+  error. Explicit maps elaborate POSITIONALLY through the planner (partial =
+  replace indices 0..N-1 + append, tail preserved; complete = final list,
+  shrink under `delete: allow`), materialized against the destination-derived
+  init list via `CollectionPlan::materialize`; a final list equal to the
+  destination collapses back to `None` (no definer rebuild ⇒ wild MapDefiner
+  base state untouched on no-op). RECORDED LIMITATION: `is_current` is not
+  intent-expressible — matched footprints preserve the stored value
+  (value-preserving on the wild zero-current class), a created footprint is
+  current only when the destination PCBLIB collection was empty and it is
+  the first authored one; a complete replacement removing a coherent
+  component's current footprint while keeping or creating others therefore
+  hard-errors in D2's coherence guard (E1 staging restriction: keep the
+  current footprint, or empty the collection first — complete +
+  `delete: allow` with zero authored footprints — and author the new set in
+  a follow-up patch against the then-empty collection; single-patch
+  whole-set replacement is NOT expressible, per the findings resolution
+  below). MULTI-PAD GUARD (findings fix): native MapDefiner records may
+  carry several pads while a pin-pad intent pair expresses exactly one, so
+  an authored maps entry that positionally addresses a multi-pad
+  destination definer is a hard error naming the footprint, position, pin,
+  and pad count — never a silent narrowing to one pad; unaddressed tail
+  definers are preserved with all pads, and complete + `delete: allow` with
+  a shorter authored list removes a multi-pad definer explicitly
+  (authorized deletion).
+- **Component creation**: unmatched names create `SchNewComponent::Blank`
+  with elaborated keyed children (parameters/aliases/footprints) and
+  authored scalars; the sole created footprint is current per the native
+  rule.
+- **Duplicates**: on either side of a MANAGED collection (authored items or
+  an authored scope declaration), duplicate keys under the collection's
+  matching equivalence block with both positions and both spellings
+  reported; unmanaged collections never block on wild duplicates. A
+  destination-side duplicate ALIAS is wild loaded state that no public
+  mutation path can construct (D1 enforces global alias uniqueness), so the
+  destination guard is exercised through the constructible case-variant
+  parameter case; the alias guard stands for wild loads.
+- **E2 staging restrictions**: authored pins (items OR a scope declaration;
+  placement lives inside pins), graphics, parts, or part_count on ANY
+  component intent — matched or created — hard-error naming the component,
+  the offending collection, and increment E2; the created-component message
+  additionally names the creation staging restriction (keyed children only).
+- **No-op detection / replan-empty**: per-field (unauthored preserves), per
+  child (elaborated == destination ⇒ Keep/no edit), per collection
+  (identity plan ⇒ no batch entry), per component (after == before ⇒ no
+  replacement), per patch (`is_empty()`); apply → re-elaborate the same
+  intent is empty, asserted in unit tests and per corpus file.
+- **Errors**: `SchLibPatchError` gained `Spec{context}`,
+  `Elaboration{context, detail}`, `ImageAsset{context}`; every
+  block/mode/duplicate/unsupported error names the owner (`SchLib` /
+  `component 'X'` / `component 'X' footprint 'M'`), the `CollectionKind`,
+  and the index/key — the `CollectionError` rendering carries
+  owner/collection/index exactly like the A2 address vocabulary.
+
+### Test evidence (fixture-free; `crates/altium-sync`)
+
+collection.rs (9): total class mapping; partial update+append with sparse
+Replace legitimacy and repeatability; interior-insert rejection for BOTH
+classes at every interior boundary with the append boundary legal; keyed
+complete free reorder vs positional position-pairing (aligned
+substitution/append pass, three misalignment shapes rejected); equal-value
+keyed reorder keeps distinct slots; complete omission permission +
+partial-cannot-remove; repeated-slot rejection both modes; out-of-range /
+mode-mismatch / input-length-changed context errors; empty-collection
+creation + authorized empty final order.
+
+schlib/elaborate.rs (12): keyed partial parameters update (case-variant key,
+authored spelling wins, unauthored is_hidden preserved) + append +
+save/reopen + replan-empty; complete parameters identity no-op, reorder
+under deny, omission deny-blocks/allow-removes matrix; complete component
+reorder binding content edits to post-library-edit positions (+
+replan-empty); duplicate keys block (destination case-variant parameters
+with both spellings reported, unmanaged pass-through, authored parameter
+dups, authored alias dups, authored component dups); alias add/remove via
+intent (partial append, complete deny-block, complete allow removal
+restoring the input exactly); footprint replace via intent (unaddressed
+definers preserved verbatim, explicit partial maps rebuild index 0 + tail
+preserved, complete maps deny-block/allow-shrink, unmatched-model creation
+non-current beside the stored current, all with save/reopen + replan-empty);
+component create with keyed children (Blank + Comment destination entry,
+alias, sole-current footprint, cached-result stability) + complete remove
+under permission restoring the pre-creation state with alias release +
+deny-block + partial-omission preservation; E2 hard errors
+(pins-items/pins-scope-only/graphics/parts/part_count + created-component
+staging message); full-mirror no-op intent empty for EVERY collection;
+schema-version and inconsistent-maps rejections; multi-pad definer guard
+(addressed positions error with footprint/position/pin/pad-count in both
+modes, unaddressed multi-pad tail survives a prefix rebuild with all pads +
+save/reopen + replan-empty, complete+allow shorter list removes it
+explicitly — findings fix); inconsistent programmatic scopes rejected
+(span-less non-default on components/pins/parameters/nested maps, and
+partial+allow even with a span; span-less partial+deny default stays
+unmanaged — findings fix). from_library_ops (2): one
+edit with verified image assets (font+image+alias+clone; cached result
+stable; tampered bundle blocks apply atomically); explicit alias-aware
+component removal (dangling-alias D1 error at construction,
+unknown/duplicate names, clone→remove restore-to-input).
+
+### Corpus example (intent pass)
+
+`check_schlib_snapshots.rs` gains `intent_pass` from a fresh open, per file:
+(a) programmatic partial `SchLibIntent` setting parameter STEP2E (text +
+is_hidden) on component 0 → `from_intent` → `apply_in_memory` → projection +
+native save/reopen typed equality → re-elaborate the same intent → empty;
+(b) partial append of NEW component STEP2E_PROBE (Blank, one parameter
+STEP2E_P, one alias STEP2E_ALIAS) → apply → projection (name, parameter,
+alias) + save/reopen equality → replan-empty; (c) a COMPLETE components
+intent constructed from the final library minus the probe with
+`delete: allow` → removes exactly the probe (removal list asserted, zero
+replacements) → apply + save/reopen equality → result equals the stage-(a)
+state exactly. New JSON fields enforced in `main()`:
+`intent_parameter_equal`, `intent_parameter_replan_empty`,
+`intent_create_equal`, `intent_create_replan_empty`, `intent_remove_equal`,
+`intent_restore_equal`.
+
+### Verification (all default suites, fixture-free; re-run after the
+findings fix pass, 2026-09-17)
+
+- `cargo test -p altium-format --lib` — 481 passed, 0 failed.
+- `cargo test -p altium-sync` — 35 passed, 0 failed; `cargo build -p
+  altium-sync` — ZERO warnings (the 6 collection.rs dead-code warnings are
+  gone naturally).
+- `cargo test -p altium-spec-lang` — 362 passed, 0 failed.
+- `cargo test -p altium-format-spec` — 168 passed, 0 failed.
+- `cargo check -p altium-cli` — clean.
+- `cargo fmt --check -p altium-format -p altium-sync` — clean.
+- Corpus gate: all checks — incl. the six intent fields — true for
+  lucashudson-Connectors (56), ICs (32), arthurbenemann-STM32F4 (135);
+  exit 0.
+
+### Known items deferred / flagged out of E1
+
+- E2 owns: positional pins/graphics elaboration (incl. the B/C obligation to
+  resolve per-owner-part positional addresses through the
+  owner_group-filtered → full-projection mapping with a multi-part test),
+  parts/part_count, layout/auto-size wiring, swap fan-out, image-source
+  graphics through the memo §8c rule-4 asset ops, the positional
+  authored-prefix (0..N-1) enforcement at the pins/graphics elaboration
+  boundary, and the complete-scope block on collections containing
+  intent-unrepresentable graphic kinds.
+- `is_current` authoring (an intent axis or an explicit resolution op) and
+  alias ORDER authoring remain unsupported (recorded limitations above).
+  E2 candidate (findings item 4): extend the created-footprint
+  `first_new_is_current` rule to fire when no SURVIVING original footprint
+  is current (not only on an empty destination), which would make
+  single-patch whole-set footprint replacement expressible.
+- Multi-pad pin-pad definers are intent-unrepresentable (hard-errored when
+  addressed, per the guard above); a multi-pad intent axis is a candidate
+  E2/F extension.
+- The `"|&|"` constant promotion, `current_part_id` resolve op, and
+  Additional-pin freeze items are unchanged.
+
+## Increment E1 — review findings resolution (2026-09-17)
+
+Independent review returned 9 findings (1 major, 8 minor; two were the same
+worklog sentence). Each was verified against code before acting; fixes
+re-verified by the full default suites + corpus gate (all green, recorded in
+the Verification section above, now reflecting the post-fix state).
+
+1. **[MAJOR — FIXED] Multi-pad pin-pad definers silently narrowed by
+   authored map pairs.** Confirmed: `SchPinPadMapView.pads` documents that
+   native files may carry several pads per definer
+   (`crates/altium-format/src/schlib/snapshot/views.rs`), while
+   `authored_map_init` builds a single-pad init, so an authored maps entry
+   pairing with a multi-pad destination position always compared unequal
+   and became a Replace that dropped the extra pads without diagnostic.
+   Fixed in `elaborate_maps` (`crates/altium-sync/src/schlib/elaborate.rs`):
+   any authored position that pairs with a destination definer whose
+   `pads.len() > 1` now hard-errors (both modes) naming the footprint,
+   position, pin, and pad count, and pointing at the two legal routes
+   (leave the position unaddressed, or remove the definer explicitly via
+   complete + `delete: allow` with a shorter list — authorized deletion is
+   not a silent drop, so removal stays legal). Module docs + the footprints
+   bullet above record the rule beside the Symbol/Hyperlink analogue; new
+   test `multi_pad_definers_block_addressing_but_survive_unaddressed_tails`
+   covers error (both modes), full-pad tail preservation through a prefix
+   rebuild (save/reopen + replan-empty), and explicit shrink-removal.
+2. **[FIXED] Inconsistent programmatic `CollectionScope` silently ignored.**
+   Confirmed: `managed()` keyed off `span` alone, so a hand-built scope
+   like `{mode: complete, delete: allow, span: None}` with no items was
+   silently dropped by elaborate_parameters/aliases/footprints AND bypassed
+   the E2 rejection for pins/graphics/parts; a span-less non-default maps
+   scope under `explicit_maps: false` likewise slipped past the
+   inconsistent-FootprintIntent check. Fixed: new `validate_scope` walk at
+   the `from_intent` boundary over the whole authored tree (components,
+   all six per-component collections, nested footprint maps) hard-errors
+   on (a) non-default mode/delete without a declaration span and (b) the
+   contract-illegal `partial` + `delete: allow` combination even WITH a
+   span (snapshot-intent: only `mode: complete` legalizes allow). Nested
+   part-item collections need no walk (authored parts items are an E2 hard
+   error already). The planner itself intentionally keeps tolerating
+   partial+allow defensively (its test asserts allow alone never deletes
+   under partial); the boundary check makes the combination unreachable
+   from intents. New test
+   `inconsistent_programmatic_scopes_are_rejected_not_dropped`.
+3. **[FIXED — docs] Worklog `is_current` recovery advice claimed the
+   impossible "or replace the whole set" (two findings).** Confirmed by
+   code: `first_new_is_current = views.is_empty()` fires only on an EMPTY
+   destination collection, so a single complete patch replacing every
+   footprint creates all-new entries non-current and D2's coherence guard
+   hard-errors (0 currents from a coherent input). The worklog sentence was
+   corrected to the actually available routes: keep the current footprint,
+   or empty the collection (complete + allow, zero entries) and author the
+   new set in a follow-up patch; the elaborate.rs module docs now carry the
+   same two-patch route. The E2 candidate extension (fire the rule when no
+   SURVIVING original is current) is recorded in the deferred list.
+4. **[RECORDED] Bare case-variant parameter mention is a rename.**
+   Confirmed: an item authoring NO fields still writes its authored
+   spelling, so a case-variant bare mention renames the destination
+   parameter (idempotent, reviewable, fail-safe). DECISION: keep the
+   behavior — silently adopting the destination spelling would drop
+   authored bytes, the worse violation under this increment's no-silent-
+   drop rule; the consequence (mirror generators must emit destination
+   spellings) is now explicit in the module docs and the parameters bullet
+   above, and belongs in the increment-F contract amendment.
+5. **[RECORDED → F] Parameter case-insensitive keying deviates from the
+   ratified proposal sentence ("exact parent-scoped natural keys").**
+   The deviation stands on native evidence; the AD26 citation was
+   RE-VERIFIED during this fix pass on this machine:
+   `GetParameterByName` compares with `string.Equals(..,
+   (StringComparison)5)` (= OrdinalIgnoreCase),
+   `Altium.Sch.DataModel.Objects/SchDataContainer.cs` (decompiled tree at
+   `~/projects/old-altium-cli/AD26-dotnet`; the in-repo `./AD26-dotnet`
+   path does not exist on this checkout). Increment F must amend
+   snapshot-intent.md's key contract with the parameter exception + this
+   citation.
+6. **[RECORDED → F] Alias reorder is membership-only against the
+   "surviving keyed entries take source order" contract sentence.**
+   A reorder-only complete alias intent elaborates to an empty patch.
+   Kept as-is: AD26 stores aliases as a sorted SET, so alias order is not
+   part of the native state space and cannot be honored; erroring on
+   reorder-only listings would break snapshot-derived mirror intents for
+   no data-integrity gain. Increment F must amend the contract sentence
+   with the alias membership-only exception (recorded limitation above).
+7. **[FIXED — docs] Count inaccuracies.** collection.rs has 9 tests (was
+   recorded as 8 — corrected above); elaborate.rs had 12 tests/1923 lines
+   before this fix pass (now 14 tests), matching the reviewer's counts;
+   `component_lib_references` sits at snapshot.rs:112-120. No code impact;
+   the implementer report's cargo/corpus lines were re-executed post-fix
+   and are superseded by the Verification section above.
