@@ -119,6 +119,16 @@ impl SchLibSnapshot {
             .map(|component| component.lib_ref.as_str())
     }
 
+    /// Stored image resources (name + complete asset body) in store order —
+    /// the snapshot analogue of [`SchLib::image_resources`], exposed so
+    /// planners can pair authored asset references against the captured store
+    /// and detect no-op replacements without materializing the document.
+    pub fn image_assets(
+        &self,
+    ) -> impl ExactSizeIterator<Item = crate::api::ImageResource<'_>> + DoubleEndedIterator {
+        self.library.image_resources()
+    }
+
     /// Returns a complete aggregate by position in this immutable snapshot.
     pub fn component(&self, index: usize) -> Result<SchLibComponentSnapshot> {
         let component = self.library.components.get(index).ok_or_else(|| {

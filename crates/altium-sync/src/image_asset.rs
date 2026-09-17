@@ -46,34 +46,42 @@ pub struct CapturedImageAsset {
     bytes: Vec<u8>,
 }
 
+/// Resolves the on-disk path an authored image source requests, relative to
+/// its declaring spec file. Pure path arithmetic — no filesystem access — so
+/// elaboration can key captured assets by the same path capture uses without
+/// performing I/O itself.
+pub fn requested_bundle_path(source: &ImageAssetSource) -> Result<PathBuf, ImageAssetError> {
+    let origin =
+        source
+            .declaring_source
+            .as_ref()
+            .ok_or_else(|| ImageAssetError::MissingOrigin {
+                asset: source.path.clone(),
+            })?;
+    if !origin.is_absolute() {
+        return Err(ImageAssetError::RelativeOrigin {
+            asset: source.path.clone(),
+            origin: origin.clone(),
+        });
+    }
+    let path = Path::new(&source.path);
+    if path.extension().and_then(|extension| extension.to_str()) != Some("altium-image") {
+        return Err(ImageAssetError::InvalidPath {
+            path: path.to_owned(),
+        });
+    }
+    let parent = origin
+        .parent()
+        .ok_or_else(|| ImageAssetError::RelativeOrigin {
+            asset: source.path.clone(),
+            origin: origin.clone(),
+        })?;
+    Ok(parent.join(path))
+}
+
 impl CapturedImageAsset {
     pub fn capture(source: &ImageAssetSource) -> Result<Self, ImageAssetError> {
-        let origin =
-            source
-                .declaring_source
-                .as_ref()
-                .ok_or_else(|| ImageAssetError::MissingOrigin {
-                    asset: source.path.clone(),
-                })?;
-        if !origin.is_absolute() {
-            return Err(ImageAssetError::RelativeOrigin {
-                asset: source.path.clone(),
-                origin: origin.clone(),
-            });
-        }
-        let path = Path::new(&source.path);
-        if path.extension().and_then(|extension| extension.to_str()) != Some("altium-image") {
-            return Err(ImageAssetError::InvalidPath {
-                path: path.to_owned(),
-            });
-        }
-        let parent = origin
-            .parent()
-            .ok_or_else(|| ImageAssetError::RelativeOrigin {
-                asset: source.path.clone(),
-                origin: origin.clone(),
-            })?;
-        let requested_path = parent.join(path);
+        let requested_path = requested_bundle_path(source)?;
         let canonical_path = canonicalize(&requested_path)?;
         let bytes = read(&canonical_path)?;
         let content_hash = *blake3::hash(&bytes).as_bytes();

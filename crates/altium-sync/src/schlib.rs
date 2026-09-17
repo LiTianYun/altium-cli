@@ -12,13 +12,17 @@
 //!   create ([`SchNewComponent::Blank`]/[`SchNewComponent::CloneOf`]) /
 //!   remove. Ops lower to exactly ONE [`SchLibEdit`] per patch application
 //!   through `SchLibSnapshot::with_library_edit`.
-//! - [`SchLibPatch::from_intent`] — definition-scope elaboration of a
-//!   [`altium_spec_lang::intent::SchLibIntent`] over the KEYED collections
+//! - [`SchLibPatch::from_intent`] / [`SchLibPatch::from_intent_with_assets`]
+//!   — definition-scope elaboration of a
+//!   [`altium_spec_lang::intent::SchLibIntent`]: keyed collections
 //!   (components, parameters, aliases, footprints incl. their positional
-//!   pin-pad maps) plus the library ops above; see the `elaborate` module
-//!   docs for the exact keyed contract. Positional pins/graphics, parts,
-//!   part_count, layout, swap fan-out, and image-source graphics are
-//!   increment-E2 content and hard-error with context.
+//!   pin-pad maps), positional per-owner-group pins/graphics with layout and
+//!   auto-size evaluation, parts structure (growth, complete-scope trailing
+//!   shrink with the typed [`SchLibPartsShrink`] report), part swap-group
+//!   fan-out, and image-source graphics resolved against caller-captured
+//!   assets ([`SchLibIntentAssets`]; elaboration performs no filesystem
+//!   reads), plus the library ops above; see the `elaborate` and
+//!   `positional` module docs for the exact contracts.
 //!
 //! Application order (the D1 two-step composition): the library-level
 //! namespace transition applies FIRST as one `SchLibEdit`; component content
@@ -34,6 +38,9 @@
 //! exactly the cached result after verifying the whole-input `StaleInput`
 //! precondition and the captured image-asset inputs.
 mod elaborate;
+mod positional;
+
+use std::path::{Path, PathBuf};
 
 use crate::collection::{
     CollectionContext, CollectionRequest, IndexedEdit, PlannedItem, plan_collection,
@@ -42,8 +49,9 @@ use crate::image_asset::{CapturedImageAsset, ImageAssetError};
 use altium_format::{
     SchLib,
     api::{
-        SchAliasOp, SchFontAppend, SchImageAssetEdit, SchLibComponentEdit, SchLibComponentSnapshot,
-        SchLibEdit, SchLibSnapshot, SchNewComponent,
+        SchAliasOp, SchCurrentPartIdAdjustment, SchFontAppend, SchImageAssetEdit,
+        SchLibComponentEdit, SchLibComponentSnapshot, SchLibEdit, SchLibSnapshot, SchNewComponent,
+        SchRemovedPartChild,
     },
 };
 use altium_format_types::ComponentKind;
@@ -245,6 +253,63 @@ pub struct SchLibComponentRemoval {
     pub lib_reference: String,
 }
 
+/// One component's trailing part-slot shrink performed by an intent's
+/// complete parts scope with `delete: allow`, surfaced for inspection: the
+/// removed slots, every deleted descendant record, and the memo-§3-rule-4
+/// `current_part_id` decrement when one occurred (never a silent clamp).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SchLibPartsShrink {
+    /// The component's `lib_reference`.
+    pub component: String,
+    /// The removed trailing effective slot numbers, ascending.
+    pub removed_parts: Vec<i32>,
+    /// Every deleted child record, in the pre-shrink child encounter order.
+    pub deleted_children: Vec<SchRemovedPartChild>,
+    /// The reported `current_part_id` adjustment, when the stored value was
+    /// above 1 (the native `DeletePart` decrement).
+    pub current_part_id_adjustment: Option<SchCurrentPartIdAdjustment>,
+}
+
+/// Caller-captured image-asset bundles for intent elaboration, keyed by the
+/// REQUESTED bundle path (declaring source's directory joined with the
+/// authored relative path — the same pure path arithmetic
+/// [`crate::image_asset::requested_bundle_path`] and capture use).
+/// Elaboration never sources bundle bytes from the filesystem — the captured
+/// bytes are authoritative, and an authored image source whose requested
+/// path has no entry here blocks with context — but it DOES re-verify each
+/// required capture's path resolution and content hash against disk
+/// ([`CapturedImageAsset::verify_unchanged`]), so bundles must still exist
+/// unchanged at plan time.
+#[derive(Debug, Clone, Default)]
+pub struct SchLibIntentAssets {
+    by_requested_path: std::collections::BTreeMap<PathBuf, CapturedImageAsset>,
+}
+
+impl SchLibIntentAssets {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers a captured bundle under its requested path, returning any
+    /// previously registered capture for the same path.
+    pub fn insert(&mut self, asset: CapturedImageAsset) -> Option<CapturedImageAsset> {
+        self.by_requested_path
+            .insert(asset.requested_path().to_owned(), asset)
+    }
+
+    pub fn get(&self, requested_path: &Path) -> Option<&CapturedImageAsset> {
+        self.by_requested_path.get(requested_path)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_requested_path.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_requested_path.len()
+    }
+}
+
 /// One typed library-level op for [`SchLibPatch::from_library_ops`] (the D1
 /// deferral surface). Ops apply in the D1 `SchLibEdit` order — font appends,
 /// image-asset ops (in the given relative order), component slots, alias
@@ -427,6 +492,7 @@ pub struct SchLibPatch {
     result: SchLibSnapshot,
     pending: PendingLibraryEdit,
     replacements: Vec<ComponentReplacement>,
+    parts_shrinks: Vec<SchLibPartsShrink>,
 }
 
 impl SchLibPatch {
@@ -514,7 +580,13 @@ impl SchLibPatch {
                 }
             }
         }
-        Self::finish(input, PendingLibraryEdit::default(), None, replacements)
+        Self::finish(
+            input,
+            PendingLibraryEdit::default(),
+            None,
+            replacements,
+            Vec::new(),
+        )
     }
 
     /// Builds a patch from typed library-level namespace ops (see
@@ -587,17 +659,30 @@ impl SchLibPatch {
             pending.normalize_component_slots(names.len());
         }
         let intermediate = pending.intermediate(input)?;
-        Self::finish(input, pending, intermediate, Vec::new())
+        Self::finish(input, pending, intermediate, Vec::new(), Vec::new())
     }
 
-    /// Definition-scope elaboration of an authored `SchLibIntent` (increment
-    /// E1: keyed collections + library-level ops). See the `elaborate` module
-    /// docs for the complete contract.
+    /// Definition-scope elaboration of an authored `SchLibIntent` with no
+    /// captured image assets: an authored image `source:` blocks. See
+    /// [`Self::from_intent_with_assets`].
     pub fn from_intent(
         input: &SchLibSnapshot,
         intent: &altium_spec_lang::intent::SchLibIntent,
     ) -> Result<Self, SchLibPatchError> {
-        elaborate::from_intent(input, intent)
+        elaborate::from_intent(input, intent, &SchLibIntentAssets::default())
+    }
+
+    /// Definition-scope elaboration of an authored `SchLibIntent` (keyed
+    /// collections, positional per-owner-group pins/graphics, parts, layout,
+    /// swap fan-out, library-level ops) resolving authored image sources
+    /// against caller-captured bundles. See the `elaborate` and `positional`
+    /// module docs for the complete contract.
+    pub fn from_intent_with_assets(
+        input: &SchLibSnapshot,
+        intent: &altium_spec_lang::intent::SchLibIntent,
+        assets: &SchLibIntentAssets,
+    ) -> Result<Self, SchLibPatchError> {
+        elaborate::from_intent(input, intent, assets)
     }
 
     /// Validates and seals a patch: computes the reviewed result exactly once.
@@ -606,6 +691,7 @@ impl SchLibPatch {
         pending: PendingLibraryEdit,
         intermediate: Option<SchLibSnapshot>,
         replacements: Vec<ComponentReplacement>,
+        parts_shrinks: Vec<SchLibPartsShrink>,
     ) -> Result<Self, SchLibPatchError> {
         let base = intermediate.as_ref().unwrap_or(input);
         let result = base
@@ -623,6 +709,7 @@ impl SchLibPatch {
             result,
             pending,
             replacements,
+            parts_shrinks,
         })
     }
 
@@ -658,6 +745,11 @@ impl SchLibPatch {
     }
     pub fn font_appends(&self) -> &[SchFontAppend] {
         &self.pending.font_appends
+    }
+    /// Trailing part-slot shrinks performed by intent parts scopes, with the
+    /// deleted descendants and any `current_part_id` adjustment expanded.
+    pub fn parts_shrinks(&self) -> &[SchLibPartsShrink] {
+        &self.parts_shrinks
     }
     /// Whether the patch changes nothing: no replacements, no component
     /// membership/order change, no alias/image/font ops.

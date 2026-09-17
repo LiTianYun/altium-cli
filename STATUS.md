@@ -333,9 +333,7 @@ intent must be self-consistent: non-default mode/delete without a
 declaration span, or partial+`delete: allow` (contract-illegal), hard-error
 at the `from_intent` boundary instead of being silently dropped. Duplicate keys on either side of a managed
 collection block with both locations; unmanaged collections never touch wild
-duplicates. E2 content (pins/graphics incl. placement, parts, part_count,
-swap fan-out, image-source graphics) hard-errors naming the component and
-the staging restriction, on created components too. Application order is the
+duplicates. Application order is the
 D1 two-step: one library edit first, then component content replacements
 captured against its result (replacement indices address the
 post-library-edit sequence). Inspection surface: replacements with
@@ -352,6 +350,71 @@ replan-empty; partial append of Blank STEP2E_PROBE with one parameter and one
 alias, replan-empty; COMPLETE components intent built from the final library
 minus the probe with delete:allow removing exactly the probe and restoring
 the pre-probe state) — all checks true on all three gate libraries, exit 0.
+Step-2 increment E2 (2026-09-17) completed `SchLibIntent` elaboration
+(`crates/altium-sync/src/schlib/positional.rs` + the reworked `elaborate.rs`;
+the E1 staging errors are gone, created components included). Pins/graphics
+elaborate POSITIONALLY per owner group (memo §1/§2): `part N` → Part(N);
+component scope → Part(1) single-part / SharedPins(0) multi-part for pins
+(matched components crossing the single/multi boundary while managing
+component-scope pins hard-error; created components map by resulting count)
+and Part(1)-or-hard-error for graphics (no shared graphics owner exists
+natively). Authored item K addresses FILTERED index K of its group (the
+recorded B/C filtered→full mapping obligation, resolved with a multi-part
+isolation test); partial scope updates the prefix + appends overflow with
+owner forced to the group (append order: component scope, then parts
+ascending); complete scope defines THAT group's membership/order only —
+every other group, and the structurally unaddressable
+PartIndependent/OutOfRange/owner-0-graphic owners, preserve verbatim.
+Unrepresentable graphic KINDS (Symbol/Hyperlink/other) block a complete
+scope always and a partial scope only when addressed (tail fine); cross-kind
+positional replacement blocks naming both kinds. Pin fields elaborate
+through their policies (location via `resolve_pin_location` with independent
+x/y axis preservation; hidden_net_name is stored-or-empty — an unsatisfiable
+Set hard-errors with the C rationale; swap halves per memo §5 rule 3 —
+unauthored prefixes stay byte-verbatim). `inherit` on a native
+pin/graphic/part field hard-errors citing step-7 SchDoc scope (layout
+metadata keeps its documented inherit≡reset defaults). Parts: `part_count`
+through its contextual policy; partial growth = max(destination, highest
+authored); complete scope re-checks the contiguous 1..=n prefix, agreement,
+≥1 slot, and lowers trailing shrink to `with_parts_removed` under
+delete:allow with the typed report surfaced via
+`SchLibPatch::parts_shrinks()` (removed slots, deleted descendants,
+current_part_id adjustment). `PartIntent::part_swap_group` fans out over the
+FINAL sequence's non-owner-0 pins of that part (destination `parts()` Mixed
+projection blocks; contradicting pin-level authoring blocks; equal stored
+prefixes stay byte-verbatim). Pin placements and auto-sized boxes evaluate
+per owner through `evaluate_layout` with effective geometry
+authored-else-destination-else-default; component-owner geometry feeds part
+units; outputs override pin location/orientation and box corners before
+no-op comparison (fixed point on re-elaboration). Image graphics with
+authored `source:` resolve caller-captured bundles via the new
+`SchLibIntentAssets` provider (`from_intent_with_assets`; `from_intent` =
+empty provider; elaboration never sources bundle bytes from the filesystem —
+a missing capture blocks and the captured bytes are authoritative — but it
+re-verifies each required capture's path resolution and hash against disk
+via `verify_unchanged`, so bundles must still exist unchanged at plan time),
+lower to whole-resource insert/replace ops in the SAME library edit
+that precedes component content (resource name = authored file_name else the
+addressed destination image's stored name, never a basename derivation;
+stored-payload equality skips the op for replan-empty; conflicting bodies
+for one resolved pairing target block — the target, exact-then-
+case-insensitive against the stored assets else the case-folded new-insert
+name, is the resource identity, so case-variant spellings of one slot can
+never emit self-overwriting duplicate ops; clear/reset never deletes
+assets), and
+`SchLibSnapshot::image_assets()` (altium-format) exposes the stored
+name+payload store for that pairing.
+E2 validation (post-review, 2026-09-17): 481 format, 54 sync, 362
+spec-lang, 168 format-spec tests pass; the CLI checks;
+altium-sync builds with zero warnings; `cargo fmt --check` clean; the corpus
+gate adds an intent-E2 pass per file (positional partial pin rename of
+component 0's first pin through its owner group with exact restore;
+part-block graphic add + complete-scope removal on the first eligible
+multi-part component — ICs and STM32F4 run it, Connectors records
+skipped=1 with no multi-part components; part growth with a probe pin in
+the new slot + complete-parts removal with the shrink report asserted
+through patch inspection) — all checks true on all three gate libraries,
+exit 0.
 Full image codecs were removed from the gate by the user's 2026-09-05 scope change.
 Graphic field policies now cover all 13 kinds against the existing typed Rust
 API/creation defaults, including optional arc endpoints and named PenWidth values.

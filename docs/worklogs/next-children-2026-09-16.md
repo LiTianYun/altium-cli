@@ -262,7 +262,14 @@ Contract authority: memo §1/§2/§4/§6/§8 (cited as "memo §N"). New module
   INCREMENT E: sync-side per-owner-part positional addresses MUST be resolved
   through the owner_group-filtered → full-projection mapping (the views'
   `owner_group` field gives the injective mapping), with a test proving the
-  mapping on a multi-part component.
+  mapping on a multi-part component. **RESOLVED by increment E2
+  (2026-09-17):** `crates/altium-sync/src/schlib/positional.rs` resolves
+  every positional pin/graphic address through exactly that mapping, proven
+  on one multi-part component across two tests:
+  `multi_part_positional_edits_touch_only_their_group` (part-2 and shared
+  owner-0 group edits, part 1 asserted untouched by fingerprint) and
+  `complete_scope_defines_only_its_group` (a part-1 complete-scope edit,
+  parts 2 and shared asserted untouched); see the E2 section below.
 - Rejections (all hard errors with component/collection/index context):
   duplicate references to one original slot (Keep+Keep, Keep+Replace, …);
   out-of-range indices; omission without `allow_deletion` (message lists the
@@ -1790,6 +1797,10 @@ findings fix pass, 2026-09-17)
   authored-prefix (0..N-1) enforcement at the pins/graphics elaboration
   boundary, and the complete-scope block on collections containing
   intent-unrepresentable graphic kinds.
+  **RESOLVED by increment E2 (2026-09-17): all of the above landed — see
+  the E2 section below. The E1 staging errors (pins/graphics/parts/
+  part_count rejection, the created-component keyed-children-only
+  restriction) are removed.**
 - `is_current` authoring (an intent axis or an explicit resolution op) and
   alias ORDER authoring remain unsupported (recorded limitations above).
   E2 candidate (findings item 4): extend the created-footprint
@@ -1890,3 +1901,390 @@ the Verification section above, now reflecting the post-fix state).
    `component_lib_references` sits at snapshot.rs:112-120. No code impact;
    the implementer report's cargo/corpus lines were re-executed post-fix
    and are superseded by the Verification section above.
+
+## Increment E2 — positional elaboration, parts, layout, swap fan-out, image sources (implemented, 2026-09-17)
+
+Contract authority: memo §1/§2/§3/§5/§8c, `docs/proposals/snapshot-intent.md`
+§145-155/§176-216 (positional alignment, parts projection, per-owner-part
+scoping), `docs/proposals/typed-image-resources.md` (asset import contract),
+and the B/C/E1 recorded obligations. New module
+`crates/altium-sync/src/schlib/positional.rs`; `elaborate.rs` reworked
+(the E1 staging errors are GONE — created components elaborate everything);
+`schlib.rs` gains `SchLibIntentAssets`, `SchLibPartsShrink`,
+`SchLibPatch::{from_intent_with_assets, parts_shrinks}`;
+`image_asset.rs` gains the pure `requested_bundle_path`;
+altium-format gains `SchLibSnapshot::image_assets()` (the snapshot analogue
+of `SchLib::image_resources`, for asset pairing and no-op detection).
+
+### Owner-group scoping (deliverable 1; resolves the B/C obligation)
+
+- Positional pins/graphics align WITHIN one owner group's filtered
+  projection. Scope → group mapping (memo §1/§2): `part N` → `Part(N)`;
+  component-scope pins → `Part(1)` single-part / `SharedPins(0)` multi-part;
+  component-scope graphics → `Part(1)` single-part, HARD ERROR on a
+  multi-part component ("no shared graphics owner exists natively; author
+  the graphic inside a part block").
+- The filtered→full mapping is the group's member-index list over the full
+  A2 projection (injective by construction); matching is by RAW owner id so
+  a pre-growth projection (`OutOfRange(3)` under the old count) selects the
+  same members `Part(3)` selects after growth (the C reclassification rule).
+- Partial scope: authored item K addresses filtered index K; the tail is
+  preserved; overflow items append with owner FORCED to the group's id.
+  Appends land after every surviving full-projection slot, in owner-unit
+  order (component scope first, then parts ascending) — recorded decision.
+- Complete scope: final membership/order of THAT group only; members of all
+  other groups keep their slots verbatim. The planner's positional
+  complete-pairing rule (item N ↔ original N) applies per group.
+- DESIGN DECISION (recorded): a MATCHED component whose intent changes the
+  effective count across the single/multi boundary while managing
+  component-scope pins hard-errors — the group mapping would silently
+  retarget the authored items between `Part(1)` and `SharedPins`
+  mid-patch. CREATED components map by the resulting count alone (no
+  existing pins can be retargeted). Similarly, two scopes addressing one
+  group (component scope + `part 1` on a single-part component) hard-error.
+- CONSEQUENCE (recorded): owner-0 SHARED pins on a SINGLE-part component
+  are unaddressable by any scope (component scope means Part(1) there, per
+  the memo §1 mapping) — preserved-only until a dedicated address form
+  exists. The corpus pass records such components as skipped, never
+  silently.
+- Blocking matrix: `PartIndependent`/`OutOfRange` owners and owner-0
+  graphics can NEVER appear inside a targetable group's filtered projection
+  (classification puts them in their own groups), so their preservation is
+  structural — asserted in unit tests. The reachable
+  intent-unrepresentable members are graphic KINDS (Symbol/Hyperlink/
+  other): complete scope over a group containing one always blocks; partial
+  blocks only when the authored prefix would ADDRESS one (tail preservation
+  is fine); cross-kind positional replacement blocks naming both kinds.
+  The matrix is tested against synthetic `SchGraphicView` values (public
+  fields) because no public MUTATION path can create such members — the
+  A2/B mutation boundary rejects owner-0/out-of-range/unrepresentable
+  creation, so the integrated path cannot construct the fixture; recorded
+  justification.
+
+### Field semantics (deliverable 2)
+
+- Every `PinIntent` axis elaborates through its policy: name, electrical,
+  length (COORD policy), location via `resolve_pin_location` with
+  `PinLocationContext::Definition` (independent x/y axis preservation
+  included — tested), orientation, is_hidden, designator text (always
+  authored; positional alignment never matches on it).
+- `hidden_net_name`: the elaborated value must satisfy the format's C
+  restriction (stored-or-empty). An unsatisfiable `Set` hard-errors at
+  elaboration with the C rationale (binary pin body carries no hidden-net
+  field; the pin-owned Parameter storage form is preserved-only).
+- Swap fields per memo §5 rule 3: `swap_group` (SwapIdPin) and
+  `pair_swap_group` (PairSwapID) are plain policy fields;
+  `part_swap_group` authored ⇒ the combined-string PREFIX half is addressed
+  (`Some(value)`, suffix `None` = preserved through the split, re-encoded
+  per the native rule); unauthored ⇒ both halves `None` and the stored
+  combined string stays byte-verbatim (wild encodings included).
+- `inherit` on a NATIVE pin/graphic/part field is a hard error citing step
+  7 (SchDoc scope): it resolves against an imported instance base, which
+  definition-scope SchLib elaboration does not have. RECORDED EXCEPTION:
+  layout metadata fields (anchor gap/side/offset, auto-size
+  padding/min_width/min_height) keep the anchors module's documented
+  `inherit ≡ reset ≡ versioned default` resolution — that contract is
+  explicitly stated on `AutoSizeIntent.padding` and predates E2.
+  `part_count` keeps its contextual policy (Inherit/Reset → the resulting
+  authored/preserved count, per `PartCountPolicy`'s documented contract).
+  RECORDED EXCEPTION (E2 review, 2026-09-17): the four COMPONENT SCALARS
+  (`description`/`designator`/`component_kind`/`show_hidden_pins`) also
+  predate E2 and keep their documented E1 behavior — `inherit` counts as
+  authored and resolves through `FieldPolicy::definition`'s `_` arm to the
+  declared definition default (inherit ≡ reset, overwriting the stored
+  value, no error; stated on `SchLibPatch::descriptions`). The step-7
+  "no instance base at definition scope" argument applies to them equally,
+  so whether scalars should adopt the hard error for consistency is an
+  OPEN INCREMENT-F QUESTION; until then the rule above is scoped to native
+  pin/graphic/part fields, not universal.
+- Graphics: per-kind field resolution against `GraphicKind::field_policies`
+  (authored-or-creation → `definition()`; else destination value), with the
+  compile-time inapplicable-property rule re-checked for hand-built intents.
+  `font_id` unauthored ⇒ `None` (B optional semantics: stored id preserved
+  UNVALIDATED on Replace; the native default font resolved on New).
+  RECORDED DECISION: `Absent` font on a NEW Label/TextFrame resolves the
+  ENGINE default (find-only native Times New Roman 10) rather than the
+  intent registry's `FontReference(1)` creation default — the engine rule
+  is the native-faithful one (memo §8a rule 3) and the two coincide on
+  every gate fixture; authored Set/Reset still produce the registry value.
+
+### Parts (deliverable 3)
+
+- `resolve_parts_structure` (pure; also unit-tested directly): partial =
+  resulting effective `max(destination, highest authored part number)`,
+  explicit `part_count` must accommodate it (lowering under partial is an
+  error, proposal §187); complete = authored numbers re-checked as the
+  contiguous prefix `1..=n` (compile's `validate_parts` re-checked cheap),
+  `part_count` must agree, `n ≥ 1`, shrink under `delete: allow` only.
+- Growth lowers to `with_parts_appended` BEFORE the child batch (new-slot
+  owners validate; projections index-stable). Shrink lowers to
+  `with_parts_removed(removed, true)` — the intent's complete+allow IS the
+  descendant-deletion authorization — and the typed report surfaces through
+  `SchLibPatch::parts_shrinks()` (`SchLibPartsShrink { component,
+  removed_parts, deleted_children, current_part_id_adjustment }`). The
+  child batch then resolves against the POST-shrink snapshot (never fused
+  with pre-deletion indices, per the C composition rule).
+- RECORDED LIMITATION: the `Some` current_part_id adjustment case is not
+  publicly constructible (no API raises `current_part_id` above 1), so the
+  sync tests assert the `None` case plus the report shape; the decrement
+  itself is format-tested (parts.rs). The corpus pass asserts whichever
+  case occurs per file through patch inspection.
+- `PartIntent::part_swap_group` fan-out (memo §5 rule 2): over the FINAL
+  pin sequence, every non-owner-0 pin of that part takes the target prefix
+  (suffix preserved); pins already carrying it stay byte-verbatim
+  (untouched slots are never re-encoded); a destination `parts()` `Mixed`
+  projection hard-blocks; a pin-level authored `part_swap_group`
+  contradicting its part's fan-out target hard-errors (equal values
+  compose). Fan-out works with or without a managed pins scope.
+
+### Layout / auto-size (deliverable 4)
+
+Per owner unit (component, then parts ascending), one `evaluate_layout` run
+sees the owner's pin placements and graphic auto-sizes together; effective
+geometry is authored-else-destination-else-registry-default (pin
+length/location/orientation from the already-elaborated inits; box corners
+from the elaborated shapes). Outputs override pin location/orientation and
+box corners BEFORE no-op comparison, so re-elaboration is a fixed point
+(tested). The component unit's evaluated geometry map feeds part units as
+inherited geometry (part pins may anchor on component graphics); when the
+component authors graphics without layout, their boxes are still published.
+Anchoring/coordinate mutual-exclusion errors surface as span-carrying
+`SchLibPatchError::Spec` diagnostics (via `resolve_pin_location` /
+`evaluate_layout`). Imported-base INSTANCE semantics are out of definition
+scope: `from_intent` has no imported-symbol input at all, and the
+`inherit` hard error above closes the per-field trace — instance
+inheritance (including `PinLocationContext::Instance` and cross-artifact
+inherited geometry) lands in step 7 (SchDoc scope). A fix-pass regression:
+an auto-size-only owner (graphics managed, NO pins scope) previously
+panicked on an unwrap; now covered by the second stage of
+`layout_anchor_and_auto_size_evaluate_to_a_fixed_point`.
+
+### Image-asset sources (deliverable 5)
+
+- `from_intent_with_assets(input, intent, &SchLibIntentAssets)` — the
+  provider maps REQUESTED bundle paths (declaring-source dir ⊕ authored
+  relative path, computed by the pure `requested_bundle_path` shared with
+  `CapturedImageAsset::capture`) to captured bundles. Elaboration never
+  SOURCES bundle bytes from the filesystem — the caller/example performs
+  capture and the captured bytes are authoritative — but it DOES touch disk
+  to re-verify each required capture (`verify_unchanged`: canonicalize +
+  read + hash compare), so the bundle must still exist unchanged at plan
+  time; a deleted/retargeted bundle blocks with replan context instead of
+  planning a payload-equality decision on stale bytes. An authored
+  `source:` without a provided capture blocks with the provider named.
+  `from_intent` delegates with an empty provider.
+- A pre-pass (`collect_authored_image_sources` + `collect_image_asset_ops`)
+  resolves each authored source to its storage resource name — the
+  authored `file_name` (non-empty, else error) taking precedence, else the
+  positionally addressed destination image's stored name (never a basename
+  or hash derivation, per the typed-image-resources contract) — then
+  resolves each name to its concrete PAIRING TARGET (exact, then first
+  case-insensitive against the input's stored assets — the native order —
+  else a new-insert slot keyed by the ASCII-case-folded name) and dedupes
+  per target: conflicting bodies for one target block with both contexts
+  and both spellings (the target, not the name spelling, is the resource
+  identity per memo §8c/D1 errata — keying on the exact name string let
+  case-variant spellings of one stored slot emit two self-overwriting
+  Replace ops, silently discarding one body and oscillating on replan;
+  found by the E2 review, fixed 2026-09-17), while the same body authored
+  under any spelling collapses to one op. It re-verifies each required
+  capture (`verify_unchanged`), skips ops whose stored payload already
+  equals the captured bundle (replan-empty), and queues the rest as ordered
+  whole-resource ops on the SAME library edit that precedes component
+  content: `Replace{index, stored name}` for a stored target or
+  `Insert{end, first-authored spelling}` for a new one. The child batch
+  then validates the record's `file_name`/`embed_image` against the
+  intermediate context that already holds the asset (memo §8c rule 4; the
+  D1 two-step folded into one patch).
+- `source` Clear/Reset resolve through the graphic policies to `None` — no
+  asset op, and never an asset deletion (asset removal stays an explicit
+  library op). `embed_image:false` with an effective source re-checks
+  through `validate_effective_asset_source` (span diagnostic).
+
+### Created components (deliverable 6)
+
+Created components elaborate pins/graphics/parts/layout/sources against the
+Blank factory shape exactly like matched ones (destination effective 1); no
+staging restriction remains. Component-scope pins of a created multi-part
+component land shared (owner 0) per the resulting-count mapping and
+re-elaborate as an aligned no-op once matched.
+
+### Test evidence (fixture-free)
+
+positional.rs (2): the synthetic-view unrepresentable matrix
+(complete-always / partial-addressing / partial-tail, plus the structural
+unaddressability of SharedPins/PartIndependent/OutOfRange and the raw-id
+growth equivalence) and the parts resolution matrix (partial growth,
+count accommodation/lowering, duplicate numbers, complete contiguity/
+agreement/≥1/deny-shrink block, complete growth).
+
+elaborate.rs (12 new/replacing the E1 staging test): multi-part isolation
+incl. the shared group (the B/C obligation test); overflow append owner
+forcing (Part(2) + SharedPins, with the recorded append order); complete
+scope defining only its group (deny block + allow removal + other groups
+verbatim); cross-kind block + same-kind recolor; owner-group mapping errors
+(multi-part component graphics, boundary crossing, same-group conflict,
+native-field inherit → step-7); pin axis preservation + unsatisfiable
+hidden_net_name; part growth via intent with children in the new part +
+part_count growth/lowering matrix; complete parts shrink with the report
+asserted through `parts_shrinks()` and exact pristine restore; swap
+fan-out (rewrite, owner-0 exclusion, unanimity no-op replan-empty, Clear,
+Mixed block, pin-level contradiction); layout anchor + auto-size fixed
+point + coordinate-conflict span diagnostic + the pins-scope-less
+auto-size regression; image sources (missing-capture block, Insert on
+first author, payload-equality replan-empty, whole-resource Replace under
+the stored name, Clear never deleting, `captured_image_asset_names`
+projection); created components with pins/graphics/parts (single- and
+multi-part shapes, shared-owner mapping, replan-empty); the positional
+complete-mirror no-op; plus the extended programmatic-scope test (part-item
+scopes walked) and the E1 suites unchanged. Every new path asserts
+apply → save/reopen typed equality → re-elaborate → empty.
+
+### Corpus example (intent E2 pass)
+
+`check_schlib_snapshots.rs` gains `intent_e2_pass` from a fresh open, per
+file: (a) positional partial pin RENAME of component 0's first pin —
+full-projection index 0 is necessarily filtered index 0 of its own group —
+authored through the matching scope (part block for `Part(n)`, component
+scope for a multi-part shared pin; a single-part shared pin records
+`intent_pin_rename_skipped`, never silent), with save/reopen equality,
+replan-empty, and an exact restore to the input snapshot; (b) part-block
+graphic ADD on the first multi-part component whose Part(2) graphics group
+is fully representable (bare mirror items address the existing members, the
+probe rectangle appends), save/reopen equality + replan-empty, then a
+complete-scope removal restoring the pre-add state exactly — Connectors
+records `intent_part_graphic_skipped: 1` (no multi-part components), ICs
+and STM32F4 run it; (c) part GROWTH on component 0 (new trailing slot with
+one probe pin) + complete-parts REMOVAL, the shrink report (removed slot,
+one deleted child, adjustment) asserted through `parts_shrinks()`, exact
+restore when no adjustment was reported (the documented native decrement
+otherwise). New JSON fields enforced in `main()`:
+`intent_pin_rename_equal`, `intent_pin_rename_replan_empty`,
+`intent_pin_restore_equal`, `intent_part_graphic_equal`,
+`intent_part_graphic_replan_empty`, `intent_part_graphic_restore_equal`,
+`intent_part_growth_equal`, `intent_part_growth_replan_empty`,
+`intent_part_removal_equal` (plus the informational
+`intent_pin_rename_skipped` / `intent_part_graphic_skipped` counts).
+The example now carries `#![recursion_limit = "256"]` — the single
+`json!` report object outgrew the default macro recursion depth.
+
+### Verification (all default suites, fixture-free)
+
+- `cargo test -p altium-format --lib` — 481 passed, 0 failed.
+- `cargo test -p altium-sync` — 49 passed, 0 failed; `cargo build -p
+  altium-sync` — zero warnings.
+- `cargo test -p altium-spec-lang` — 362 passed, 0 failed.
+- `cargo test -p altium-format-spec` — 168 passed, 0 failed.
+- `cargo check -p altium-cli` — clean.
+- `cargo fmt --check -p altium-format -p altium-sync` — clean.
+- Corpus gate: all checks — incl. the nine enforced intent-E2 fields —
+  true for lucashudson-Connectors (56, part-graphic stage skipped=1),
+  ICs (32), arthurbenemann-STM32F4 (135); exit 0.
+
+### Known items deferred / flagged out of E2
+
+- Owner-0 shared pins on SINGLE-part components are unaddressable by the
+  memo §1 scope mapping (recorded consequence above); an explicit shared
+  address form is an F/step-7 candidate.
+- The `Some` current_part_id-adjustment case remains reachable only through
+  wild files or a future explicit resolve op (C's open item, unchanged).
+- Multi-pad definer intent axis, `is_current` authoring, alias order
+  authoring, the `"|&|"` constant promotion, and the Additional-pin freeze
+  are unchanged from E1/C.
+- The unrepresentable-member matrix runs against synthetic views (recorded
+  justification above); an integrated fixture would require a parser-level
+  wild file, which the fixture-free suites deliberately exclude.
+
+## Increment E2 — review findings resolution (2026-09-17)
+
+All seven findings from the independent E2 review were verified against the
+code; all seven were real (one major, six minor — two of the minors were the
+same defect reported twice). Resolutions:
+
+1. **[FIXED — major] Case-variant image-asset names bypassed the
+   conflicting-bodies block (silent body loss + non-converging replan).**
+   Confirmed: `collect_image_asset_ops` deduped authored sources by the
+   EXACT resource-name string but paired each requirement to the stored
+   asset store exact-then-case-insensitively, so two authored spellings
+   ("LOGO.png"/"logo.png") with DIFFERENT captured bodies resolved to one
+   stored slot as two Replace ops on the same index — the second silently
+   overwrote the first (both ops apply in order on the format side, no
+   error), and apply → re-elaborate oscillated instead of reaching the
+   fixed point. Fixed: each requirement now resolves its concrete PAIRING
+   TARGET (exact, then first case-insensitive against the stored assets —
+   the same native order the lowering uses — else a new-insert slot keyed
+   by the ASCII-case-folded name) BEFORE dedupe, and the conflicting-bodies
+   check keys on that target: differing canonical_path/content_hash for one
+   target hard-errors with both contexts and both spellings; equal bodies
+   collapse to a single op (Replace under the stored spelling, or Insert
+   under the first-authored spelling). New regression tests
+   `case_variant_image_names_resolve_one_pairing_target` (stored-slot arm:
+   block on conflict; exactly one Replace + replan-empty on agreement) and
+   `case_variant_new_image_inserts_share_one_slot` (new-insert arm: block;
+   single Insert named by the first-authored spelling + case-insensitive
+   replan-empty). The image-asset bullet above and STATUS.md now state the
+   per-target rule.
+2. **[FIXED — docs] "No filesystem I/O in elaboration" contradicted
+   `verify_unchanged` inside `collect_image_asset_ops`.** Confirmed: five
+   statements (SchLibIntentAssets doc, elaborate.rs module doc, the
+   missing-capture error text, STATUS.md, this worklog) claimed the
+   absolute contract while elaboration re-verifies every required capture
+   against disk (canonicalize + read + hash). Resolved by option (a) —
+   keep the conservative fail-fast verification (it prevents a
+   payload-equality no-op skip decided on stale bytes, which apply-time
+   verification would never re-check) and rewrite all five statements plus
+   the error message to the accurate contract: elaboration never SOURCES
+   bundle bytes from the filesystem (captured bytes are authoritative) but
+   re-verifies each capture's path resolution and hash, so bundles must
+   still exist unchanged at plan time.
+3. **[FIXED — tests] Untested contract-bearing image/mapping branches.**
+   Added fixture-free tests for every branch the review listed: the
+   fallback resource-name path (source authored without file_name resolves
+   the addressed destination image's stored name —
+   `image_source_without_file_name_resolves_the_addressed_stored_name`),
+   the conflicting-bodies block
+   (`image_source_conflicting_bodies_for_one_name_block`), case-insensitive
+   stored-name pairing (covered by the case-variant regression tests, op
+   named by the STORED spelling), the empty-authored-file_name error
+   (`image_source_empty_file_name_blocks`), and the multi→single direction
+   of the component-scope pins boundary-crossing error (complete parts
+   shrink 2→1 with component-scope pins managed, added to
+   `owner_group_mapping_errors_are_precise`, asserting "from 2 to 1").
+4. **[FIXED] Hand-duplicated field lists had no compile-time coupling to
+   the spec-lang intent structs (silent-drop hazard; reported twice).**
+   Confirmed: `for_each_graphic_field!` hand-listed the 36 `GraphicFields`
+   fields and `check_pin_inherit` hand-listed PinIntent's 12 FieldIntent
+   axes — complete today, but a field added later would compile while its
+   authored value was invisible to the gates. Fixed: both now exhaustively
+   destructure the struct with NO `..` rest pattern from ONE field list
+   (`for_each_graphic_field!` generates the bindings and the per-field
+   applications from the same list; `check_pin_inherit` destructures
+   `PinIntent` with `placement`/`designator` as the two documented
+   non-FieldIntent exceptions), so adding a spec-lang field breaks the
+   altium-sync build until the elaborator handles it. `DestGraphic`
+   remains a hand mirror of per-kind destination values, but every
+   authored field now necessarily passes the exhaustive gate first.
+5. **[FIXED — docs] The B-obligation RESOLVED marker overstated one test's
+   coverage.** Confirmed: `multi_part_positional_edits_touch_only_their_
+   group` edits the Part(2) and SharedPins groups (part 1 asserted
+   untouched by fingerprint); the part-1 group EDIT lives in
+   `complete_scope_defines_only_its_group`. The marker now credits both
+   tests; the obligation itself was and remains satisfied.
+6. **[RECORDED → F] Component-scalar `inherit` ≡ reset is now a recorded
+   exception to the E2 step-7 hard-error rule.** Confirmed: the four
+   component scalars resolve `inherit` through `FieldPolicy::definition`'s
+   `_` arm to the declared definition default (documented E1 behavior on
+   `SchLibPatch::descriptions`, predates E2), while E2's rule hard-errors
+   `inherit` on native pin/graphic/part fields with the same no-base
+   argument. The Field-semantics exception list above now records the
+   scalar behavior beside layout metadata and `part_count`, and whether
+   scalars should adopt the hard error for consistency is queued as an
+   increment-F question.
+
+Post-fix verification (re-run after the last edit): `cargo test -p
+altium-sync` — 54 passed, 0 failed (was 49; +5 new tests, one extended);
+`cargo test -p altium-format --lib` — 481 passed, 0 failed; `cargo check
+-p altium-cli` — clean; `cargo build -p altium-sync` — zero warnings;
+`cargo fmt --check -p altium-format -p altium-sync` — clean; corpus gate
+(Connectors/ICs/STM32F4) — exit 0, every enforced field true
+(`intent_part_graphic_skipped: 1` on Connectors only, as before).

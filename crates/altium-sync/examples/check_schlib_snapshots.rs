@@ -2,12 +2,14 @@
 //! structural parameter/graphic/pin batches, part grow/shrink round-trips,
 //! and library-level namespace transitions (aliases + component clone/remove).
 //! Writes only temporary documents. This is not a user-facing saved-plan command.
+// The single json! report object exceeds the default macro recursion depth.
+#![recursion_limit = "256"]
 use altium_format::SchLib;
 use altium_format::schlib::{
-    SchAliasOp, SchChildBatch, SchFootprintEdit, SchFootprintInit, SchGraphicEdit, SchGraphicInit,
-    SchGraphicShape, SchLibComponentEdit, SchLibComponentSnapshot, SchLibEdit, SchLibSnapshot,
-    SchNewComponent, SchOwnerGroup, SchParameterEdit, SchParameterInit, SchPinEdit, SchPinInit,
-    SchPinPadMapInit,
+    SchAliasOp, SchChildBatch, SchFootprintEdit, SchFootprintInit, SchGraphicDetail,
+    SchGraphicEdit, SchGraphicInit, SchGraphicShape, SchLibComponentEdit, SchLibComponentSnapshot,
+    SchLibEdit, SchLibSnapshot, SchNewComponent, SchOwnerGroup, SchParameterEdit, SchParameterInit,
+    SchPinEdit, SchPinInit, SchPinPadMapInit,
 };
 use altium_format_types::{
     Color, ComponentKind, Coord, CoordPoint, LineStyle, PenWidth, PinElectricalType, RotationBy90,
@@ -16,8 +18,9 @@ use altium_spec_lang::{
     ast::{CollectionDelete, CollectionMode},
     diagnostic::{Span, Spanned},
     intent::{
-        Collection, CollectionScope, ComponentIntent, FieldIntent, INTENT_SCHEMA_VERSION,
-        ParameterIntent, SchLibIntent,
+        Collection, CollectionScope, ComponentIntent, FieldIntent, GraphicFields, GraphicIntent,
+        GraphicKind, INTENT_SCHEMA_VERSION, ParameterIntent, PartIntent, PartNumber, PinIntent,
+        SchLibIntent,
     },
 };
 use altium_sync::schlib::{ComponentPropertiesIntent, SchLibPatch};
@@ -62,6 +65,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || result["intent_create_replan_empty"] != true
             || result["intent_remove_equal"] != true
             || result["intent_restore_equal"] != true
+            || result["intent_pin_rename_equal"] != true
+            || result["intent_pin_rename_replan_empty"] != true
+            || result["intent_pin_restore_equal"] != true
+            || result["intent_part_graphic_equal"] != true
+            || result["intent_part_graphic_replan_empty"] != true
+            || result["intent_part_graphic_restore_equal"] != true
+            || result["intent_part_growth_equal"] != true
+            || result["intent_part_growth_replan_empty"] != true
+            || result["intent_part_removal_equal"] != true
         {
             failures += 1;
         }
@@ -151,6 +163,13 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
     // the pre-probe state; native save/reopen typed equality after each apply.
     let intent = intent_pass(SchLib::open(path)?, temp.path())?;
 
+    // Intent E2 pass: positional partial pin rename on component 0 (restored
+    // after), part-block graphic add on the first eligible multi-part
+    // component (skips recorded — never silent), and a part growth + removal
+    // round-trip via intent on component 0, each with apply, native
+    // save/reopen typed equality, and replan-empty.
+    let intent_e2 = intent_e2_pass(SchLib::open(path)?, temp.path())?;
+
     // Footprint structural pass (increment D2): per component, replace the
     // first footprint's description, add a probe footprint (with one pin-pad
     // map from an existing pin when possible), then remove it and restore the
@@ -200,6 +219,17 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
         "intent_create_replan_empty": intent.create_replan_empty,
         "intent_remove_equal": intent.remove_equal,
         "intent_restore_equal": intent.restore_equal,
+        "intent_pin_rename_equal": intent_e2.pin_rename_equal,
+        "intent_pin_rename_replan_empty": intent_e2.pin_rename_replan_empty,
+        "intent_pin_restore_equal": intent_e2.pin_restore_equal,
+        "intent_pin_rename_skipped": intent_e2.pin_rename_skipped,
+        "intent_part_graphic_equal": intent_e2.part_graphic_equal,
+        "intent_part_graphic_replan_empty": intent_e2.part_graphic_replan_empty,
+        "intent_part_graphic_restore_equal": intent_e2.part_graphic_restore_equal,
+        "intent_part_graphic_skipped": intent_e2.part_graphic_skipped,
+        "intent_part_growth_equal": intent_e2.part_growth_equal,
+        "intent_part_growth_replan_empty": intent_e2.part_growth_replan_empty,
+        "intent_part_removal_equal": intent_e2.part_removal_equal,
     }))
 }
 
@@ -1272,4 +1302,331 @@ fn intent_pass(
         remove_equal,
         restore_equal,
     })
+}
+
+struct IntentE2Outcome {
+    pin_rename_equal: bool,
+    pin_rename_replan_empty: bool,
+    pin_restore_equal: bool,
+    pin_rename_skipped: usize,
+    part_graphic_equal: bool,
+    part_graphic_replan_empty: bool,
+    part_graphic_restore_equal: bool,
+    part_graphic_skipped: usize,
+    part_growth_equal: bool,
+    part_growth_replan_empty: bool,
+    part_removal_equal: bool,
+}
+
+fn e2_pin_item(designator: &str) -> PinIntent {
+    PinIntent {
+        placement: None,
+        designator: spanned(designator.to_owned()),
+        name: FieldIntent::Absent,
+        electrical: FieldIntent::Absent,
+        length: FieldIntent::Absent,
+        location: FieldIntent::Absent,
+        location_x: FieldIntent::Absent,
+        location_y: FieldIntent::Absent,
+        orientation: FieldIntent::Absent,
+        is_hidden: FieldIntent::Absent,
+        hidden_net_name: FieldIntent::Absent,
+        swap_group: FieldIntent::Absent,
+        part_swap_group: FieldIntent::Absent,
+        pair_swap_group: FieldIntent::Absent,
+    }
+}
+fn e2_part_item(number: i32) -> PartIntent {
+    PartIntent {
+        number: spanned(PartNumber::new(number).expect("positive part number")),
+        part_swap_group: FieldIntent::Absent,
+        pins: Collection::default(),
+        graphics: Collection::default(),
+    }
+}
+fn e2_graphic_item(kind: GraphicKind) -> GraphicIntent {
+    GraphicIntent {
+        auto_size: None,
+        kind: spanned(kind),
+        fields: GraphicFields::default(),
+    }
+}
+fn e2_items<T>(items: Vec<T>) -> Collection<T> {
+    Collection {
+        scope: CollectionScope::default(),
+        items,
+    }
+}
+
+/// Maps a projected graphic detail back to its authorable intent kind;
+/// `None` for intent-unrepresentable kinds (Symbol/Hyperlink/other).
+fn intent_kind_of(detail: &SchGraphicDetail<'_>) -> Option<GraphicKind> {
+    Some(match detail {
+        SchGraphicDetail::Line { .. } => GraphicKind::Line,
+        SchGraphicDetail::Rectangle { .. } => GraphicKind::Rectangle,
+        SchGraphicDetail::RoundRectangle { .. } => GraphicKind::RoundRectangle,
+        SchGraphicDetail::Arc { .. } => GraphicKind::Arc,
+        SchGraphicDetail::EllipticalArc { .. } => GraphicKind::EllipticalArc,
+        SchGraphicDetail::Ellipse { .. } => GraphicKind::Ellipse,
+        SchGraphicDetail::Pie { .. } => GraphicKind::Pie,
+        SchGraphicDetail::Polyline { .. } => GraphicKind::Polyline,
+        SchGraphicDetail::Polygon { .. } => GraphicKind::Polygon,
+        SchGraphicDetail::Bezier { .. } => GraphicKind::Bezier,
+        SchGraphicDetail::Image { .. } => GraphicKind::Image,
+        SchGraphicDetail::Label { .. } => GraphicKind::Label,
+        SchGraphicDetail::TextFrame { .. } => GraphicKind::TextFrame,
+        SchGraphicDetail::Symbol | SchGraphicDetail::Hyperlink | SchGraphicDetail::Other { .. } => {
+            return None;
+        }
+    })
+}
+
+fn intent_e2_pass(
+    mut doc: SchLib,
+    temp: &std::path::Path,
+) -> Result<IntentE2Outcome, Box<dyn std::error::Error>> {
+    let mut outcome = IntentE2Outcome {
+        pin_rename_equal: true,
+        pin_rename_replan_empty: true,
+        pin_restore_equal: true,
+        pin_rename_skipped: 0,
+        part_graphic_equal: true,
+        part_graphic_replan_empty: true,
+        part_graphic_restore_equal: true,
+        part_graphic_skipped: 0,
+        part_growth_equal: true,
+        part_growth_replan_empty: true,
+        part_removal_equal: true,
+    };
+
+    // Stage (a): positional partial rename of component 0's FIRST pin — its
+    // full-projection index 0 is necessarily filtered index 0 of its own
+    // owner group — through the matching scope (component scope for a
+    // shared pin on a multi-part component, a part block for Part(n)).
+    // A shared pin on a single-part component is unaddressable by the memo
+    // §1 mapping (component scope means Part(1) there); recorded as skipped.
+    let input = doc.snapshot()?;
+    let pin_scope_target: Option<Option<i32>> = {
+        let component = input.component(0)?;
+        let effective = component.effective_part_count()?;
+        let pins = component.pins();
+        match pins.first().map(|view| view.owner_group) {
+            None => None,
+            Some(SchOwnerGroup::SharedPins) if effective >= 2 => Some(None),
+            Some(SchOwnerGroup::Part(n)) => Some(Some(n)),
+            Some(_) => None,
+        }
+    };
+    match pin_scope_target {
+        None => outcome.pin_rename_skipped = 1,
+        Some(part) => {
+            let component_name = input.component(0)?.lib_reference().to_owned();
+            let (designator, original_name) = {
+                let component = input.component(0)?;
+                let pins = component.pins();
+                (pins[0].designator.to_owned(), pins[0].name.to_owned())
+            };
+            let build = |name: &str| {
+                let mut item = e2_pin_item(&designator);
+                item.name = authored(name.to_owned());
+                let mut component = blank_component_intent(&component_name);
+                match part {
+                    None => component.pins = e2_items(vec![item]),
+                    Some(number) => {
+                        let mut part_item = e2_part_item(number);
+                        part_item.pins = e2_items(vec![item]);
+                        component.parts = e2_items(vec![part_item]);
+                    }
+                }
+                intent_of(CollectionScope::default(), vec![component])
+            };
+            let renamed = format!("{original_name}_STEP2E2");
+            let rename_intent = build(&renamed);
+            let patch = SchLibPatch::from_intent(&input, &rename_intent)?;
+            let expected = patch.resulting_snapshot()?;
+            patch.apply_in_memory(&mut doc)?;
+            outcome.pin_rename_equal &= doc.snapshot()? == expected;
+            outcome.pin_rename_equal &= expected.component(0)?.pins()[0].name == renamed;
+            let renamed_path = temp.join("intent-e2-pin-rename.SchLib");
+            doc.save(&renamed_path)?;
+            outcome.pin_rename_equal &= SchLib::open(&renamed_path)?.snapshot()? == expected;
+            outcome.pin_rename_replan_empty =
+                SchLibPatch::from_intent(&doc.snapshot()?, &rename_intent)?.is_empty();
+
+            let restore_intent = build(&original_name);
+            let patch = SchLibPatch::from_intent(&doc.snapshot()?, &restore_intent)?;
+            patch.apply_in_memory(&mut doc)?;
+            outcome.pin_restore_equal = doc.snapshot()? == input;
+            let restored_path = temp.join("intent-e2-pin-restore.SchLib");
+            doc.save(&restored_path)?;
+            outcome.pin_restore_equal &= SchLib::open(&restored_path)?.snapshot()? == input;
+        }
+    }
+
+    // Stage (b): part-block graphic add on the first multi-part component
+    // whose Part(2) graphics group is fully intent-representable (a partial
+    // scope must mirror-address every existing member to append, and a
+    // complete scope removes the probe afterwards); none present is
+    // recorded, never silently skipped.
+    let state = doc.snapshot()?;
+    let mut selection: Option<(usize, Vec<GraphicKind>)> = None;
+    for index in 0..state.component_count() {
+        let component = state.component(index)?;
+        if component.effective_part_count()? < 2 {
+            continue;
+        }
+        let mirrors: Option<Vec<GraphicKind>> = component
+            .graphics()
+            .iter()
+            .filter(|view| matches!(view.owner_group, SchOwnerGroup::Part(2)))
+            .map(|view| intent_kind_of(&view.detail))
+            .collect();
+        if let Some(kinds) = mirrors {
+            selection = Some((index, kinds));
+            break;
+        }
+    }
+    match selection {
+        None => outcome.part_graphic_skipped = 1,
+        Some((index, mirror_kinds)) => {
+            let component_name = state.component(index)?.lib_reference().to_owned();
+            let graphics_before = state.component(index)?.graphics().len();
+            let probe = {
+                let mut probe = e2_graphic_item(GraphicKind::Rectangle);
+                probe.fields.to = authored(CoordPoint {
+                    x: Coord::from_mils(120).expect("120 mil fits Coord"),
+                    y: Coord::from_mils(60).expect("60 mil fits Coord"),
+                });
+                probe
+            };
+            let add_intent = {
+                let mut items: Vec<GraphicIntent> =
+                    mirror_kinds.iter().copied().map(e2_graphic_item).collect();
+                items.push(probe.clone());
+                let mut part_item = e2_part_item(2);
+                part_item.graphics = e2_items(items);
+                let mut component = blank_component_intent(&component_name);
+                component.parts = e2_items(vec![part_item]);
+                intent_of(CollectionScope::default(), vec![component])
+            };
+            let patch = SchLibPatch::from_intent(&state, &add_intent)?;
+            let expected = patch.resulting_snapshot()?;
+            patch.apply_in_memory(&mut doc)?;
+            outcome.part_graphic_equal &= doc.snapshot()? == expected;
+            {
+                let component = expected.component(index)?;
+                let graphics = component.graphics();
+                outcome.part_graphic_equal &= graphics.len() == graphics_before + 1;
+                let appended = graphics.last().expect("appended probe");
+                outcome.part_graphic_equal &=
+                    matches!(appended.owner_group, SchOwnerGroup::Part(2))
+                        && matches!(appended.detail, SchGraphicDetail::Rectangle { .. });
+            }
+            let added_path = temp.join("intent-e2-part-graphic.SchLib");
+            doc.save(&added_path)?;
+            outcome.part_graphic_equal &= SchLib::open(&added_path)?.snapshot()? == expected;
+            outcome.part_graphic_replan_empty =
+                SchLibPatch::from_intent(&doc.snapshot()?, &add_intent)?.is_empty();
+
+            let remove_intent = {
+                let mut part_item = e2_part_item(2);
+                part_item.graphics = Collection {
+                    scope: CollectionScope {
+                        mode: CollectionMode::Complete,
+                        delete: CollectionDelete::Allow,
+                        span: Some(Span::new(0, 0)),
+                    },
+                    items: mirror_kinds.iter().copied().map(e2_graphic_item).collect(),
+                };
+                let mut component = blank_component_intent(&component_name);
+                component.parts = e2_items(vec![part_item]);
+                intent_of(CollectionScope::default(), vec![component])
+            };
+            let patch = SchLibPatch::from_intent(&doc.snapshot()?, &remove_intent)?;
+            patch.apply_in_memory(&mut doc)?;
+            outcome.part_graphic_restore_equal = doc.snapshot()? == state;
+            let removed_path = temp.join("intent-e2-part-graphic-removed.SchLib");
+            doc.save(&removed_path)?;
+            outcome.part_graphic_restore_equal &= SchLib::open(&removed_path)?.snapshot()? == state;
+        }
+    }
+
+    // Stage (c): part growth + removal round-trip via intent on component 0
+    // — a new trailing part slot carrying one probe pin, then a complete
+    // parts scope with delete: allow removing it again, the deletion and any
+    // current_part_id adjustment surfaced through patch inspection.
+    let state = doc.snapshot()?;
+    let component_name = state.component(0)?.lib_reference().to_owned();
+    let effective = state.component(0)?.effective_part_count()?;
+    let new_slot = effective + 1;
+    let growth_intent = {
+        let mut probe = e2_pin_item("STE2");
+        probe.name = authored("STEP2E2_GROWTH".to_owned());
+        let mut part_item = e2_part_item(new_slot);
+        part_item.pins = e2_items(vec![probe]);
+        let mut component = blank_component_intent(&component_name);
+        component.parts = e2_items(vec![part_item]);
+        intent_of(CollectionScope::default(), vec![component])
+    };
+    let patch = SchLibPatch::from_intent(&state, &growth_intent)?;
+    let expected = patch.resulting_snapshot()?;
+    patch.apply_in_memory(&mut doc)?;
+    outcome.part_growth_equal &= doc.snapshot()? == expected;
+    {
+        let component = expected.component(0)?;
+        outcome.part_growth_equal &= component.effective_part_count()? == new_slot;
+        let pins = component.pins();
+        let probe = pins.last().expect("appended probe pin");
+        outcome.part_growth_equal &= probe.designator == "STE2"
+            && matches!(probe.owner_group, SchOwnerGroup::Part(n) if n == new_slot);
+    }
+    let grown_path = temp.join("intent-e2-part-growth.SchLib");
+    doc.save(&grown_path)?;
+    outcome.part_growth_equal &= SchLib::open(&grown_path)?.snapshot()? == expected;
+    outcome.part_growth_replan_empty =
+        SchLibPatch::from_intent(&doc.snapshot()?, &growth_intent)?.is_empty();
+
+    let removal_intent = {
+        let mut component = blank_component_intent(&component_name);
+        component.parts = Collection {
+            scope: CollectionScope {
+                mode: CollectionMode::Complete,
+                delete: CollectionDelete::Allow,
+                span: Some(Span::new(0, 0)),
+            },
+            items: (1..=effective).map(e2_part_item).collect(),
+        };
+        intent_of(CollectionScope::default(), vec![component])
+    };
+    let patch = SchLibPatch::from_intent(&doc.snapshot()?, &removal_intent)?;
+    outcome.part_removal_equal &= patch.parts_shrinks().len() == 1;
+    let mut reported_adjustment = None;
+    if let Some(report) = patch.parts_shrinks().first() {
+        outcome.part_removal_equal &= report.component == component_name
+            && report.removed_parts == [new_slot]
+            && report.deleted_children.len() == 1
+            && report
+                .deleted_children
+                .iter()
+                .all(|child| child.owner_part_id == new_slot);
+        reported_adjustment = report.current_part_id_adjustment;
+    }
+    let expected = patch.resulting_snapshot()?;
+    patch.apply_in_memory(&mut doc)?;
+    outcome.part_removal_equal &= doc.snapshot()? == expected;
+    let removed_path = temp.join("intent-e2-part-removed.SchLib");
+    doc.save(&removed_path)?;
+    outcome.part_removal_equal &= SchLib::open(&removed_path)?.snapshot()? == expected;
+    match reported_adjustment {
+        // The native memo-§3-rule-4 decrement fires on any slot removal
+        // while the stored current part is > 1, so the round trip is exact
+        // only for current-part-1 components; otherwise the reported
+        // adjustment itself is asserted (documented native rule).
+        None => outcome.part_removal_equal &= expected == state,
+        Some(adjustment) => {
+            outcome.part_removal_equal &=
+                adjustment.before > 1 && adjustment.after == adjustment.before - 1;
+        }
+    }
+    Ok(outcome)
 }
