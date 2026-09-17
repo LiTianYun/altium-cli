@@ -16,12 +16,12 @@
 //!
 //! Planned modules (see `NEXT.md`):
 //! - `snapshot` — per-domain projection and intent elaboration
-//! - `address` — artifact/owner/collection/index locators in an immutable snapshot
 //! - `plan` — versioned patches, input preconditions, and typed before/after state
 //! - `planner` — directional diff and managed-scope validation
 //! - `apply` — checked execution, staging, reopen validation, and journal recovery
 //! - `render` — exact patch reporting and optional display-only pairing/grouping
 
+pub mod address;
 pub mod image_asset;
 pub mod schlib;
 

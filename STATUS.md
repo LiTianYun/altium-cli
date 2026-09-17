@@ -64,6 +64,28 @@ recalculation; the original AD26 exporter uses the stored data-object value.
 See the [snapshot investigation](docs/worklogs/next-snapshots-2026-09-05.md).
 Snapshot increment validation: 403 core, 168 legacy spec and 12 sync tests pass;
 the CLI builds. Independent reviews passed for each implemented boundary.
+Step-2 increment A2 (2026-09-16) added the read-only child projection on
+`SchLibComponentSnapshot` — raw-truthful `SchOwnerGroup` classification,
+`parts()` with derived swap groups (native `|&|` combined-string split/encode
+helpers; untouched pins stay byte-verbatim), root-owned `parameters()`,
+`graphics()` with explicit unrepresentable Symbol/Hyperlink variants,
+PCBLIB-only `footprint_maps()` with a preserved non-PCBLIB count, `aliases()`,
+and captured font/image/style namespace projections — plus the documented load
+upgrade flooring native PartCount < 2 to 2 and DisplayModeCount < 1 to 1
+(mirroring AD26's after-import event; `effective_part_count()` now always ≥ 1
+on success; every floored field is reported via
+`SchLib::load_normalizations()` as `SchLegacyCountNormalization` entries,
+provenance metadata excluded from equality), `pub(crate)` mutation-boundary
+validation helpers (font/owner part/display mode/image reference checks;
+style_id authoring hard-errors as unproven), and the public snapshot-bound
+address vocabulary in `altium-sync::address`. Contract authority:
+[the persisted A1 resolutions memo](docs/worklogs/next-child-contracts-2026-09-16.md);
+worklog: [next-children-2026-09-16.md](docs/worklogs/next-children-2026-09-16.md),
+including the post-review findings resolution (Image view now carries all
+intent axes incl. color/line_width/is_solid).
+A2 validation (post-review fixes): 438 format, 18 sync, 362 spec-lang and 168
+format-spec tests pass; the CLI builds; the three-library corpus gate passes
+with empty replans.
 Full image codecs were removed from the gate by the user's 2026-09-05 scope change.
 Graphic field policies now cover all 13 kinds against the existing typed Rust
 API/creation defaults, including optional arc endpoints and named PenWidth values.

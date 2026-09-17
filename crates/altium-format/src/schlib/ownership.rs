@@ -118,7 +118,7 @@ fn native_address(component: &SchLibComponent, node: RecordAddress) -> Result<i3
     })
 }
 
-fn owner_of(
+pub(super) fn owner_of(
     component: &SchLibComponent,
     node: RecordAddress,
     record: &SchRecord,

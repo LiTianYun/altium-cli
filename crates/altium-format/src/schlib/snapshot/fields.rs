@@ -58,15 +58,23 @@ impl SchLibComponentSnapshot {
         Ok(candidate)
     }
 
-    /// The number of native active parts, excluding reserved part zero.
-    /// A native count of one therefore reports zero. Source authoring may impose
-    /// stronger admissibility constraints; no structural part edit is performed.
+    /// The number of native active parts, excluding reserved native part zero.
+    /// On success the result is always ≥ 1: the load path upgrades legacy
+    /// native `PartCount < 2` (including wire-absent) to 2 as a documented
+    /// format upgrade (resolutions §3 rule 1), so every file-loaded snapshot
+    /// satisfies this contract. Programmatically constructed state that
+    /// bypassed the load upgrade can still carry a smaller native count; that
+    /// remains a hard error here — never a silent clamp. No structural part
+    /// edit is performed.
     pub fn effective_part_count(&self) -> Result<i32> {
         let count = self.component.component.part_count;
-        if count < 1 {
+        if count < 2 {
             return Err(self.scalar_error(
                 "part_count",
-                format!("native PartCount {count} cannot include reserved part zero"),
+                format!(
+                    "native PartCount {count} has no effective parts; loaded documents are \
+                     upgraded to ≥ 2 at load, so this state bypassed the documented upgrade"
+                ),
             ));
         }
         Ok(count - 1)
@@ -142,20 +150,17 @@ impl SchLibComponentSnapshot {
                             self.lib_reference()
                         )
                     })?;
-                if !self
-                    .reference_context
-                    .fonts
-                    .iter()
-                    .any(|font| font.id == record.font_id)
-                {
-                    return Err(self.scalar_error(
-                        "designator",
-                        format!(
-                            "default font {} is absent from the captured font table",
-                            record.font_id
-                        ),
-                    ));
-                }
+                crate::schlib::validation::check_font_id_exists(
+                    &self.reference_context.fonts,
+                    record.font_id,
+                )
+                .with_context(|| {
+                    format!(
+                        "creating Designator for component '{}': default font must exist \
+                         in the captured font table",
+                        self.lib_reference()
+                    )
+                })?;
                 record.text = text;
                 record.unique_id = crate::util::generate_unique_id();
                 let mut data: Vec<_> = (0..self.component.records.len())
@@ -299,10 +304,13 @@ mod tests {
         );
         compatibility.component.component.component_kind_version3 = ComponentKind::Jumper;
         assert_eq!(compatibility.component_kind(), ComponentKind::Jumper);
-        compatibility.component.component.part_count = 1;
-        assert_eq!(compatibility.effective_part_count().unwrap(), 0);
-        compatibility.component.component.part_count = 0;
-        assert!(compatibility.effective_part_count().is_err());
+        // Native counts below 2 exist only for state that bypassed the
+        // documented load upgrade; the accessor hard-errors instead of
+        // reporting zero effective parts (contract: success is always ≥ 1).
+        for legacy in [1, 0, -1] {
+            compatibility.component.component.part_count = legacy;
+            assert!(compatibility.effective_part_count().is_err());
+        }
     }
 
     #[test]

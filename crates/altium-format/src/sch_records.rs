@@ -115,6 +115,57 @@ use crate::param_collection::ParameterCollection;
 use crate::param_value::{SchAngle, ToParamValue};
 use crate::{AltiumFormatError, Result};
 
+// ── Pin swap combined-string encoding ─────────────────────────────────────────
+
+/// Native separator between the part-swap prefix and the part-pin suffix inside
+/// the combined pin swap field (`SchPin.cs:31 SwapIdPartInfoSeparator`).
+///
+/// The Rust `SchPin::swap_id_part` field stores the COMBINED native string
+/// (`SwapIdPart` optionally followed by `"|&|" + SwapIdPartPin`) exactly as the
+/// wire carries it — both in the binary pin body and in the PinWideText
+/// `SwapIDPart` sidecar key, which AD26 writes from `GetSwapIdPartAndPartPin()`
+/// (`SchDataExporterLibraryV5.cs:393-409`).
+///
+/// FLAGGED: promote this constant to `altium-format-types::constants::pin` once
+/// a types-crate addition is discussed with the user (step-2 A2 forbids adding
+/// it unilaterally).
+pub(crate) const SWAP_ID_PART_INFO_SEPARATOR: &str = "|&|";
+
+/// Splits the combined `SwapIdPartAndPartPin` string per the native rule
+/// (`SchPin.cs:152-166 ParseSwapIdPartAndSwapIdPartPin`, ordinal first match):
+/// no separator ⇒ the whole string (mojibake variants included) is the prefix
+/// and the suffix is `None`; a separator present ⇒ both halves, either of which
+/// may be empty. `None` versus `Some("")` preserves whether the raw string
+/// carried a literal separator, which the native concat rule would not
+/// regenerate — untouched pins therefore stay byte-verbatim (resolutions §5
+/// rule 3/4).
+pub(crate) fn split_swap_id_part_and_part_pin(combined: &str) -> (&str, Option<&str>) {
+    match combined.find(SWAP_ID_PART_INFO_SEPARATOR) {
+        None => (combined, None),
+        Some(position) => (
+            &combined[..position],
+            Some(&combined[position + SWAP_ID_PART_INFO_SEPARATOR.len()..]),
+        ),
+    }
+}
+
+/// Re-encodes the combined swap string per the native rule
+/// (`SchPin.cs:168-175 ConcatSwapIdPartAndSwapIdPartPin`): the separator is
+/// emitted only when the part-pin suffix is non-empty. Only pins whose swap
+/// halves a mutation actually touched may be re-encoded; wild strings such as a
+/// bare `"|&|"` must otherwise be preserved byte-verbatim (resolutions §5
+/// rule 3).
+// Consumed by the step-2 C-increment pin mutation engine; until that lands it
+// is exercised by unit tests only.
+#[allow(dead_code)]
+pub(crate) fn encode_swap_id_part_and_part_pin(part: &str, part_pin: &str) -> String {
+    if part_pin.is_empty() {
+        part.to_owned()
+    } else {
+        format!("{part}{SWAP_ID_PART_INFO_SEPARATOR}{part_pin}")
+    }
+}
+
 // ── Base composition types ────────────────────────────────────────────────────
 
 /// Base fields shared by every schematic record: ownership, part/display mode, locking.
@@ -733,7 +784,7 @@ pub(crate) fn parse_component_record(
         params.remove_with_default(COMPONENT_KIND_VERSION3, ComponentKind::Standard)?;
 
     // CustomDisplayModeName0..N-1
-    let mut custom_display_mode_names = Vec::with_capacity(display_mode_count as usize);
+    let mut custom_display_mode_names = Vec::with_capacity(display_mode_count.max(0) as usize);
     for i in 0..display_mode_count {
         let key = format!(
             "{}{}",

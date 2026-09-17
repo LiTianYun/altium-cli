@@ -35,7 +35,11 @@ pub(crate) mod schlib_read;
 mod schlib_types;
 pub(crate) mod schlib_write;
 
-pub use crate::schlib::{SchLibComponentSnapshot, SchLibSnapshot};
+pub use crate::schlib::{
+    SchFontEntryView, SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail, SchGraphicView,
+    SchLegacyCountNormalization, SchLibComponentSnapshot, SchLibSnapshot, SchNormalizedCountField,
+    SchOwnerGroup, SchParameterView, SchPartSwapGroup, SchPartView, SchPinPadMapView, SchPinView,
+};
 
 // ── SchLib types ─────────────────────────────────────────────────────────────
 

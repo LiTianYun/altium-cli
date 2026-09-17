@@ -1,6 +1,11 @@
 mod ownership;
 mod snapshot;
-pub use snapshot::{SchLibComponentSnapshot, SchLibSnapshot};
+pub(crate) mod validation;
+pub use snapshot::{
+    SchFontEntryView, SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail, SchGraphicView,
+    SchLibComponentSnapshot, SchLibSnapshot, SchOwnerGroup, SchParameterView, SchPartSwapGroup,
+    SchPartView, SchPinPadMapView, SchPinView,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -84,12 +89,73 @@ use crate::tracked_cfb::TrackedCfbDocument;
 use crate::util::generate_unique_id;
 use crate::{AltiumFormatError, Result, ResultExt};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct SchLib {
     header: SchLibHeader,
     components: Vec<SchLibComponent>,
     embedded_images: Vec<SchLibEmbeddedImage>,
     aliases: Vec<SchLibAlias>,
+    /// Report of the documented legacy-count load upgrade (resolutions memo
+    /// §3 rule 1 / §4 rule 1: a reported normalization, never silent). Empty
+    /// unless `open` floored a legacy count. Provenance metadata: excluded
+    /// from equality and never serialized.
+    load_normalizations: Vec<SchLegacyCountNormalization>,
+}
+
+/// Equality covers typed document state only. `load_normalizations` is
+/// provenance metadata about how legacy counts were upgraded at parse time
+/// and is deliberately excluded, so an upgraded library compares equal to its
+/// saved-and-reopened self (the upgrade fixed-point invariant).
+impl PartialEq for SchLib {
+    fn eq(&self, other: &Self) -> bool {
+        // Destructure so adding a field forces this impl to be revisited.
+        let Self {
+            header,
+            components,
+            embedded_images,
+            aliases,
+            load_normalizations: _,
+        } = self;
+        *header == other.header
+            && *components == other.components
+            && *embedded_images == other.embedded_images
+            && *aliases == other.aliases
+    }
+}
+
+/// One count field floored by the documented legacy-format load upgrade
+/// (resolutions memo §3 rule 1 / §4 rule 1,
+/// `docs/worklogs/next-child-contracts-2026-09-16.md`), mirroring AD26's
+/// `SchComponent.HandleAfterImportEvent`. The normalization is never silent:
+/// every floored field is recorded and queryable via
+/// [`SchLib::load_normalizations`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchLegacyCountNormalization {
+    /// `LibReference` of the affected component (record-authoritative name).
+    pub lib_reference: String,
+    /// Which stored count was normalized.
+    pub field: SchNormalizedCountField,
+    /// Parsed value before the upgrade.
+    pub before: i32,
+    /// Upgraded value now held in memory (and written on the next save).
+    pub after: i32,
+}
+
+/// The count field a [`SchLegacyCountNormalization`] applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SchNormalizedCountField {
+    /// Component record `PARTCOUNT` (authoritative), floored to 2.
+    PartCount,
+    /// Write-only FileHeader index `PartCount{n}` entry, floored to 2 (AD26
+    /// ignores the index on import; flooring keeps our stricter
+    /// record-vs-index cross-check meaningful).
+    HeaderIndexPartCount,
+    /// Component record `DISPLAYMODECOUNT`, floored to 1.
+    DisplayModeCount,
+    /// `custom_display_mode_names` length padded up to the display-mode count
+    /// with empty names (values are lengths, not ids), so the upgraded state
+    /// is a save/reopen fixed point.
+    CustomDisplayModeNames,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -439,6 +505,73 @@ fn dispatch_record(block: &Block) -> Result<SchRecord> {
                 _ => Err(AltiumFormatError::UnknownRecordType(record_type_val)),
             }
         }
+    }
+}
+
+/// Documented format upgrade applied once per component at load
+/// (resolutions memo §3 rule 1 / §4 rule 1,
+/// `docs/worklogs/next-child-contracts-2026-09-16.md`), mirroring AD26's
+/// `SchComponent.HandleAfterImportEvent` floors:
+///
+/// - native `PartCount < 2` (including the wire-absent default) upgrades to 2
+///   on both the component record and the write-only header index entry (AD26
+///   ignores the index on import; flooring it keeps our stricter
+///   record-vs-index cross-check meaningful);
+/// - `DisplayModeCount < 1` upgrades to 1, and `custom_display_mode_names` is
+///   padded to the upgraded count with empty names so the upgraded state is a
+///   save/reopen fixed point (names round-trip exactly indices 0..count−1).
+///
+/// `CurrentPartID` is intentionally untouched: no clamp exists anywhere on the
+/// native load path, and out-of-range values are preserved verbatim
+/// (resolutions §3 rule 3).
+///
+/// Every field this function changes is appended to `report` (resolutions §3
+/// rule 1 / §4 rule 1: a REPORTED normalization, never silent), queryable
+/// after `open` via [`SchLib::load_normalizations`].
+fn upgrade_legacy_part_display_counts(
+    entry: &mut SchLibComponentIndex,
+    component: &mut SchLibComponent,
+    report: &mut Vec<SchLegacyCountNormalization>,
+) {
+    let root = &mut component.component;
+    let lib_reference = root.lib_reference.clone();
+    let mut record = |field: SchNormalizedCountField, before: i32, after: i32| {
+        report.push(SchLegacyCountNormalization {
+            lib_reference: lib_reference.clone(),
+            field,
+            before,
+            after,
+        });
+    };
+    if root.part_count < 2 {
+        record(SchNormalizedCountField::PartCount, root.part_count, 2);
+        root.part_count = 2;
+    }
+    if entry.part_count < 2 {
+        record(
+            SchNormalizedCountField::HeaderIndexPartCount,
+            entry.part_count,
+            2,
+        );
+        entry.part_count = 2;
+    }
+    if root.display_mode_count < 1 {
+        record(
+            SchNormalizedCountField::DisplayModeCount,
+            root.display_mode_count,
+            1,
+        );
+        root.display_mode_count = 1;
+    }
+    let display_mode_count = root.display_mode_count.max(0) as usize;
+    if root.custom_display_mode_names.len() < display_mode_count {
+        record(
+            SchNormalizedCountField::CustomDisplayModeNames,
+            root.custom_display_mode_names.len() as i32,
+            display_mode_count as i32,
+        );
+        root.custom_display_mode_names
+            .resize(display_mode_count, String::new());
     }
 }
 
@@ -1781,6 +1914,11 @@ impl SchLib {
             .context("creating default component for blank SchLib")?;
         component.lib_reference = "Component_1".to_owned();
         component.part_count = 2;
+        // AD26 floors DisplayModeCount to 1 on load, so a native blank always
+        // carries 1; matching it keeps blank state a save/reopen fixed point
+        // under the documented load upgrade (upgrade_legacy_part_display_counts).
+        component.display_mode_count = 1;
+        component.custom_display_mode_names = vec![String::new()];
         component.current_part_id = 1;
         component.unique_id = generate_unique_id();
 
@@ -1831,6 +1969,7 @@ impl SchLib {
             }],
             embedded_images: Vec::new(),
             aliases: Vec::new(),
+            load_normalizations: Vec::new(),
         };
         // Append default designator record
         lib.components[0]
@@ -2018,12 +2157,38 @@ impl SchLib {
         // 7. Assert all CFB entries consumed
         doc.assert_all_consumed()?;
 
+        // 8. Documented format upgrade (load-semantics normalization mirroring
+        //    AD26 `SchComponent.HandleAfterImportEvent`, ffv5 after-import):
+        //    native PartCount < 2 (including wire-absent) is floored to 2 and
+        //    DisplayModeCount < 1 to 1, so every loaded component reports an
+        //    effective part count ≥ 1 and at least one display mode. This is
+        //    the repository's "upgrade to the latest format" policy, not
+        //    capture-time validation — no wild value is rejected here.
+        //    Every floored field is recorded in `load_normalizations` (the
+        //    memo mandates a REPORTED normalization, never a silent one).
+        //    Evidence: resolutions memo §3 rule 1 / §4 rule 1
+        //    (docs/worklogs/next-child-contracts-2026-09-16.md).
+        let mut header = header;
+        let mut load_normalizations = Vec::new();
+        for (entry, component) in header.components.iter_mut().zip(components.iter_mut()) {
+            upgrade_legacy_part_display_counts(entry, component, &mut load_normalizations);
+        }
+
         Ok(Self {
             header,
             components,
             embedded_images,
             aliases,
+            load_normalizations,
         })
+    }
+
+    /// Per-component report of the documented legacy-count load upgrade
+    /// applied while opening this library (resolutions memo §3 rule 1 /
+    /// §4 rule 1). Empty when the file already carried modern counts.
+    /// Provenance metadata: excluded from `PartialEq` and never serialized.
+    pub fn load_normalizations(&self) -> &[SchLegacyCountNormalization] {
+        &self.load_normalizations
     }
 
     /// Returns the on-disk header string identifying the file format version.
@@ -2112,7 +2277,9 @@ impl SchLib {
                 });
             if !shares_component_storage {
                 cfb.create_storage(&format!("/{alias_key}"))
-                    .with_context(|| format!("creating storage for alias '{}'", alias.alias_name))?;
+                    .with_context(|| {
+                        format!("creating storage for alias '{}'", alias.alias_name)
+                    })?;
             }
             let redir_data = serialize_redirection_stream(&alias.canonical_name);
             cfb.write_stream(&format!("/{alias_key}/{REDIRECTION}"), &redir_data)
@@ -2743,6 +2910,105 @@ fn validate_schlib_invariants(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_part_and_display_counts_upgrade_at_load() {
+        // Documented format upgrade (resolutions §3 rule 1 / §4 rule 1):
+        // native PARTCOUNT < 2 — including the wire-absent default that a
+        // stored 0 serializes to — floors to 2, and DISPLAYMODECOUNT < 1
+        // floors to 1 with the names table padded, exactly once at load.
+        // The corpus contains zero such files, so these are synthetic.
+        let temp = tempfile::tempdir().unwrap();
+        for legacy_part_count in [1, 0] {
+            let path = temp
+                .path()
+                .join(format!("legacy-{legacy_part_count}.SchLib"));
+            let mut lib = SchLib::new_blank_ad26().unwrap();
+            lib.components[0].component.part_count = legacy_part_count;
+            lib.header.components[0].part_count = legacy_part_count;
+            lib.components[0].component.display_mode_count = 0;
+            lib.components[0].component.custom_display_mode_names = Vec::new();
+            lib.save(&path).unwrap();
+
+            let reopened = SchLib::open(&path).unwrap();
+            assert_eq!(reopened.components[0].component.part_count, 2);
+            assert_eq!(reopened.header.components[0].part_count, 2);
+            assert_eq!(reopened.components[0].component.display_mode_count, 1);
+            assert_eq!(
+                reopened.components[0].component.custom_display_mode_names,
+                vec![String::new()]
+            );
+            // The upgrade is REPORTED, never silent (resolutions §3 rule 1 /
+            // §4 rule 1): every floored field appears in the load report.
+            // `before` is the parsed pre-floor value (a stored legacy count
+            // may serialize to a wire-absent key and parse back through the
+            // documented defaults), so only its legacy range is asserted.
+            let report = reopened.load_normalizations();
+            assert_eq!(
+                report
+                    .iter()
+                    .map(|n| (n.lib_reference.as_str(), n.field, n.after))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("Component_1", SchNormalizedCountField::PartCount, 2),
+                    (
+                        "Component_1",
+                        SchNormalizedCountField::HeaderIndexPartCount,
+                        2
+                    ),
+                    ("Component_1", SchNormalizedCountField::DisplayModeCount, 1),
+                    (
+                        "Component_1",
+                        SchNormalizedCountField::CustomDisplayModeNames,
+                        1
+                    ),
+                ]
+            );
+            assert!(report.iter().all(|n| n.before < n.after));
+            reopened.validate_invariants().unwrap();
+            let snapshot = reopened.snapshot().unwrap();
+            assert_eq!(
+                snapshot
+                    .component(0)
+                    .unwrap()
+                    .effective_part_count()
+                    .unwrap(),
+                1
+            );
+
+            // The upgraded state is a save/reopen fixed point.
+            let second = temp
+                .path()
+                .join(format!("upgraded-{legacy_part_count}.SchLib"));
+            reopened.save(&second).unwrap();
+            let reread = SchLib::open(&second).unwrap();
+            // The already-upgraded bytes normalize nothing on reload, and
+            // equality deliberately ignores the provenance report, so the
+            // fixed point holds even though the two reports differ.
+            assert!(reread.load_normalizations().is_empty());
+            assert_eq!(reread, reopened);
+            assert_eq!(reread.snapshot().unwrap(), snapshot);
+        }
+
+        // In-range counts are untouched by the upgrade.
+        let path = temp.path().join("modern.SchLib");
+        let mut lib = SchLib::new_blank_ad26().unwrap();
+        lib.components[0].component.part_count = 4;
+        lib.header.components[0].part_count = 4;
+        lib.components[0].component.display_mode_count = 2;
+        lib.components[0].component.custom_display_mode_names =
+            vec!["first".to_owned(), String::new()];
+        lib.save(&path).unwrap();
+        let reopened = SchLib::open(&path).unwrap();
+        assert_eq!(reopened.components[0].component.part_count, 4);
+        assert_eq!(reopened.header.components[0].part_count, 4);
+        assert_eq!(reopened.components[0].component.display_mode_count, 2);
+        assert_eq!(
+            reopened.components[0].component.custom_display_mode_names,
+            vec!["first".to_owned(), String::new()]
+        );
+        assert!(reopened.load_normalizations().is_empty());
+    }
 
     #[test]
     fn self_alias_preserves_redirection_in_component_storage_after_save_reopen() {

@@ -2,6 +2,12 @@
 //! this module; source scope and authorization belong to the planner.
 
 mod fields;
+mod views;
+
+pub use views::{
+    SchFontEntryView, SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail, SchGraphicView,
+    SchOwnerGroup, SchParameterView, SchPartSwapGroup, SchPartView, SchPinPadMapView, SchPinView,
+};
 
 use super::{SchLib, SchLibComponent, SchLibComponentIndex};
 use crate::{AltiumFormatError, Result, ResultExt};
