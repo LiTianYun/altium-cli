@@ -154,10 +154,8 @@ pub(crate) fn split_swap_id_part_and_part_pin(combined: &str) -> (&str, Option<&
 /// emitted only when the part-pin suffix is non-empty. Only pins whose swap
 /// halves a mutation actually touched may be re-encoded; wild strings such as a
 /// bare `"|&|"` must otherwise be preserved byte-verbatim (resolutions §5
-/// rule 3).
-// Consumed by the step-2 C-increment pin mutation engine; until that lands it
-// is exercised by unit tests only.
-#[allow(dead_code)]
+/// rule 3). Consumed by the pin structural-edit engine
+/// (`schlib::snapshot::children`).
 pub(crate) fn encode_swap_id_part_and_part_pin(part: &str, part_pin: &str) -> String {
     if part_pin.is_empty() {
         part.to_owned()
@@ -2592,7 +2590,19 @@ pub(crate) fn serialize_binary_pin(pin: &SchPin) -> Result<Vec<u8>> {
 
     w.write_u8(PIN_BINARY_CODE);
     w.write_i32_le(pin.owner_index);
-    w.write_i16_le(pin.owner_part_id as i16);
+    // The binary pin body stores owner_part_id as a signed 16-bit field; a
+    // wider in-memory value (wild loaded PARTCOUNT or a grown part range)
+    // must hard-error instead of silently truncating.
+    w.write_i16_le(i16::try_from(pin.owner_part_id).map_err(|_| {
+        AltiumFormatError::InvalidParamValue {
+            key: "OwnerPartId".to_owned(),
+            detail: format!(
+                "pin owner_part_id {} does not fit the signed-16 binary pin body field; \
+                 refusing to truncate",
+                pin.owner_part_id
+            ),
+        }
+    })?);
     w.write_u8(pin.owner_part_display_mode);
 
     w.write_u8(pin.symbol_inner_edge as u8);
@@ -2958,7 +2968,7 @@ pub(crate) fn serialize_record(record: &SchRecord) -> Result<Vec<u8>> {
 }
 
 // Returns the SchRecordType for any SchRecord variant.
-fn record_type_for(record: &SchRecord) -> SchRecordType {
+pub(crate) fn record_type_for(record: &SchRecord) -> SchRecordType {
     match record {
         SchRecord::Sheet(_) => SchRecordType::Sheet,
         SchRecord::Template(_) => SchRecordType::Template,
@@ -4003,6 +4013,22 @@ mod tests {
         assert_eq!(pin2.is_hidden, pin.is_hidden);
         assert_eq!(pin2.show_name, pin.show_name);
         assert_eq!(pin2.show_designator, pin.show_designator);
+    }
+
+    #[test]
+    fn serialize_binary_pin_rejects_owner_part_id_beyond_i16() {
+        // The binary body stores owner_part_id as i16: a wider value must
+        // hard-error, never silently truncate (fail-fast rule).
+        for wild in [i32::from(i16::MAX) + 1, 40_000, i32::from(i16::MIN) - 1] {
+            let mut pin = make_test_pin();
+            pin.owner_part_id = wild;
+            let error = serialize_binary_pin(&pin).unwrap_err().to_string();
+            assert!(error.contains("signed-16"), "{wild}: {error}");
+            assert!(error.contains(&wild.to_string()), "{wild}: {error}");
+        }
+        let mut pin = make_test_pin();
+        pin.owner_part_id = i32::from(i16::MAX);
+        serialize_binary_pin(&pin).expect("the exact i16 bound serializes");
     }
 
     #[test]

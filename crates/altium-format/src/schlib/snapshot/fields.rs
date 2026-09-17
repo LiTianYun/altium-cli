@@ -80,6 +80,14 @@ impl SchLibComponentSnapshot {
         Ok(count - 1)
     }
 
+    /// The stored component `AllPinCount` header cache, verbatim — positive or
+    /// zero, stale or not (resolutions §7). Structural pin edits never touch
+    /// it and no recompute path exists; this read-only projection exists so
+    /// callers can verify the hands-off invariant across edits.
+    pub fn stored_all_pin_count(&self) -> i32 {
+        self.component.component.all_pin_count
+    }
+
     /// Returns the sole Designator record's text. Empty text remains an explicit
     /// value; absence means no record. Multiple records are ambiguous even when
     /// their texts agree, including duplicates split across Data and Additional.

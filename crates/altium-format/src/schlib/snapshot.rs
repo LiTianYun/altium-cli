@@ -3,12 +3,14 @@
 
 mod children;
 mod fields;
+mod parts;
 mod views;
 
 pub use children::{
     SchChildBatch, SchGraphicEdit, SchGraphicInit, SchGraphicShape, SchParameterEdit,
-    SchParameterInit,
+    SchParameterInit, SchPinEdit, SchPinInit,
 };
+pub use parts::{SchCurrentPartIdAdjustment, SchPartsShrink, SchRemovedPartChild};
 pub use views::{
     SchFontEntryView, SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail, SchGraphicView,
     SchOwnerGroup, SchParameterView, SchPartSwapGroup, SchPartView, SchPinPadMapView, SchPinView,

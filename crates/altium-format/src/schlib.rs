@@ -2,10 +2,11 @@ mod ownership;
 mod snapshot;
 pub(crate) mod validation;
 pub use snapshot::{
-    SchChildBatch, SchFontEntryView, SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail,
-    SchGraphicEdit, SchGraphicInit, SchGraphicShape, SchGraphicView, SchLibComponentSnapshot,
-    SchLibSnapshot, SchOwnerGroup, SchParameterEdit, SchParameterInit, SchParameterView,
-    SchPartSwapGroup, SchPartView, SchPinPadMapView, SchPinView,
+    SchChildBatch, SchCurrentPartIdAdjustment, SchFontEntryView, SchFootprintMapView,
+    SchFootprintMapsView, SchGraphicDetail, SchGraphicEdit, SchGraphicInit, SchGraphicShape,
+    SchGraphicView, SchLibComponentSnapshot, SchLibSnapshot, SchOwnerGroup, SchParameterEdit,
+    SchParameterInit, SchParameterView, SchPartSwapGroup, SchPartView, SchPartsShrink, SchPinEdit,
+    SchPinInit, SchPinPadMapView, SchPinView, SchRemovedPartChild,
 };
 
 use std::collections::{HashMap, HashSet};

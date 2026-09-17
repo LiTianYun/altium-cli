@@ -132,6 +132,59 @@ covers insert/reorder/recolor-at-exact-index, a per-component graphic reorder
 round-trip, and authorized removal of both probes (parameter + rectangle) with
 save/reopen typed equality and projection equality on all 223 components of
 the three gate libraries.
+Step-2 increment C (2026-09-16) extended the batch engine to `pins()`
+(`SchChildBatch.pins` with `SchPinEdit::{Keep, Replace, New}` over the full A2
+pin projection, same final-sequence/stream-order/deletion/atomicity
+semantics): `SchPinInit` covers the `SchPinView` surface; Replace preserves
+every unaddressed field including the sidecar-backed ones
+(defined/selected functions, package length, propagation delay, frac coords,
+custom text positioning, symbol line width, long descriptions, pair swap);
+combined swap strings follow memo §5 rule 3 (both halves `None` → byte
+verbatim incl. wild `"|&|"`, either half addressed → native split/re-encode);
+new pins get typed wire defaults with NO UniqueId (the binary pin body carries
+none — documented deviation) and pin owner parts accept 0 or 1..=effective
+(−1 forbidden); authored `hidden_net_name` values without a verified
+serialization path hard-error (`check_pin_hidden_net_name_write`).
+Additional-stream pins freeze the whole collection: while any Additional pin
+member exists the final pin sequence must be positional (Additional members
+strictly Keep, Data members Keep or field Replace, no membership change), so
+pin insert/delete/reorder — Data-only permutations included — is a hard error
+(Additional pin sidecars unproven); Keep-in-place flows through. Binary pin
+`owner_part_id` values beyond the signed-16 body field hard-error instead of
+truncating, at serialization, at the pin mutation boundary, and as a
+part-growth cap (`with_parts_appended` bounds native count at `i16::MAX`).
+`all_pin_count` stays hands-off per memo §7 (verbatim through every edit; no
+recompute path exists; `stored_all_pin_count()` projects it for verification).
+Sidecar consistency needs no new recompute layer — `serialize_pin_sidecars`
+enumerates final Data pin encounter order at save time; targeted tests prove
+all nine sidecar streams stay consistent under insert/remove/reorder.
+Parts ops landed on `SchLibComponentSnapshot`: `with_parts_appended(n)`
+(growth never reclassifies children; composes with a following
+`with_children`, whose projections are index-identical) and
+`with_parts_removed(&[slots], allow_descendant_deletion)` (trailing slots
+only, ≥ 1 effective part remains; part-owned children plus ownership
+descendants deleted only with authorization, else the error lists them; the
+memo §3 rule 4 `current_part_id` decrement is returned as a typed
+`SchCurrentPartIdAdjustment` in `SchPartsShrink`, never silent; deleted
+children are reported with a typed `SchRecordType` kind; native count =
+effective + 1 maintained on the record and the header index entry; display
+modes untouched; wild stored `current_part_id` blocks both ops until
+explicitly resolved; recorded deviations from native `AddPart`/`DeletePart` —
+no current-part move on append, out-of-range owners preserved verbatim where
+native would renumber — live in the parts.rs module docs and the worklog).
+`check_custom_display_mode_name_index` stays dead by design (no C path writes
+display-mode-adjacent state) with a C→D note. New-pin creation keeps typed
+wire defaults (show flags false, wire-zero formal type) — a recorded
+deviation from native `SchDataPin.SetDefault` with a queued user decision.
+C validation (post-fix): 465 format, 18 sync, 362 spec-lang and 168
+format-spec tests pass; the CLI builds; `cargo fmt --check` clean; the corpus
+gate adds a pin structural pass (insert probe pin STEP2C_{i} into part 1,
+reorder, authorized removal, with pins() projection equality, save/reopen
+typed equality, and verbatim AllPinCount at every stage) AND a part
+structural pass (append one empty trailing slot, save/reopen, remove it with
+an empty expected deletion list and the typed current-part adjustment
+asserted, save/reopen, restore equality modulo reported adjustments) — all
+checks true on all three gate libraries, exit 0.
 Full image codecs were removed from the gate by the user's 2026-09-05 scope change.
 Graphic field policies now cover all 13 kinds against the existing typed Rust
 API/creation defaults, including optional arc endpoints and named PenWidth values.

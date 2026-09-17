@@ -1,12 +1,14 @@
-//! Real-file probe for complete typed snapshots, explicit scalar patches, and
-//! structural parameter/graphic batches.
+//! Real-file probe for complete typed snapshots, explicit scalar patches,
+//! structural parameter/graphic/pin batches, and part grow/shrink round-trips.
 //! Writes only temporary documents. This is not a user-facing saved-plan command.
 use altium_format::SchLib;
 use altium_format::schlib::{
-    SchChildBatch, SchGraphicEdit, SchGraphicInit, SchGraphicShape, SchLibSnapshot, SchOwnerGroup,
-    SchParameterEdit, SchParameterInit,
+    SchChildBatch, SchGraphicEdit, SchGraphicInit, SchGraphicShape, SchLibComponentSnapshot,
+    SchLibSnapshot, SchOwnerGroup, SchParameterEdit, SchParameterInit, SchPinEdit, SchPinInit,
 };
-use altium_format_types::{Color, ComponentKind, Coord, CoordPoint, LineStyle, PenWidth};
+use altium_format_types::{
+    Color, ComponentKind, Coord, CoordPoint, LineStyle, PenWidth, PinElectricalType, RotationBy90,
+};
 use altium_spec_lang::{
     diagnostic::{Span, Spanned},
     intent::FieldIntent,
@@ -28,6 +30,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || result["structural_projection_equal"] != true
             || result["structural_graphic_reorder_equal"] != true
             || result["structural_removal_equal"] != true
+            || result["structural_pin_insert_equal"] != true
+            || result["structural_pin_reorder_equal"] != true
+            || result["structural_pin_removal_equal"] != true
+            || result["structural_pin_projection_equal"] != true
+            || result["structural_all_pin_count_verbatim"] != true
+            || result["structural_part_growth_equal"] != true
+            || result["structural_part_shrink_equal"] != true
+            || result["structural_part_report_correct"] != true
+            || result["structural_part_restore_equal"] != true
         {
             failures += 1;
         }
@@ -91,6 +102,18 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
     // starting from a fresh open of the unmodified input file.
     let structural = structural_pass(SchLib::open(path)?.snapshot()?, temp.path())?;
 
+    // Pin structural pass (increment C): per component, insert a probe pin
+    // into part 1, reorder it, then remove it with authorization, asserting
+    // pins() projection equality, native save/reopen typed equality, and a
+    // verbatim stored AllPinCount at every stage.
+    let pins = pin_structural_pass(SchLib::open(path)?.snapshot()?, temp.path())?;
+
+    // Part structural pass (increment C): per component, append one empty
+    // trailing part slot, save/reopen, then remove it again (empty expected
+    // deletion list, memo-rule current_part_id adjustment asserted through
+    // the typed report), save/reopen, restoring the original typed state.
+    let parts = part_structural_pass(SchLib::open(path)?.snapshot()?, temp.path())?;
+
     Ok(serde_json::json!({
         "file": path,
         "components": input.component_count(),
@@ -106,6 +129,15 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
         "structural_projection_equal": structural.projection_equal,
         "structural_graphic_reorder_equal": structural.graphic_reorder_equal,
         "structural_removal_equal": structural.removal_equal,
+        "structural_pin_insert_equal": pins.insert_equal,
+        "structural_pin_reorder_equal": pins.reorder_equal,
+        "structural_pin_removal_equal": pins.removal_equal,
+        "structural_pin_projection_equal": pins.projection_equal,
+        "structural_all_pin_count_verbatim": pins.all_pin_count_verbatim,
+        "structural_part_growth_equal": parts.growth_equal,
+        "structural_part_shrink_equal": parts.shrink_equal,
+        "structural_part_report_correct": parts.report_correct,
+        "structural_part_restore_equal": parts.restore_equal,
     }))
 }
 
@@ -220,6 +252,7 @@ fn structural_pass(
         let edited = component.with_children(SchChildBatch {
             parameters: Some(parameter_edits),
             graphics: Some(graphic_edits),
+            pins: None,
             allow_deletion: false,
         })?;
         expected_projections.push((expected_parameters, expected_graphic_kinds, recolored));
@@ -285,6 +318,7 @@ fn structural_pass(
         let swapped = component.with_children(SchChildBatch {
             parameters: None,
             graphics: Some(order.into_iter().map(SchGraphicEdit::Keep).collect()),
+            pins: None,
             allow_deletion: false,
         })?;
         reorders.push((index, swapped));
@@ -343,6 +377,7 @@ fn structural_pass(
         let removed = component.with_children(SchChildBatch {
             parameters: Some(keeps),
             graphics: Some(graphic_keeps),
+            pins: None,
             allow_deletion: true,
         })?;
         removals.push((index, removed));
@@ -376,6 +411,283 @@ fn structural_pass(
         projection_equal,
         graphic_reorder_equal,
         removal_equal,
+    })
+}
+
+struct PinStructuralOutcome {
+    insert_equal: bool,
+    reorder_equal: bool,
+    removal_equal: bool,
+    projection_equal: bool,
+    all_pin_count_verbatim: bool,
+}
+
+fn probe_pin(index: usize) -> SchPinInit {
+    SchPinInit {
+        owner_part_id: 1,
+        owner_part_display_mode: Some(0),
+        designator: format!("STEP2C_{index}"),
+        name: "STEP2C".to_owned(),
+        electrical: PinElectricalType::Passive,
+        length: Coord::from_mils(300).expect("300 mils fits Coord"),
+        location: CoordPoint::zero(),
+        orientation: RotationBy90::Rotate0,
+        is_hidden: false,
+        hidden_net_name: String::new(),
+        swap_group: String::new(),
+        part_swap_group: Some(String::new()),
+        part_pin_swap_suffix: Some(String::new()),
+        pair_swap_group: String::new(),
+    }
+}
+
+/// Complete owned fingerprint of one projected pin view (every `SchPinView`
+/// field, via its Debug representation).
+fn pin_fingerprints(component: &SchLibComponentSnapshot) -> Vec<String> {
+    component
+        .pins()
+        .iter()
+        .map(|view| format!("{view:?}"))
+        .collect()
+}
+
+fn pin_structural_pass(
+    input: SchLibSnapshot,
+    temp: &std::path::Path,
+) -> Result<PinStructuralOutcome, Box<dyn std::error::Error>> {
+    let mut all_pin_count_verbatim = true;
+    let mut projection_equal = true;
+
+    // Baselines from the immutable input.
+    let mut original_fingerprints = Vec::new();
+    let mut stored_counts = Vec::new();
+    for index in 0..input.component_count() {
+        let component = input.component(index)?;
+        original_fingerprints.push(pin_fingerprints(&component));
+        stored_counts.push(component.stored_all_pin_count());
+    }
+
+    // Stage 1: append the probe pin to part 1 of every component.
+    let mut inserts = Vec::new();
+    for index in 0..input.component_count() {
+        let component = input.component(index)?;
+        let count = component.pins().len();
+        let edits: Vec<SchPinEdit> = (0..count)
+            .map(SchPinEdit::Keep)
+            .chain([SchPinEdit::New(probe_pin(index))])
+            .collect();
+        let edited = component.with_children(SchChildBatch {
+            parameters: None,
+            graphics: None,
+            pins: Some(edits),
+            allow_deletion: false,
+        })?;
+        inserts.push((index, edited));
+    }
+    let expected_inserted = input.replace_components(inserts)?;
+    let inserted_path = temp.join("structural-pin-inserted.SchLib");
+    expected_inserted.materialize()?.save(&inserted_path)?;
+    let reopened_inserted = SchLib::open(&inserted_path)?.snapshot()?;
+    let insert_equal = reopened_inserted == expected_inserted;
+    for index in 0..reopened_inserted.component_count() {
+        let component = reopened_inserted.component(index)?;
+        let fingerprints = pin_fingerprints(&component);
+        let (untouched, probe) = fingerprints.split_at(original_fingerprints[index].len());
+        projection_equal &= untouched == original_fingerprints[index].as_slice();
+        // The reopened probe must round-trip the submitted init exactly.
+        let probe_ok = probe.len() == 1
+            && component
+                .pins()
+                .last()
+                .map(SchPinInit::from_view)
+                .is_some_and(|init| init.is_ok_and(|init| init == probe_pin(index)));
+        projection_equal &= probe_ok;
+        all_pin_count_verbatim &= component.stored_all_pin_count() == stored_counts[index];
+    }
+
+    // Stage 2: reorder by swapping the probe (last member) with the last
+    // original pin — physically adjacent stream slots, so the swap is safe on
+    // any ownership graph. Components that had no pins keep their order.
+    let mut reorders = Vec::new();
+    let mut expected_swapped: Vec<Vec<String>> = Vec::new();
+    for index in 0..reopened_inserted.component_count() {
+        let component = reopened_inserted.component(index)?;
+        let fingerprints = pin_fingerprints(&component);
+        let count = fingerprints.len();
+        let mut order: Vec<usize> = (0..count).collect();
+        if count >= 2 {
+            order.swap(count - 2, count - 1);
+        }
+        expected_swapped.push(order.iter().map(|&i| fingerprints[i].clone()).collect());
+        let swapped = component.with_children(SchChildBatch {
+            parameters: None,
+            graphics: None,
+            pins: Some(order.into_iter().map(SchPinEdit::Keep).collect()),
+            allow_deletion: false,
+        })?;
+        reorders.push((index, swapped));
+    }
+    let expected_reordered = reopened_inserted.replace_components(reorders)?;
+    let reordered_path = temp.join("structural-pin-reordered.SchLib");
+    expected_reordered.materialize()?.save(&reordered_path)?;
+    let reopened_reordered = SchLib::open(&reordered_path)?.snapshot()?;
+    let reorder_equal = reopened_reordered == expected_reordered;
+    for (index, expected) in expected_swapped.iter().enumerate() {
+        let component = reopened_reordered.component(index)?;
+        projection_equal &= pin_fingerprints(&component) == *expected;
+        all_pin_count_verbatim &= component.stored_all_pin_count() == stored_counts[index];
+    }
+
+    // Stage 3: remove the probe with authorization, restoring the original
+    // pins() projection of every component.
+    let mut removals = Vec::new();
+    for index in 0..reopened_reordered.component_count() {
+        let component = reopened_reordered.component(index)?;
+        let probe_designator = format!("STEP2C_{index}");
+        let pins = component.pins();
+        // After the swap the probe sits at count-2 (or 0 for a component that
+        // had no original pins); verify before deleting.
+        let count = pins.len();
+        let probe_index = if count >= 2 { count - 2 } else { 0 };
+        if pins[probe_index].designator != probe_designator {
+            return Err(format!(
+                "component {index}: pins()[{probe_index}] is not probe '{probe_designator}'"
+            )
+            .into());
+        }
+        let keeps: Vec<SchPinEdit> = (0..count)
+            .filter(|i| *i != probe_index)
+            .map(SchPinEdit::Keep)
+            .collect();
+        let removed = component.with_children(SchChildBatch {
+            parameters: None,
+            graphics: None,
+            pins: Some(keeps),
+            allow_deletion: true,
+        })?;
+        removals.push((index, removed));
+    }
+    let expected_removed = reopened_reordered.replace_components(removals)?;
+    let removed_path = temp.join("structural-pin-removed.SchLib");
+    expected_removed.materialize()?.save(&removed_path)?;
+    let reopened_removed = SchLib::open(&removed_path)?.snapshot()?;
+    let removal_equal = reopened_removed == expected_removed;
+    for index in 0..reopened_removed.component_count() {
+        let component = reopened_removed.component(index)?;
+        // Removing the probe undoes the swap: the projection must equal the
+        // original input's exactly.
+        projection_equal &= pin_fingerprints(&component) == original_fingerprints[index];
+        all_pin_count_verbatim &= component.stored_all_pin_count() == stored_counts[index];
+    }
+
+    Ok(PinStructuralOutcome {
+        insert_equal,
+        reorder_equal,
+        removal_equal,
+        projection_equal,
+        all_pin_count_verbatim,
+    })
+}
+
+struct PartStructuralOutcome {
+    growth_equal: bool,
+    shrink_equal: bool,
+    report_correct: bool,
+    restore_equal: bool,
+}
+
+/// Kind-name sequence of the graphics projection (order-sensitive).
+fn graphic_kinds(component: &SchLibComponentSnapshot) -> Vec<&'static str> {
+    component
+        .graphics()
+        .iter()
+        .map(|view| view.detail.kind_name())
+        .collect()
+}
+
+fn part_structural_pass(
+    input: SchLibSnapshot,
+    temp: &std::path::Path,
+) -> Result<PartStructuralOutcome, Box<dyn std::error::Error>> {
+    let mut report_correct = true;
+    let mut restore_equal = true;
+
+    // Baselines from the immutable input.
+    let mut original_effective = Vec::new();
+    let mut original_pin_fingerprints = Vec::new();
+    let mut original_graphic_kinds = Vec::new();
+    for index in 0..input.component_count() {
+        let component = input.component(index)?;
+        original_effective.push(component.effective_part_count()?);
+        original_pin_fingerprints.push(pin_fingerprints(&component));
+        original_graphic_kinds.push(graphic_kinds(&component));
+    }
+
+    // Stage 1: append one empty trailing part slot to every component.
+    // Growth changes only the two count fields, so every child projection
+    // must stay index-identical to the input's.
+    let mut grows = Vec::new();
+    for index in 0..input.component_count() {
+        let component = input.component(index)?;
+        let grown = component.with_parts_appended(1)?;
+        report_correct &= grown.effective_part_count()? == original_effective[index] + 1
+            && pin_fingerprints(&grown) == original_pin_fingerprints[index]
+            && graphic_kinds(&grown) == original_graphic_kinds[index];
+        grows.push((index, grown));
+    }
+    let expected_grown = input.replace_components(grows)?;
+    let grown_path = temp.join("structural-part-grown.SchLib");
+    expected_grown.materialize()?.save(&grown_path)?;
+    let reopened_grown = SchLib::open(&grown_path)?.snapshot()?;
+    let growth_equal = reopened_grown == expected_grown;
+
+    // Stage 2: remove the appended trailing slot again. The new slot owns no
+    // children, so the typed report must list zero deletions (no
+    // authorization needed) and the memo §3 rule 4 current_part_id decrement
+    // (fires only when the stored current part is > 1, on ANY slot removal)
+    // is asserted through the report.
+    let mut shrinks = Vec::new();
+    let mut adjusted = Vec::new();
+    for index in 0..reopened_grown.component_count() {
+        let component = reopened_grown.component(index)?;
+        let removed_slot = original_effective[index] + 1;
+        let shrink = component.with_parts_removed(&[removed_slot], false)?;
+        report_correct &= shrink.removed_parts == [removed_slot]
+            && shrink.deleted_children.is_empty()
+            && match shrink.current_part_id_adjustment {
+                None => true,
+                Some(adjustment) => {
+                    adjustment.before > 1 && adjustment.after == adjustment.before - 1
+                }
+            };
+        adjusted.push(shrink.current_part_id_adjustment.is_some());
+        shrinks.push((index, shrink.component));
+    }
+    let expected_shrunk = reopened_grown.replace_components(shrinks)?;
+    let shrunk_path = temp.join("structural-part-shrunk.SchLib");
+    expected_shrunk.materialize()?.save(&shrunk_path)?;
+    let reopened_shrunk = SchLib::open(&shrunk_path)?.snapshot()?;
+    let shrink_equal = reopened_shrunk == expected_shrunk;
+
+    // Restore check: wherever no current_part_id adjustment was reported the
+    // grow+shrink cycle must hand back the original typed component exactly;
+    // an adjusted component (stored current part > 1) differs in exactly
+    // that reported field, so it is held to count and projection equality.
+    for index in 0..reopened_shrunk.component_count() {
+        let component = reopened_shrunk.component(index)?;
+        restore_equal &= component.effective_part_count()? == original_effective[index]
+            && pin_fingerprints(&component) == original_pin_fingerprints[index]
+            && graphic_kinds(&component) == original_graphic_kinds[index];
+        if !adjusted[index] {
+            restore_equal &= component == input.component(index)?;
+        }
+    }
+
+    Ok(PartStructuralOutcome {
+        growth_equal,
+        shrink_equal,
+        report_correct,
+        restore_equal,
     })
 }
 

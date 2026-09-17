@@ -1,5 +1,5 @@
-//! Batch structural editing of the `parameters()` and `graphics()` child
-//! collections (step-2 increment B; contract authority
+//! Batch structural editing of the `parameters()`, `graphics()`, and `pins()`
+//! child collections (step-2 increments B and C; contract authority
 //! `docs/worklogs/next-child-contracts-2026-09-16.md`, cited as "memo §N").
 //!
 //! # Batch model
@@ -7,10 +7,10 @@
 //! [`SchLibComponentSnapshot::with_children`] takes, per edited collection, the
 //! FINAL ordered sequence of items. Every `Keep`/`Replace` index is a position
 //! in the corresponding A2 projection of the IMMUTABLE input snapshot
-//! (`parameters()[i]` / `graphics()[i]`); multiple edits never shift each
-//! other's targets. Referencing the same original slot twice is a conflict.
-//! Omission of an original member from the final sequence is a deletion and
-//! requires the explicit per-call `allow_deletion` authorization.
+//! (`parameters()[i]` / `graphics()[i]` / `pins()[i]`); multiple edits never
+//! shift each other's targets. Referencing the same original slot twice is a
+//! conflict. Omission of an original member from the final sequence is a
+//! deletion and requires the explicit per-call `allow_deletion` authorization.
 //!
 //! # Stream-order rule
 //!
@@ -21,13 +21,40 @@
 //! slots); when the final sequence is longer than the original membership, the
 //! extras are placed contiguously right after the last original member (in
 //! that member's stream), or at the end of the Data stream for a previously
-//! empty collection (parameters extras before graphics extras when both
-//! collections append to an empty tail). The resulting A2 projection of the
-//! edited collection equals the requested final sequence exactly.
+//! empty collection (parameters extras before graphics extras before pins
+//! extras when several collections append to an empty tail). The resulting A2
+//! projection of the edited collection equals the requested final sequence
+//! exactly.
 //!
 //! Originals never migrate between streams (verified loader restriction), and
 //! creating NEW records in the Additional stream is unsupported: a final
 //! arrangement that would require either is a hard error.
+//!
+//! # Pins (increment C)
+//!
+//! `pins()` members follow the same final-sequence, stream-order,
+//! deletion-authorization, and atomicity semantics. Two pin-specific rules:
+//!
+//! - **Additional-stream pins freeze the collection.** The nine pin sidecar
+//!   streams are serialized from — and merged back by — final DATA pin
+//!   encounter order only; Additional pin sidecars are unproven (ownership
+//!   worklog). While ANY Additional pin member exists, the final sequence is
+//!   directly enforced to be positional: every member must sit at its
+//!   original ordinal (Additional members strictly `Keep`, Data members
+//!   `Keep` or field `Replace`) and no member may be added or deleted, so
+//!   pin insert/delete/reorder — a Data-only permutation included, even
+//!   though it would be sidecar-safe under the current save path — is a hard
+//!   error naming the frozen member. Keep-untouched arrangements (and
+//!   batches with `pins: None`) flow through unchanged.
+//! - **`all_pin_count` is hands-off (memo §7).** Structural pin edits never
+//!   touch the stored component `AllPinCount` cache — positive or zero, stale
+//!   or not, it is preserved verbatim; no recompute path exists anywhere in
+//!   this engine.
+//!
+//! Save-time sidecar consistency needs no new recompute layer:
+//! `serialize_pin_sidecars` already enumerates the FINAL Data pin encounter
+//! order at save time, so insert/remove/reorder keeps every ordinal-addressed
+//! sidecar entry attached to its pin (verified by targeted save/reopen tests).
 //!
 //! # IndexInSheet (memo §6)
 //!
@@ -66,17 +93,59 @@
 //! # New/Replace field surfaces
 //!
 //! Inits cover exactly the intent-addressable fields the A2 views expose:
-//! `SchParameterInit` (name/text/is_hidden) and `SchGraphicInit` (owner part,
-//! display mode, and the 13 representable kinds' view fields). Replace
-//! preserves every non-addressed field of the original record verbatim
-//! (unique_id, style_id, unrepresentable extras); a Replace target's kind must
-//! equal the replacement's kind — no cross-kind mapping exists, and
-//! intent-unrepresentable members (Symbol/Hyperlink/other) can only be kept or
-//! deleted. New records get typed wire defaults, a fresh UniqueId (where the
-//! kind carries one), `owner_part_id` per memo §2 (parameters → −1; graphics →
-//! the part they are created for, 1..=effective), `owner_part_display_mode`
-//! per memo §4 (default 0, bounded by `display_mode_count`), and style_id 0
-//! (authoring a style id is the memo §8b hard error; no init exposes one).
+//! `SchParameterInit` (name/text/is_hidden), `SchGraphicInit` (owner part,
+//! display mode, and the 13 representable kinds' view fields), and
+//! `SchPinInit` (the `SchPinView` surface: designator, name, electrical type,
+//! length, location, orientation, is_hidden, hidden_net_name, owner part,
+//! display mode, and the swap-group fields). Replace preserves every
+//! non-addressed field of the original record verbatim (unique_id, style_id,
+//! sidecar-backed pin fields — defined/selected functions, package length,
+//! propagation delay, fractional coordinates, custom text positioning,
+//! symbol-line width, description/default value —, unrepresentable extras); a
+//! Replace target's kind must equal the replacement's kind — no cross-kind
+//! mapping exists, and intent-unrepresentable members (Symbol/Hyperlink/other)
+//! can only be kept or deleted. New records get typed wire defaults, a fresh
+//! UniqueId (where the kind carries one — NOT pins: the native SchLib binary
+//! pin body has no UniqueId field, so an assigned id could never survive a
+//! native save/reopen and none is generated), `owner_part_id` per memo §1/§2
+//! (parameters → −1; graphics → the part they are created for, 1..=effective;
+//! pins → 0 [the natively defined shared-pin wildcard] or 1..=effective, −1
+//! forbidden), `owner_part_display_mode` per memo §4 (default 0, bounded by
+//! `display_mode_count`), and style_id 0 (authoring a style id is the memo
+//! §8b hard error; no init exposes one).
+//!
+//! Recorded creation-default deviation from the native editor default
+//! (`SchDataPin.SetDefault`, Objects/SchDataPin.cs): a New pin keeps the
+//! typed WIRE defaults for the fields `SchPinInit` does not address —
+//! `show_name`/`show_designator` false (PIN_CONGLOMERATE wire zero) and the
+//! wire-zero formal type — where AD26's editor creation default sets both
+//! show flags TRUE and `formalType = eStdLogic_ForcingUnknown` (it also
+//! seeds the combined swap string as the bare `"|&|"` separator, which our
+//! empty-halves encoding writes as `""`). Neither `SchPinInit` nor
+//! `SchPinView` exposes the show flags or the formal type, so callers cannot
+//! author them; whether New pins should adopt the native `SetDefault` values
+//! (or the init/view surface should grow the fields) is a queued user
+//! decision recorded in the increment-C worklog. The current values
+//! round-trip exactly (asserted in tests) — this is a creation-semantics
+//! deviation, not a data-integrity one.
+//!
+//! Pin swap encoding (memo §5 rule 3): the stored combined
+//! `SwapIdPartAndPartPin` string stays byte-verbatim on every untouched pin
+//! (wild forms such as a bare `"|&|"` included). `SchPinInit` addresses the
+//! two halves separately (`part_swap_group` prefix, `part_pin_swap_suffix`);
+//! when BOTH are `None` on a Replace the combined string is preserved
+//! byte-verbatim, and when either half is addressed the original is split and
+//! re-encoded through the native rule (separator emitted only for a non-empty
+//! suffix) with the unaddressed half preserved through the split. A New pin
+//! resolves both halves (empty defaults) and encodes natively. The native
+//! concat rule cannot regenerate the wild bare-separator form; re-encoding a
+//! pin that carried one normalizes it, which is exactly the memo's contract
+//! for touched halves.
+//!
+//! Authoring a non-empty pin `hidden_net_name` different from the stored value
+//! is a hard error (`check_pin_hidden_net_name_write`): the binary pin body
+//! carries no such field and the native pin-owned-Parameter storage form is
+//! preserved-only, so a written value would be silently lost on save.
 //!
 //! The optional init fields (`owner_part_display_mode`, and `font_id` on
 //! Label/TextFrame) mean "unaddressed" when `None`: on `New` they resolve the
@@ -100,39 +169,42 @@
 use std::collections::{HashMap, HashSet};
 
 use super::views::is_graphic_like;
-use super::{SchGraphicDetail, SchGraphicView, SchLibComponentSnapshot, SchOwnerGroup};
+use super::{SchGraphicDetail, SchGraphicView, SchLibComponentSnapshot, SchOwnerGroup, SchPinView};
 use crate::param_collection::ParameterCollection;
 use crate::param_value::SchAngle;
 use crate::sch_records::{
     SchArc, SchBezier, SchEllipse, SchEllipticalArc, SchImage, SchLabel, SchLibComponent, SchLine,
-    SchParameter, SchPie, SchPolygon, SchPolyline, SchRecord, SchRectangle, SchRoundRectangle,
-    SchTextFrame,
+    SchParameter, SchPie, SchPin, SchPolygon, SchPolyline, SchRecord, SchRectangle,
+    SchRoundRectangle, SchTextFrame, encode_swap_id_part_and_part_pin, parse_text_pin,
+    split_swap_id_part_and_part_pin,
 };
 use crate::schlib::ownership::{
     RecordAddress, RecordItem, RecordOwner, RecordStream, assemble_records, owner_of,
 };
 use crate::schlib::validation::{
     WrittenOwnerPartClass, check_embedded_image_reference, check_font_id_exists,
-    check_style_id_write, check_written_display_mode, check_written_owner_part_id,
-    find_or_create_default_font,
+    check_pin_hidden_net_name_write, check_style_id_write, check_written_display_mode,
+    check_written_owner_part_id, find_or_create_default_font,
 };
 use crate::util::generate_unique_id;
 use crate::{AltiumFormatError, Result, ResultExt};
 use altium_format_types::{
-    Color, Coord, CoordPoint, HorizontalAlign, LineShape, LineStyle, PenWidth, RotationBy90,
-    TextJustification,
+    Color, Coord, CoordPoint, HorizontalAlign, LineShape, LineStyle, PenWidth, PinElectricalType,
+    RotationBy90, TextJustification,
 };
 
-/// One batch of structural edits over the parameters and graphics collections,
-/// applied through a single assembly pass. `None` leaves a collection
-/// completely untouched; `Some(vec![])` deletes every member (authorization
-/// required).
+/// One batch of structural edits over the parameters, graphics, and pins
+/// collections, applied through a single assembly pass. `None` leaves a
+/// collection completely untouched; `Some(vec![])` deletes every member
+/// (authorization required).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SchChildBatch {
     /// Final ordered `parameters()` sequence, or `None` to leave it untouched.
     pub parameters: Option<Vec<SchParameterEdit>>,
     /// Final ordered `graphics()` sequence, or `None` to leave it untouched.
     pub graphics: Option<Vec<SchGraphicEdit>>,
+    /// Final ordered `pins()` sequence, or `None` to leave it untouched.
+    pub pins: Option<Vec<SchPinEdit>>,
     /// Explicit per-call deletion authorization: an original collection member
     /// omitted from a final sequence is rejected unless this is set.
     pub allow_deletion: bool,
@@ -180,6 +252,108 @@ impl SchParameterInit {
             text: view.text.to_owned(),
             is_hidden: view.is_hidden,
         }
+    }
+}
+
+/// One item of the final `pins()` sequence.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SchPinEdit {
+    /// The original member at `pins()[i]`, preserved verbatim (sidecar-backed
+    /// fields and the raw combined swap string included). The only edit
+    /// allowed for a pin living in the Additional stream, and only at its
+    /// original position.
+    Keep(usize),
+    /// The original member at `pins()[i]` with the intent-addressable fields
+    /// replaced; every other field — including the sidecar-backed typed
+    /// fields — is preserved verbatim.
+    Replace(usize, SchPinInit),
+    /// A newly created root-owned pin.
+    New(SchPinInit),
+}
+
+/// Intent-addressable pin fields (the `SchPinView` surface).
+///
+/// The two combined-swap halves are optional with "unaddressed" semantics per
+/// memo §5 rule 3: both `None` on a `Replace` preserves the stored combined
+/// string byte-verbatim (wild encodings included); addressing either half
+/// splits the original and re-encodes through the native rule, preserving the
+/// unaddressed half through the split. On `New` both default to empty.
+/// `owner_part_display_mode: None` means unaddressed exactly as in
+/// [`SchGraphicInit`]: creation default 0 on `New`, stored value preserved on
+/// `Replace`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SchPinInit {
+    /// 0 (the natively defined shared-pin wildcard, memo §1) or a numbered
+    /// part `1..=effective_part_count`. −1 is forbidden on pins.
+    pub owner_part_id: i32,
+    pub owner_part_display_mode: Option<i32>,
+    pub designator: String,
+    pub name: String,
+    pub electrical: PinElectricalType,
+    pub length: Coord,
+    pub location: CoordPoint,
+    pub orientation: RotationBy90,
+    pub is_hidden: bool,
+    /// Only the stored value or the empty default may be written
+    /// (`check_pin_hidden_net_name_write`; no verified SchLib serialization
+    /// path exists for authored hidden net names).
+    pub hidden_net_name: String,
+    /// `SwapIdPin` (the pin swap group).
+    pub swap_group: String,
+    /// `SwapIdPart` — the prefix half of the combined swap string; `None` =
+    /// unaddressed.
+    pub part_swap_group: Option<String>,
+    /// `SwapIdPartPin` — the suffix half of the combined swap string; `None` =
+    /// unaddressed. The native encoding emits the separator only for a
+    /// non-empty suffix, so an authored empty suffix and an authored absent
+    /// suffix serialize identically.
+    pub part_pin_swap_suffix: Option<String>,
+    /// `PairSwapID` (PinMiscData sidecar).
+    pub pair_swap_group: String,
+}
+
+impl SchPinInit {
+    /// Copies the intent-addressable fields out of a projected view. Errors
+    /// for views whose owner group has no pin init representation
+    /// (`PartIndependent` and `OutOfRange` owners are preserved-only content).
+    ///
+    /// Both combined-swap halves are populated explicitly (a view suffix of
+    /// `None` maps to an authored empty suffix — the two serialize identically
+    /// under the native concat rule), so a `Replace` built `from_view`
+    /// re-encodes the combined string: byte-identical for every natively
+    /// encodable string, and normalizing for the wild bare-separator forms. A
+    /// caller that must preserve a wild combined string byte-verbatim leaves
+    /// both halves `None` instead.
+    pub fn from_view(view: &SchPinView<'_>) -> Result<Self> {
+        let owner_part_id = match view.owner_group {
+            SchOwnerGroup::SharedPins => 0,
+            SchOwnerGroup::Part(part) => part,
+            other => {
+                return Err(AltiumFormatError::InvalidParamValue {
+                    key: "OwnerPartId".to_owned(),
+                    detail: format!(
+                        "pin owner group {other:?} has no init representation: only shared \
+                         (0) and numbered parts are authorable on pins (memo §1/§2)"
+                    ),
+                });
+            }
+        };
+        Ok(Self {
+            owner_part_id,
+            owner_part_display_mode: Some(view.owner_part_display_mode),
+            designator: view.designator.to_owned(),
+            name: view.name.to_owned(),
+            electrical: view.electrical,
+            length: view.length,
+            location: view.location,
+            orientation: view.orientation,
+            is_hidden: view.is_hidden,
+            hidden_net_name: view.hidden_net_name.to_owned(),
+            swap_group: view.swap_group.to_owned(),
+            part_swap_group: Some(view.part_swap_group.to_owned()),
+            part_pin_swap_suffix: Some(view.part_pin_swap_suffix.unwrap_or("").to_owned()),
+            pair_swap_group: view.pair_swap_group.to_owned(),
+        })
     }
 }
 
@@ -631,11 +805,12 @@ impl SchGraphicShape {
     }
 }
 
-/// The two structurally editable collections.
+/// The three structurally editable collections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Collection {
     Parameters,
     Graphics,
+    Pins,
 }
 
 impl Collection {
@@ -643,6 +818,7 @@ impl Collection {
         match self {
             Self::Parameters => "parameters",
             Self::Graphics => "graphics",
+            Self::Pins => "pins",
         }
     }
 }
@@ -658,21 +834,23 @@ enum FinalRecord {
 }
 
 /// Identity of a record across the batch: original input address or the
-/// batch-local id of a created record.
+/// batch-local id of a created record. Shared with the parts engine
+/// (`snapshot::parts`), which renumbers touched owners after part-scoped
+/// deletions through the same policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum Identity {
+pub(super) enum Identity {
     Original(RecordStream2, usize),
     New(usize),
 }
 
 /// `RecordStream` mirror with derives needed for identity ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum RecordStream2 {
+pub(super) enum RecordStream2 {
     Data,
     Additional,
 }
 
-fn identity_of(address: RecordAddress) -> Identity {
+pub(super) fn identity_of(address: RecordAddress) -> Identity {
     Identity::Original(
         match address.stream {
             RecordStream::Data => RecordStream2::Data,
@@ -699,8 +877,8 @@ enum EditMode {
 }
 
 impl SchLibComponentSnapshot {
-    /// Applies one batch of structural edits to the parameters and graphics
-    /// collections; see the module documentation for the complete contract
+    /// Applies one batch of structural edits to the parameters, graphics,
+    /// and pins collections; see the module documentation for the complete contract
     /// (final-sequence semantics, the stream-order rule, deletion
     /// authorization, creation defaults, and the IndexInSheet policy). The
     /// input snapshot is never modified; errors leave no partial state.
@@ -717,6 +895,7 @@ impl SchLibComponentSnapshot {
         let component = &self.component;
         let param_members = self.parameter_member_addresses()?;
         let graphic_members = graphic_member_addresses(component);
+        let pin_members = pin_member_addresses(component);
 
         let param_finals = match batch.parameters {
             Some(edits) => {
@@ -730,12 +909,21 @@ impl SchLibComponentSnapshot {
             }
             None => None,
         };
+        let pin_finals = match batch.pins {
+            Some(edits) => {
+                Some(self.resolve_pin_edits(edits, &pin_members, batch.allow_deletion)?)
+            }
+            None => None,
+        };
 
         // Working copy with Replace field-mutations applied in place: indices
         // and the ownership graph are unchanged, so every later resolution
         // still refers to the immutable input addressing.
         let mut working = component.clone();
-        for finals in [&param_finals, &graphic_finals].into_iter().flatten() {
+        for finals in [&param_finals, &graphic_finals, &pin_finals]
+            .into_iter()
+            .flatten()
+        {
             for item in finals {
                 if let FinalRecord::Existing {
                     address,
@@ -751,8 +939,10 @@ impl SchLibComponentSnapshot {
             component,
             &param_members,
             &graphic_members,
+            &pin_members,
             param_finals,
             graphic_finals,
+            pin_finals,
         )?;
         let (data_items, data_ids) = to_items(&plan.data)?;
         let (additional_items, additional_ids) = {
@@ -763,8 +953,8 @@ impl SchLibComponentSnapshot {
                         key: "record stream".to_owned(),
                         detail: format!(
                             "final arrangement places created record {id:?} in the Additional \
-                             stream; creating new parameters/graphics in the Additional stream \
-                             is unsupported (no verified native creation path exists)"
+                             stream; creating new parameters/graphics/pins in the Additional \
+                             stream is unsupported (no verified native creation path exists)"
                         ),
                     });
                 }
@@ -916,6 +1106,203 @@ impl SchLibComponentSnapshot {
             allow_deletion,
         )?;
         Ok(finals)
+    }
+
+    fn resolve_pin_edits(
+        &self,
+        edits: Vec<SchPinEdit>,
+        members: &[RecordAddress],
+        allow_deletion: bool,
+    ) -> Result<Vec<FinalRecord>> {
+        let mut referenced = HashSet::new();
+        let mut finals = Vec::with_capacity(edits.len());
+        for (position, edit) in edits.into_iter().enumerate() {
+            let item = match edit {
+                SchPinEdit::Keep(index) => FinalRecord::Existing {
+                    address: resolve_member(
+                        Collection::Pins,
+                        members,
+                        index,
+                        position,
+                        &mut referenced,
+                    )?,
+                    replacement: None,
+                },
+                SchPinEdit::Replace(index, init) => {
+                    let address = resolve_member(
+                        Collection::Pins,
+                        members,
+                        index,
+                        position,
+                        &mut referenced,
+                    )?;
+                    let SchRecord::Pin(original) = record_slot(&self.component, address) else {
+                        unreachable!("pin members are Pin records")
+                    };
+                    let mut replaced = original.clone();
+                    self.apply_pin_init(&mut replaced, init, EditMode::Replace)
+                        .with_context(|| {
+                            format!("replacing pins()[{index}] (final position {position})")
+                        })?;
+                    FinalRecord::Existing {
+                        address,
+                        replacement: Some(SchRecord::Pin(replaced)),
+                    }
+                }
+                SchPinEdit::New(init) => FinalRecord::Created(
+                    self.build_pin(init)
+                        .with_context(|| format!("creating pin at final position {position}"))?,
+                ),
+            };
+            finals.push(item);
+        }
+        // Additional-stream pins freeze the collection to a positional
+        // Keep/Replace arrangement: the nine sidecar streams are serialized
+        // from final DATA pin encounter order only, and Additional pin
+        // sidecars are unproven (ownership worklog), so while any Additional
+        // pin member exists every member must stay at its original final
+        // position (Additional members strictly Keep, Data members Keep or
+        // field Replace) and no member may be added or deleted. A Data-only
+        // permutation would be sidecar-safe under the current save path, but
+        // the published conservative contract rejects it until Additional
+        // pin sidecars are proven (module docs).
+        let has_additional_pins = members
+            .iter()
+            .any(|address| address.stream == RecordStream::Additional);
+        if has_additional_pins {
+            for (ordinal, address) in members.iter().enumerate() {
+                let (positional, replaced) = match finals.get(ordinal) {
+                    Some(FinalRecord::Existing {
+                        address: kept,
+                        replacement,
+                    }) if kept == address => (true, replacement.is_some()),
+                    _ => (false, false),
+                };
+                if address.stream == RecordStream::Additional {
+                    if !positional || replaced {
+                        return Err(AltiumFormatError::InvalidParamValue {
+                            key: "pins".to_owned(),
+                            detail: format!(
+                                "pins()[{ordinal}] lives in the Additional stream; structural \
+                                 pin edits touching Additional-stream pins are unsupported \
+                                 (Additional pin sidecars are unproven) — such pins can only \
+                                 be kept untouched at their original positions"
+                            ),
+                        });
+                    }
+                } else if !positional {
+                    return Err(AltiumFormatError::InvalidParamValue {
+                        key: "pins".to_owned(),
+                        detail: format!(
+                            "pins()[{ordinal}] must stay at final position {ordinal}: pin \
+                             members living in the Additional stream freeze the collection \
+                             (Additional pin sidecars are unproven), so pin \
+                             insert/delete/reorder is unsupported — only positional \
+                             Keep/Replace of Data pins is possible"
+                        ),
+                    });
+                }
+            }
+            if finals.len() > members.len() {
+                return Err(AltiumFormatError::InvalidParamValue {
+                    key: "pins".to_owned(),
+                    detail: format!(
+                        "final pin sequence adds {} member(s), but appending pins is \
+                         unsupported while Additional-stream pin members exist (Additional \
+                         pin sidecars are unproven; the collection is frozen to positional \
+                         Keep/Replace of Data pins)",
+                        finals.len() - members.len()
+                    ),
+                });
+            }
+        }
+        check_deletions(Collection::Pins, members.len(), &referenced, allow_deletion)?;
+        Ok(finals)
+    }
+
+    /// Builds a new root-owned pin from typed wire defaults plus the init's
+    /// addressed fields. No UniqueId is generated: the native SchLib binary
+    /// pin body carries none, so an assigned id could never survive a native
+    /// save/reopen (documented deviation from the graphics creation rule).
+    fn build_pin(&self, init: SchPinInit) -> Result<SchRecord> {
+        let mut pin = parse_text_pin(&mut ParameterCollection::new())
+            .context("creating pin from typed wire defaults")?;
+        // SchLib pins serialize as binary records, whose bodies always carry
+        // the four IEEE symbol fields; the presence flags are SchDoc text-pin
+        // omission artifacts. Mark them present so the created state is the
+        // binary writer's save/reopen fixed point.
+        pin.symbol_inner_edge_present = true;
+        pin.symbol_outer_edge_present = true;
+        pin.symbol_inside_present = true;
+        pin.symbol_outside_present = true;
+        self.apply_pin_init(&mut pin, init, EditMode::Create)?;
+        Ok(SchRecord::Pin(pin))
+    }
+
+    /// Writes exactly the view-addressed fields of `init` into `pin` (memo
+    /// §1/§4/§5/§7 rules): owner part and display mode validated at the
+    /// mutation boundary, combined swap halves preserved or re-encoded per
+    /// memo §5 rule 3, hidden_net_name guarded, and every other typed field —
+    /// sidecar-backed fields included — left untouched. Never touches the
+    /// component's stored `all_pin_count` (memo §7).
+    fn apply_pin_init(&self, pin: &mut SchPin, init: SchPinInit, mode: EditMode) -> Result<()> {
+        let root = &self.component.component;
+        check_written_owner_part_id(
+            WrittenOwnerPartClass::Pin,
+            init.owner_part_id,
+            root.part_count,
+        )?;
+        pin.owner_part_id = init.owner_part_id;
+        match (init.owner_part_display_mode, mode) {
+            (None, EditMode::Replace) => {}
+            (authored, _) => {
+                let value = authored.unwrap_or(0);
+                check_written_display_mode("OwnerPartDisplayMode", value, root.display_mode_count)?;
+                pin.owner_part_display_mode =
+                    u8::try_from(value).map_err(|_| AltiumFormatError::InvalidParamValue {
+                        key: "OwnerPartDisplayMode".to_owned(),
+                        detail: format!(
+                            "display mode {value} exceeds the native byte range of the \
+                             binary pin field"
+                        ),
+                    })?;
+            }
+        }
+        let original_hidden_net = match mode {
+            EditMode::Replace => Some(pin.hidden_net_name.clone()),
+            EditMode::Create => None,
+        };
+        check_pin_hidden_net_name_write(original_hidden_net.as_deref(), &init.hidden_net_name)?;
+        pin.hidden_net_name = init.hidden_net_name;
+        // Coordinate range note: the binary pin body stores length/location as
+        // i16 counts of DXP base units with the remainder in the PinFrac
+        // sidecar; |i32::MAX| / C_BASE_UNIT = 21,474 < i16::MAX, so every
+        // representable Coord fits and no range check is needed.
+        pin.designator = init.designator;
+        pin.name = init.name;
+        pin.electrical = init.electrical;
+        pin.pin_length = init.length;
+        pin.location = init.location;
+        pin.orientation = init.orientation;
+        pin.is_hidden = init.is_hidden;
+        pin.swap_id_pin = init.swap_group;
+        pin.swap_id_pair = init.pair_swap_group;
+        match (init.part_swap_group, init.part_pin_swap_suffix) {
+            // Both halves unaddressed: the stored combined string stays
+            // byte-verbatim (Replace) or keeps the empty wire default (Create).
+            (None, None) => {}
+            (prefix, suffix) => {
+                let combined = {
+                    let (original_prefix, original_suffix) =
+                        split_swap_id_part_and_part_pin(&pin.swap_id_part);
+                    let prefix = prefix.unwrap_or_else(|| original_prefix.to_owned());
+                    let suffix = suffix.unwrap_or_else(|| original_suffix.unwrap_or("").to_owned());
+                    encode_swap_id_part_and_part_pin(&prefix, &suffix)
+                };
+                pin.swap_id_part = combined;
+            }
+        }
+        Ok(())
     }
 
     /// Builds a new root-owned parameter with typed wire defaults, a fresh
@@ -1517,6 +1904,15 @@ fn graphic_member_addresses(component: &SchLibComponent) -> Vec<RecordAddress> {
         .collect()
 }
 
+/// Addresses of `pins()` members in encounter order, mirroring the projection's
+/// membership exactly.
+fn pin_member_addresses(component: &SchLibComponent) -> Vec<RecordAddress> {
+    all_records(component)
+        .filter(|(_, record)| matches!(record, SchRecord::Pin(_)))
+        .map(|(address, _)| address)
+        .collect()
+}
+
 fn resolve_member(
     collection: Collection,
     members: &[RecordAddress],
@@ -1588,13 +1984,16 @@ struct PlannedStreams {
 /// Applies the stream-order rule: non-members keep their original relative
 /// order; each edited collection's final sequence occupies its members'
 /// original stream positions in encounter order, extras following the last
-/// original member (or the end of the Data stream for an empty membership).
+/// original member (or the end of the Data stream for an empty membership,
+/// parameters before graphics before pins).
 fn plan_streams(
     component: &SchLibComponent,
     param_members: &[RecordAddress],
     graphic_members: &[RecordAddress],
+    pin_members: &[RecordAddress],
     param_finals: Option<Vec<FinalRecord>>,
     graphic_finals: Option<Vec<FinalRecord>>,
+    pin_finals: Option<Vec<FinalRecord>>,
 ) -> Result<PlannedStreams> {
     let member_ordinals = |members: &[RecordAddress]| -> HashMap<RecordAddress, usize> {
         members
@@ -1605,6 +2004,7 @@ fn plan_streams(
     };
     let param_ordinals = member_ordinals(param_members);
     let graphic_ordinals = member_ordinals(graphic_members);
+    let pin_ordinals = member_ordinals(pin_members);
 
     struct EditedCollection {
         members: Vec<RecordAddress>,
@@ -1629,6 +2029,7 @@ fn plan_streams(
     };
     let mut params = split(param_members, param_finals);
     let mut graphics = split(graphic_members, graphic_finals);
+    let mut pins = split(pin_members, pin_finals);
 
     let mut data = Vec::new();
     let mut additional = Vec::new();
@@ -1641,6 +2042,8 @@ fn plan_streams(
             params.as_mut().map(|collection| (collection, *ordinal))
         } else if let Some(ordinal) = graphic_ordinals.get(&address) {
             graphics.as_mut().map(|collection| (collection, *ordinal))
+        } else if let Some(ordinal) = pin_ordinals.get(&address) {
+            pins.as_mut().map(|collection| (collection, *ordinal))
         } else {
             None
         };
@@ -1660,8 +2063,11 @@ fn plan_streams(
         }
     }
     // Previously empty collections append their extras at the end of the Data
-    // stream, parameters before graphics.
-    for collection in [&mut params, &mut graphics].into_iter().flatten() {
+    // stream, parameters before graphics before pins.
+    for collection in [&mut params, &mut graphics, &mut pins]
+        .into_iter()
+        .flatten()
+    {
         if collection.members.is_empty() {
             for item in std::mem::take(&mut collection.extras) {
                 data.push(planned(item));
@@ -1704,8 +2110,10 @@ fn to_items(entries: &[PlannedEntry]) -> Result<(Vec<RecordItem>, Vec<Identity>)
 
 /// Memo §6 rule 2: renumber ALL in-objectList children of owners whose child
 /// sequence the batch structurally touched to final 0-based sibling positions;
-/// untouched owners keep their stored values verbatim.
-fn renumber_touched_owners(
+/// untouched owners keep their stored values verbatim. Shared with the parts
+/// engine (`snapshot::parts`), whose part-scoped deletions apply the same
+/// policy.
+pub(super) fn renumber_touched_owners(
     input: &SchLibComponent,
     final_component: &mut SchLibComponent,
     data_ids: &[Identity],
@@ -1981,6 +2389,7 @@ mod tests {
                     SchGraphicEdit::Keep(0),
                     SchGraphicEdit::Keep(3),
                 ]),
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2072,6 +2481,7 @@ mod tests {
             .with_children(SchChildBatch {
                 parameters: Some(vec![SchParameterEdit::Keep(0), SchParameterEdit::Keep(1)]),
                 graphics: Some((0..4).map(SchGraphicEdit::Keep).collect()),
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2094,6 +2504,7 @@ mod tests {
                     SchGraphicEdit::Keep(0),
                     SchGraphicEdit::Keep(3),
                 ]),
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2136,6 +2547,7 @@ mod tests {
                     ),
                 ]),
                 graphics: None,
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2160,6 +2572,7 @@ mod tests {
             .with_children(SchChildBatch {
                 parameters: Some(vec![SchParameterEdit::Keep(0)]),
                 graphics: None,
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -2172,6 +2585,7 @@ mod tests {
             .with_children(SchChildBatch {
                 parameters: Some(vec![SchParameterEdit::Keep(0)]),
                 graphics: None,
+                pins: None,
                 allow_deletion: true,
             })
             .unwrap();
@@ -2187,6 +2601,7 @@ mod tests {
             .with_children(SchChildBatch {
                 parameters: Some(vec![SchParameterEdit::Keep(0), SchParameterEdit::Keep(0)]),
                 graphics: None,
+                pins: None,
                 allow_deletion: true,
             })
             .unwrap_err()
@@ -2198,6 +2613,7 @@ mod tests {
             .with_children(SchChildBatch {
                 parameters: Some(vec![SchParameterEdit::Keep(7)]),
                 graphics: None,
+                pins: None,
                 allow_deletion: true,
             })
             .unwrap_err()
@@ -2217,6 +2633,7 @@ mod tests {
                     SchGraphicEdit::Keep(2),
                     SchGraphicEdit::Keep(3),
                 ]),
+                pins: None,
                 allow_deletion: true,
             })
             .unwrap_err()
@@ -2238,6 +2655,7 @@ mod tests {
                     SchParameterEdit::Keep(1),
                 ]),
                 graphics: None,
+                pins: None,
                 allow_deletion: true,
             })
             .unwrap();
@@ -2257,6 +2675,7 @@ mod tests {
                     SchGraphicEdit::Keep(2),
                     SchGraphicEdit::Keep(3),
                 ]),
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -2276,6 +2695,7 @@ mod tests {
                     SchGraphicEdit::Keep(2),
                     SchGraphicEdit::Replace(3, rect_init(1)),
                 ]),
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -2301,6 +2721,7 @@ mod tests {
                     SchGraphicEdit::Keep(2),
                     SchGraphicEdit::Keep(3),
                 ]),
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2330,6 +2751,7 @@ mod tests {
                     .chain([SchGraphicEdit::New(init)])
                     .collect(),
             ),
+            pins: None,
             allow_deletion: false,
         };
 
@@ -2446,6 +2868,7 @@ mod tests {
                     }),
                 ]),
                 graphics: None,
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2499,6 +2922,7 @@ mod tests {
                     SchParameterEdit::Keep(1),
                 ]),
                 graphics: None,
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2555,6 +2979,7 @@ mod tests {
                     }),
                 ]),
                 graphics: None,
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -2568,6 +2993,7 @@ mod tests {
             .with_children(SchChildBatch {
                 parameters: Some(vec![SchParameterEdit::Keep(1), SchParameterEdit::Keep(0)]),
                 graphics: None,
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap_err()
@@ -2604,6 +3030,7 @@ mod tests {
                     SchGraphicEdit::Keep(0),
                     SchGraphicEdit::New(rect_init(1)),
                 ]),
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2701,6 +3128,7 @@ mod tests {
                     }),
                 ]),
                 graphics: None,
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2717,6 +3145,7 @@ mod tests {
                         .collect(),
                 ),
                 graphics: None,
+                pins: None,
                 allow_deletion: true,
             })
             .unwrap();
@@ -2826,6 +3255,7 @@ mod tests {
                     ),
                     SchGraphicEdit::Keep(2),
                 ]),
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2859,6 +3289,7 @@ mod tests {
                     ),
                     SchGraphicEdit::Keep(2),
                 ]),
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -2883,6 +3314,7 @@ mod tests {
                         shape: label_shape(None, "fresh"),
                     }),
                 ]),
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -3038,6 +3470,7 @@ mod tests {
             .with_children(SchChildBatch {
                 parameters: None,
                 graphics: Some(edits),
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -3102,6 +3535,7 @@ mod tests {
                     SchGraphicEdit::Replace(1, label_init.clone()),
                     SchGraphicEdit::Replace(2, polyline_init.clone()),
                 ]),
+                pins: None,
                 allow_deletion: false,
             })
             .unwrap();
@@ -3121,5 +3555,816 @@ mod tests {
         };
         assert_eq!(polyline.vertices.len(), 3);
         assert_eq!(polyline.unique_id, "PLIN0001");
+    }
+
+    // ── Increment C: pins ────────────────────────────────────────────────────
+
+    fn pin_init(part: i32, designator: &str) -> SchPinInit {
+        SchPinInit {
+            owner_part_id: part,
+            owner_part_display_mode: Some(0),
+            designator: designator.to_owned(),
+            name: format!("N{designator}"),
+            electrical: PinElectricalType::Passive,
+            length: Coord::from_mils(300).unwrap(),
+            location: CoordPoint::zero(),
+            orientation: RotationBy90::Rotate0,
+            is_hidden: false,
+            hidden_net_name: String::new(),
+            swap_group: String::new(),
+            part_swap_group: Some(String::new()),
+            part_pin_swap_suffix: Some(String::new()),
+            pair_swap_group: String::new(),
+        }
+    }
+
+    fn pin_designators(snapshot: &SchLibComponentSnapshot) -> Vec<String> {
+        snapshot
+            .pins()
+            .iter()
+            .map(|view| view.designator.to_owned())
+            .collect()
+    }
+
+    /// A pin exercising the coordinate-fraction, overflow-description,
+    /// pair-swap, text-positioning, and wide-text sidecar streams.
+    fn frac_text_pin(designator: &str) -> SchRecord {
+        let mut record =
+            crate::sch_records::parse_text_pin(&mut ParameterCollection::new()).unwrap();
+        record.owner_part_id = 1;
+        record.designator = designator.to_owned();
+        record.name = format!("µNAME{designator}");
+        record.description = "D".repeat(300);
+        record.location = CoordPoint {
+            x: Coord::from_internal(1_005_000),
+            y: Coord::from_internal(-2_000_250),
+        };
+        record.pin_length = Coord::from_internal(3_000_777);
+        record.swap_id_part = "G1|&|s1".to_owned();
+        record.swap_id_pair = "PAIR-A".to_owned();
+        record.name_text_data = Some(crate::sch_records::PinTextPositioning {
+            position_mode_custom: true,
+            rotation_anchor_component: false,
+            rotation_relative: RotationBy90::Rotate90,
+            font_mode_custom: true,
+            custom_position_margin: Some(Coord::from_mils(2).unwrap()),
+            custom_font_id: Some(1),
+            custom_color: Some(Color::new(0x0000_7F00)),
+        });
+        SchRecord::Pin(record)
+    }
+
+    /// A pin exercising the symbol-line-width, package-length,
+    /// propagation-delay, and function-data sidecar streams.
+    fn function_pin(designator: &str) -> SchRecord {
+        let mut record =
+            crate::sch_records::parse_text_pin(&mut ParameterCollection::new()).unwrap();
+        record.owner_part_id = 1;
+        record.designator = designator.to_owned();
+        record.name = format!("N{designator}");
+        record.pin_symbol_line_width = Some(1);
+        record.pin_package_length = "10mil".to_owned();
+        record.propagation_delay = "1.5ns".to_owned();
+        record.defined_functions = vec!["CLOCK".to_owned(), "GPIO".to_owned()];
+        record.selected_functions = vec!["GPIO".to_owned()];
+        SchRecord::Pin(record)
+    }
+
+    /// Blank + three Data pins (two sidecar-rich, one plain) + a root
+    /// parameter, canonicalized through a native save/reopen.
+    fn sidecar_library() -> SchLib {
+        let mut library = SchLib::new_blank_ad26().unwrap();
+        {
+            let records = &mut library.components[0].records;
+            records.push(param("Value", "10k", 0));
+            records.push(frac_text_pin("1"));
+            records.push(pin(1)); // plain pin, designator "1" → rename below
+            let SchRecord::Pin(plain) = records.last_mut().unwrap() else {
+                unreachable!()
+            };
+            plain.designator = "2".to_owned();
+            records.push(function_pin("3"));
+        }
+        let library = finish(library);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        library.save(file.path()).unwrap();
+        SchLib::open(file.path()).unwrap()
+    }
+
+    #[test]
+    fn pin_batch_edits_keep_all_nine_sidecar_streams_consistent_across_save_reopen() {
+        let library = sidecar_library();
+        // The fixture engages every one of the nine pin sidecar streams, so
+        // the save/reopen equalities below are evidence about all of them.
+        let pins: Vec<&crate::sch_records::SchPin> = library.components[0]
+            .records
+            .iter()
+            .filter_map(|record| match record {
+                SchRecord::Pin(pin) => Some(pin),
+                _ => None,
+            })
+            .collect();
+        let streams: Vec<&str> = crate::schlib::serialize_pin_sidecars(&pins)
+            .unwrap()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            streams,
+            [
+                "PinFrac",
+                "PinDesc",
+                "PinMiscData",
+                "PinTextData",
+                "PinWideText",
+                "PinSymbolLineWidth",
+                "PinPackageLength",
+                "PinPropagationDelay",
+                "PinFunctionData",
+            ]
+        );
+
+        let snapshot = library.snapshot().unwrap();
+        let component = snapshot.component(0).unwrap();
+        assert_eq!(pin_designators(&component), ["1", "2", "3"]);
+
+        // Stage 1: insert at the front, reorder the tail, and replace the
+        // function pin's addressed fields — one batch against the immutable
+        // input projection.
+        let mut replaced_init = SchPinInit::from_view(&component.pins()[2]).unwrap();
+        replaced_init.designator = "3R".to_owned();
+        replaced_init.electrical = PinElectricalType::Output;
+        let edited = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![
+                    SchPinEdit::New(pin_init(1, "P")),
+                    SchPinEdit::Keep(0),
+                    SchPinEdit::Replace(2, replaced_init.clone()),
+                    SchPinEdit::Keep(1),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap();
+
+        // Projection equality: pins() equals the requested final sequence.
+        assert_eq!(pin_designators(&edited), ["P", "1", "3R", "2"]);
+        let views = edited.pins();
+        assert_eq!(SchPinInit::from_view(&views[0]).unwrap(), pin_init(1, "P"));
+        assert_eq!(SchPinInit::from_view(&views[2]).unwrap(), replaced_init);
+
+        // The untouched sidecar-rich pin is preserved verbatim; the replaced
+        // pin keeps every sidecar-backed field.
+        let SchRecord::Pin(untouched) = &edited.component.records[4] else {
+            panic!("untouched pin slot");
+        };
+        assert_eq!(
+            SchRecord::Pin(untouched.clone()),
+            library.components[0].records[3],
+            "untouched pin preserved verbatim (frac coords, long description, \
+             pair swap, text positioning, wide-text name)"
+        );
+        let SchRecord::Pin(replaced) = &edited.component.records[5] else {
+            panic!("replaced pin slot");
+        };
+        assert_eq!(replaced.designator, "3R");
+        assert_eq!(replaced.electrical, PinElectricalType::Output);
+        assert_eq!(replaced.pin_symbol_line_width, Some(1));
+        assert_eq!(replaced.pin_package_length, "10mil");
+        assert_eq!(replaced.propagation_delay, "1.5ns");
+        assert_eq!(replaced.defined_functions, ["CLOCK", "GPIO"]);
+        assert_eq!(replaced.selected_functions, ["GPIO"]);
+        let SchRecord::Pin(created) = &edited.component.records[3] else {
+            panic!("created pin slot");
+        };
+        assert_eq!(
+            created.unique_id, "",
+            "SchLib binary pins carry no UniqueId; none is generated"
+        );
+
+        // Native save/reopen: the ordinal-addressed sidecars follow the
+        // shifted, reordered, and replaced pins exactly.
+        let inserted = snapshot.replace_component(0, edited).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        inserted.materialize().unwrap().save(file.path()).unwrap();
+        let reopened = SchLib::open(file.path()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap(), inserted);
+        assert_eq!(
+            i64::from(reopened.header.weight),
+            i64::from(library.header.weight) + 1
+        );
+        let SchRecord::Pin(reopened_rich) = &reopened.components[0].records[4] else {
+            panic!("reopened rich pin");
+        };
+        assert_eq!(reopened_rich.description.len(), 300);
+        assert_eq!(reopened_rich.location.x, Coord::from_internal(1_005_000));
+        assert_eq!(reopened_rich.swap_id_pair, "PAIR-A");
+        let SchRecord::Pin(reopened_fn) = &reopened.components[0].records[5] else {
+            panic!("reopened function pin");
+        };
+        assert_eq!(reopened_fn.defined_functions, ["CLOCK", "GPIO"]);
+
+        // Stage 2: removal requires authorization, then removes the probe and
+        // the plain pin; the remaining sidecar-rich pins keep their fields
+        // through another save/reopen.
+        let reopened_snapshot = reopened.snapshot().unwrap();
+        let component = reopened_snapshot.component(0).unwrap();
+        let error = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![SchPinEdit::Keep(1), SchPinEdit::Keep(2)]),
+                allow_deletion: false,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("allow_deletion"), "{error}");
+        assert!(error.contains("[0, 3]"), "{error}");
+        let removed = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![SchPinEdit::Keep(1), SchPinEdit::Keep(2)]),
+                allow_deletion: true,
+            })
+            .unwrap();
+        assert_eq!(pin_designators(&removed), ["1", "3R"]);
+        let shrunk = reopened_snapshot.replace_component(0, removed).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        shrunk.materialize().unwrap().save(file.path()).unwrap();
+        let reopened = SchLib::open(file.path()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap(), shrunk);
+        let SchRecord::Pin(kept_fn) = &reopened.components[0].records[4] else {
+            panic!("kept function pin");
+        };
+        assert_eq!(kept_fn.designator, "3R");
+        assert_eq!(kept_fn.pin_package_length, "10mil");
+    }
+
+    #[test]
+    fn all_pin_count_stays_verbatim_through_structural_pin_edits() {
+        // Memo §7: positive-stale and zero stored caches survive pin
+        // insert/remove batches and native save/reopen untouched; no
+        // recompute path exists.
+        for stale in [17, 0] {
+            let mut library = sidecar_library();
+            library.components[0].component.all_pin_count = stale;
+            let library = finish(library);
+            let snapshot = library.snapshot().unwrap();
+            let component = snapshot.component(0).unwrap();
+            assert_eq!(component.stored_all_pin_count(), stale);
+            let edited = component
+                .with_children(SchChildBatch {
+                    parameters: None,
+                    graphics: None,
+                    pins: Some(vec![
+                        SchPinEdit::New(pin_init(1, "P")),
+                        SchPinEdit::Keep(0),
+                        SchPinEdit::Keep(2),
+                    ]),
+                    allow_deletion: true,
+                })
+                .unwrap();
+            assert_eq!(edited.stored_all_pin_count(), stale);
+            let replaced = snapshot.replace_component(0, edited).unwrap();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            replaced.materialize().unwrap().save(file.path()).unwrap();
+            let reopened = SchLib::open(file.path()).unwrap();
+            assert_eq!(reopened.components[0].component.all_pin_count, stale);
+            assert_eq!(reopened.snapshot().unwrap(), replaced);
+        }
+    }
+
+    #[test]
+    fn multi_collection_batch_edits_all_three_collections_against_immutable_input() {
+        let library = library();
+        let snapshot = library.snapshot().unwrap();
+        let component = snapshot.component(0).unwrap();
+        assert_eq!(pin_designators(&component), ["1"]);
+
+        let edited = component
+            .with_children(SchChildBatch {
+                parameters: Some(vec![
+                    SchParameterEdit::Keep(1),
+                    SchParameterEdit::Keep(0),
+                    SchParameterEdit::New(SchParameterInit {
+                        name: "Tolerance".to_owned(),
+                        text: "1%".to_owned(),
+                        is_hidden: false,
+                    }),
+                ]),
+                graphics: Some(
+                    (0..4)
+                        .map(SchGraphicEdit::Keep)
+                        .chain([SchGraphicEdit::New(rect_init(1))])
+                        .collect(),
+                ),
+                pins: Some(vec![SchPinEdit::New(pin_init(1, "P")), SchPinEdit::Keep(0)]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        assert_eq!(parameter_names(&edited), ["Value", "Comment", "Tolerance"]);
+        assert_eq!(
+            graphic_kinds(&edited),
+            ["Rectangle", "Line", "Line", "Symbol", "Rectangle"]
+        );
+        assert_eq!(pin_designators(&edited), ["P", "1"]);
+
+        let replaced = snapshot.replace_component(0, edited).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        replaced.materialize().unwrap().save(file.path()).unwrap();
+        assert_eq!(
+            SchLib::open(file.path()).unwrap().snapshot().unwrap(),
+            replaced
+        );
+    }
+
+    #[test]
+    fn pin_inserts_shift_data_indices_and_remap_additional_to_data_owners() {
+        // Ownership worklog minimum list, pin flavor: a Data pin insertion
+        // shifts an Additional-to-Data parent's owner index; the descendant's
+        // Additional-to-Additional link survives.
+        let mut library = SchLib::new_blank_ad26().unwrap();
+        {
+            let aggregate = &mut library.components[0];
+            aggregate.records.push(pin(1)); // Data native address 3
+            let mut x = SchLine::from_params(&mut ParameterCollection::new()).unwrap();
+            x.base.owner_index = 3;
+            x.base.owner_part_id = 1;
+            let mut y = SchLine::from_params(&mut ParameterCollection::new()).unwrap();
+            y.base.owner_index = 0;
+            y.base.owner_index_additional_list = true;
+            y.base.owner_part_id = 1;
+            aggregate.additional_records = vec![SchRecord::Line(x), SchRecord::Line(y)];
+        }
+        let library = finish(library);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        library.save(file.path()).unwrap();
+        let library = SchLib::open(file.path()).unwrap();
+        let snapshot = library.snapshot().unwrap();
+        let component = snapshot.component(0).unwrap();
+
+        let edited = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![SchPinEdit::New(pin_init(1, "P")), SchPinEdit::Keep(0)]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        assert_eq!(pin_designators(&edited), ["P", "1"]);
+        let SchRecord::Line(x) = &edited.component.additional_records[0] else {
+            panic!("additional X");
+        };
+        assert_eq!(
+            x.base.owner_index, 4,
+            "Additional-to-Data owner follows the pin shifted by the insert"
+        );
+        let SchRecord::Line(y) = &edited.component.additional_records[1] else {
+            panic!("additional Y");
+        };
+        assert_eq!(y.base.owner_index, 0);
+        assert!(y.base.owner_index_additional_list);
+
+        let replaced = snapshot.replace_component(0, edited).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        replaced.materialize().unwrap().save(file.path()).unwrap();
+        assert_eq!(
+            SchLib::open(file.path()).unwrap().snapshot().unwrap(),
+            replaced
+        );
+    }
+
+    #[test]
+    fn additional_stream_pins_can_only_be_kept_untouched() {
+        let mut library = SchLib::new_blank_ad26().unwrap();
+        library.components[0].records.push(pin(1));
+        library.components[0].additional_records.push(pin(1));
+        let library = finish(library);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        library.save(file.path()).unwrap();
+        let library = SchLib::open(file.path()).unwrap();
+        let component = library.snapshot().unwrap().component(0).unwrap();
+        assert_eq!(pin_designators(&component), ["1", "1"]);
+
+        // Replace of the Additional pin.
+        let mut init = SchPinInit::from_view(&component.pins()[1]).unwrap();
+        init.designator = "9".to_owned();
+        let error = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![SchPinEdit::Keep(0), SchPinEdit::Replace(1, init)]),
+                allow_deletion: false,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Additional stream"), "{error}");
+        assert!(error.contains("unproven"), "{error}");
+
+        // Reorder that moves it.
+        let error = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![SchPinEdit::Keep(1), SchPinEdit::Keep(0)]),
+                allow_deletion: false,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Additional stream"), "{error}");
+
+        // Deletion, even authorized.
+        let error = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![SchPinEdit::Keep(0)]),
+                allow_deletion: true,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Additional stream"), "{error}");
+
+        // Insertion whose extra would land in the Additional stream.
+        let error = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![
+                    SchPinEdit::Keep(0),
+                    SchPinEdit::Keep(1),
+                    SchPinEdit::New(pin_init(1, "P")),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Additional"), "{error}");
+        assert!(error.contains("unsupported"), "{error}");
+
+        // Keep-untouched flows through: a field Replace of the DATA pin with
+        // the Additional pin kept in place is fine, and the Additional pin's
+        // record is preserved verbatim.
+        let mut data_init = SchPinInit::from_view(&component.pins()[0]).unwrap();
+        data_init.designator = "2".to_owned();
+        let edited = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![SchPinEdit::Replace(0, data_init), SchPinEdit::Keep(1)]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        assert_eq!(pin_designators(&edited), ["2", "1"]);
+        assert_eq!(
+            edited.component.additional_records,
+            component.component.additional_records
+        );
+
+        // No-op Keep both is identity.
+        let noop = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![SchPinEdit::Keep(0), SchPinEdit::Keep(1)]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        assert_eq!(noop, component);
+    }
+
+    #[test]
+    fn data_pin_structural_edits_are_frozen_while_additional_pins_exist() {
+        // 2 Data pins + 1 Additional pin: the conservative freeze rejects
+        // even Data-only permutations and balanced substitutions (they would
+        // be sidecar-safe — sidecars regenerate from final Data encounter
+        // order — but the published contract is positional Keep/Replace only
+        // until Additional pin sidecars are proven).
+        let mut library = SchLib::new_blank_ad26().unwrap();
+        {
+            let aggregate = &mut library.components[0];
+            for designator in ["A", "B"] {
+                let SchRecord::Pin(mut record) = pin(1) else {
+                    unreachable!()
+                };
+                record.designator = designator.to_owned();
+                aggregate.records.push(SchRecord::Pin(record));
+            }
+            aggregate.additional_records.push(pin(1));
+        }
+        let library = finish(library);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        library.save(file.path()).unwrap();
+        let library = SchLib::open(file.path()).unwrap();
+        let component = library.snapshot().unwrap().component(0).unwrap();
+        assert_eq!(pin_designators(&component), ["A", "B", "1"]);
+
+        let batch = |edits| SchChildBatch {
+            parameters: None,
+            graphics: None,
+            pins: Some(edits),
+            allow_deletion: true,
+        };
+
+        // Pure Data permutation that leaves the Additional ordinal in place.
+        let error = component
+            .with_children(batch(vec![
+                SchPinEdit::Keep(1),
+                SchPinEdit::Keep(0),
+                SchPinEdit::Keep(2),
+            ]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pins()[0]"), "{error}");
+        assert!(error.contains("Additional stream"), "{error}");
+        assert!(error.contains("unsupported"), "{error}");
+
+        // Balanced (count-preserving) delete+insert of a Data pin, even
+        // authorized, is frozen too.
+        let error = component
+            .with_children(batch(vec![
+                SchPinEdit::Keep(0),
+                SchPinEdit::New(pin_init(1, "P")),
+                SchPinEdit::Keep(2),
+            ]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pins()[1]"), "{error}");
+        assert!(error.contains("Additional stream"), "{error}");
+
+        // Positional field Replace of BOTH Data pins stays possible, with
+        // the Additional pin preserved byte-verbatim.
+        let mut first = SchPinInit::from_view(&component.pins()[0]).unwrap();
+        first.designator = "A2".to_owned();
+        let mut second = SchPinInit::from_view(&component.pins()[1]).unwrap();
+        second.designator = "B2".to_owned();
+        let edited = component
+            .with_children(batch(vec![
+                SchPinEdit::Replace(0, first),
+                SchPinEdit::Replace(1, second),
+                SchPinEdit::Keep(2),
+            ]))
+            .unwrap();
+        assert_eq!(pin_designators(&edited), ["A2", "B2", "1"]);
+        assert_eq!(
+            edited.component.additional_records,
+            component.component.additional_records
+        );
+    }
+
+    #[test]
+    fn pin_swap_halves_preserve_or_reencode_per_the_native_rule() {
+        let mut library = SchLib::new_blank_ad26().unwrap();
+        {
+            let records = &mut library.components[0].records;
+            for combined in ["|&|", "OLD|&|suf", "PRE"] {
+                let SchRecord::Pin(mut record) = pin(1) else {
+                    unreachable!()
+                };
+                record.swap_id_part = combined.to_owned();
+                records.push(SchRecord::Pin(record));
+            }
+        }
+        let library = finish(library);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        library.save(file.path()).unwrap();
+        let library = SchLib::open(file.path()).unwrap();
+        let component = library.snapshot().unwrap().component(0).unwrap();
+
+        let unaddressed = |index: usize, designator: &str| {
+            let mut init = pin_init(1, designator);
+            init.part_swap_group = None;
+            init.part_pin_swap_suffix = None;
+            SchPinEdit::Replace(index, init)
+        };
+        // Both halves unaddressed on the wild bare-separator pin: preserved
+        // byte-verbatim even though other fields are replaced.
+        let edited = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![
+                    unaddressed(0, "A"),
+                    SchPinEdit::Keep(1),
+                    SchPinEdit::Keep(2),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        let SchRecord::Pin(wild) = &edited.component.records[2] else {
+            panic!("wild pin slot");
+        };
+        assert_eq!(wild.designator, "A");
+        assert_eq!(
+            wild.swap_id_part, "|&|",
+            "unaddressed halves stay byte-verbatim"
+        );
+
+        // Addressing one half re-encodes through the split, preserving the
+        // other half.
+        let mut prefix_only = pin_init(1, "B");
+        prefix_only.part_swap_group = Some("G".to_owned());
+        prefix_only.part_pin_swap_suffix = None;
+        let mut suffix_only = pin_init(1, "C");
+        suffix_only.part_swap_group = None;
+        suffix_only.part_pin_swap_suffix = Some("s2".to_owned());
+        let edited = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![
+                    SchPinEdit::Keep(0),
+                    SchPinEdit::Replace(1, prefix_only),
+                    SchPinEdit::Replace(2, suffix_only),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        let SchRecord::Pin(prefixed) = &edited.component.records[3] else {
+            panic!("prefixed pin slot");
+        };
+        assert_eq!(prefixed.swap_id_part, "G|&|suf");
+        let SchRecord::Pin(suffixed) = &edited.component.records[4] else {
+            panic!("suffixed pin slot");
+        };
+        assert_eq!(suffixed.swap_id_part, "PRE|&|s2");
+
+        // Addressing both halves of the wild form normalizes it (the native
+        // concat cannot regenerate a bare separator), and the projection
+        // round-trips the halves.
+        let mut both = pin_init(1, "D");
+        both.part_swap_group = Some(String::new());
+        both.part_pin_swap_suffix = Some(String::new());
+        let edited = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![
+                    SchPinEdit::Replace(0, both),
+                    SchPinEdit::Keep(1),
+                    SchPinEdit::Keep(2),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        let SchRecord::Pin(normalized) = &edited.component.records[2] else {
+            panic!("normalized pin slot");
+        };
+        assert_eq!(normalized.swap_id_part, "");
+        let views = edited.pins();
+        assert_eq!(views[0].part_swap_group, "");
+        assert_eq!(views[0].part_pin_swap_suffix, None);
+    }
+
+    #[test]
+    fn pin_creation_validates_owner_display_and_hidden_net_writes() {
+        let library = library();
+        let component = library.snapshot().unwrap().component(0).unwrap();
+        let batch = |init: SchPinInit| SchChildBatch {
+            parameters: None,
+            graphics: None,
+            pins: Some(vec![SchPinEdit::Keep(0), SchPinEdit::New(init)]),
+            allow_deletion: false,
+        };
+
+        // Owner part: −1 and out-of-range hard-error; 0 (the native shared
+        // wildcard) and 1 are writable (effective part count 1).
+        for part in [-1, 2] {
+            let error = component
+                .with_children(batch(pin_init(part, "P")))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("not writable"), "part {part}: {error}");
+        }
+        for part in [0, 1] {
+            let created = component.with_children(batch(pin_init(part, "P"))).unwrap();
+            let expected = if part == 0 {
+                SchOwnerGroup::SharedPins
+            } else {
+                SchOwnerGroup::Part(1)
+            };
+            assert_eq!(created.pins()[1].owner_group, expected);
+            // Recorded creation-default deviation (module docs): typed wire
+            // defaults, NOT the native SchDataPin.SetDefault values (which
+            // set both show flags true and a non-zero formal type).
+            let SchRecord::Pin(created_pin) = created
+                .component
+                .records
+                .iter()
+                .find(|record| {
+                    matches!(record, SchRecord::Pin(created_pin) if created_pin.designator == "P")
+                })
+                .expect("created pin record")
+            else {
+                unreachable!()
+            };
+            assert!(!created_pin.show_name);
+            assert!(!created_pin.show_designator);
+        }
+
+        // Display mode bound (display_mode_count is 1); None resolves 0.
+        let mut init = pin_init(1, "P");
+        init.owner_part_display_mode = Some(1);
+        let error = component
+            .with_children(batch(init))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("OwnerPartDisplayMode"), "{error}");
+        let mut init = pin_init(1, "P");
+        init.owner_part_display_mode = None;
+        let created = component.with_children(batch(init)).unwrap();
+        assert_eq!(created.pins()[1].owner_part_display_mode, 0);
+
+        // hidden_net_name has no verified SchLib serialization path.
+        let mut init = pin_init(1, "P");
+        init.hidden_net_name = "VCC".to_owned();
+        let error = component
+            .with_children(batch(init))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("hidden_net_name"), "{error}");
+        assert!(error.contains("unsupported"), "{error}");
+
+        // A Replace preserving the (empty) stored value passes; on a pin
+        // whose display mode is unaddressed the stored mode survives.
+        let from_view = SchPinInit::from_view(&component.pins()[0]).unwrap();
+        let replaced = component
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: Some(vec![SchPinEdit::Replace(0, from_view.clone())]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        assert_eq!(
+            SchPinInit::from_view(&replaced.pins()[0]).unwrap(),
+            from_view,
+            "from_view Replace round-trips the addressable pin surface"
+        );
+    }
+
+    #[test]
+    fn part_growth_composes_with_child_batches_creating_children_in_the_new_part() {
+        let library = library();
+        let snapshot = library.snapshot().unwrap();
+        let component = snapshot.component(0).unwrap();
+        assert_eq!(component.effective_part_count().unwrap(), 1);
+
+        // Growth changes only the two count fields: every child projection of
+        // the grown snapshot is identical to the input's, so a following
+        // batch resolves against the same collections the caller saw
+        // (documented composition rule; growth never reclassifies, memo §2).
+        let grown = component.with_parts_appended(1).unwrap();
+        assert_eq!(grown.effective_part_count().unwrap(), 2);
+        assert_eq!(grown.component.records, component.component.records);
+        assert_eq!(grown.graphics(), component.graphics());
+        assert_eq!(grown.pins(), component.pins());
+        assert_eq!(
+            grown.component.component.display_mode_count,
+            component.component.component.display_mode_count
+        );
+        assert_eq!(
+            grown.component.component.current_part_id,
+            component.component.component.current_part_id
+        );
+
+        let edited = grown
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: Some(
+                    (0..4)
+                        .map(SchGraphicEdit::Keep)
+                        .chain([SchGraphicEdit::New(rect_init(2))])
+                        .collect(),
+                ),
+                pins: Some(vec![
+                    SchPinEdit::Keep(0),
+                    SchPinEdit::New(pin_init(2, "P2")),
+                    SchPinEdit::New(pin_init(0, "PS")),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        assert_eq!(edited.graphics()[4].owner_group, SchOwnerGroup::Part(2));
+        let pins = edited.pins();
+        assert_eq!(pins[1].owner_group, SchOwnerGroup::Part(2));
+        assert_eq!(
+            pins[2].owner_group,
+            SchOwnerGroup::SharedPins,
+            "multi-part components accept the shared-pin wildcard"
+        );
+        // Existing children were never reclassified by the growth.
+        assert_eq!(pins[0].owner_group, SchOwnerGroup::Part(1));
+        assert_eq!(edited.graphics()[0].owner_group, SchOwnerGroup::Part(1));
+
+        let replaced = snapshot.replace_component(0, edited).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        replaced.materialize().unwrap().save(file.path()).unwrap();
+        let reopened = SchLib::open(file.path()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap(), replaced);
+        assert_eq!(reopened.components[0].component.part_count, 3);
+        assert_eq!(reopened.header.components[0].part_count, 3);
     }
 }

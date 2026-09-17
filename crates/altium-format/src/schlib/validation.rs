@@ -132,6 +132,20 @@ pub(crate) fn check_written_owner_part_id(
         WrittenOwnerPartClass::RootText => owner_part_id == -1,
     };
     if accepted {
+        // The binary pin body stores owner_part_id as a signed 16-bit field
+        // (serialize_binary_pin hard-errors on overflow instead of
+        // truncating): with a wild loaded PARTCOUNT beyond that range the
+        // effective bound alone would admit unserializable ids, so refuse
+        // them at the mutation boundary too.
+        if matches!(class, WrittenOwnerPartClass::Pin) && i16::try_from(owner_part_id).is_err() {
+            return Err(invalid(
+                "OwnerPartId",
+                format!(
+                    "pin owner part id {owner_part_id} exceeds the signed-16 range of the \
+                     binary pin body field and could never serialize"
+                ),
+            ));
+        }
         return Ok(());
     }
     Err(invalid(
@@ -167,8 +181,12 @@ pub(crate) fn check_written_display_mode(
 
 /// Bound check for a written `custom_display_mode_names` index
 /// (resolutions §4 rule 5): `index < display_mode_count`.
-// Consumed by the step-2 B/C-increment creation engines; until those land it
-// is exercised by unit tests only.
+// Still dead after increment C by design: no C path writes display-mode-
+// adjacent state (part grow/shrink leaves display_mode/display_mode_count/
+// custom names untouched, and pin/graphic creation validates only
+// owner_part_display_mode via `check_written_display_mode`). Consumed by the
+// increment-D engine when component-level display-mode/custom-name edits land;
+// until then it is exercised by unit tests only.
 #[allow(dead_code)]
 pub(crate) fn check_custom_display_mode_name_index(
     index: usize,
@@ -216,6 +234,30 @@ pub(crate) fn check_embedded_image_reference<'a>(
             "embedded image references storage asset '{file_name}' which does not exist \
              in the resulting library state (dangling references in loaded files are \
              preserved, never created)"
+        ),
+    ))
+}
+
+/// Refuses authoring a pin `hidden_net_name` value the verified SchLib
+/// serialization path cannot carry: the binary pin body has no hidden-net
+/// field (`parse_binary_pin`/`serialize_binary_pin`), no pin sidecar stores
+/// one, and the native storage form — a pin-owned Parameter record named
+/// "HiddenNetName" — is preserved-only content in this model (no authoring
+/// path is proven). Preserving the original value verbatim and writing the
+/// empty wire default both pass; any other authored value is a hard error
+/// until a verified serialization path exists. `original` is `None` for a
+/// newly created pin.
+pub(crate) fn check_pin_hidden_net_name_write(original: Option<&str>, written: &str) -> Result<()> {
+    if written.is_empty() || original == Some(written) {
+        return Ok(());
+    }
+    Err(invalid(
+        "HiddenNetName",
+        format!(
+            "writing pin hidden_net_name '{written}' is unsupported: the SchLib binary pin \
+             body carries no hidden-net field and the pin-owned Parameter storage form is \
+             preserved-only (authoring unproven); only the loaded value or the empty default \
+             may be written"
         ),
     ))
 }
@@ -324,6 +366,16 @@ mod tests {
         for count in [1, 0, -1] {
             assert!(check_written_owner_part_id(Pin, 1, count).is_err());
         }
+
+        // A wild native count beyond the signed-16 pin field admits ids the
+        // binary body could never carry: those are refused for pins even
+        // though they sit inside the effective range.
+        let wild_count = 40_000;
+        check_written_owner_part_id(Pin, i32::from(i16::MAX), wild_count).unwrap();
+        let error = check_written_owner_part_id(Pin, i32::from(i16::MAX) + 1, wild_count)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("signed-16"), "{error}");
     }
 
     #[test]
@@ -355,6 +407,22 @@ mod tests {
         // External-path images have no storage requirement.
         check_embedded_image_reference(names, "C:/anywhere/else.png", false).unwrap();
         check_embedded_image_reference([], "external.png", false).unwrap();
+    }
+
+    #[test]
+    fn pin_hidden_net_name_authoring_is_limited_to_preserve_or_empty() {
+        // New pins may only carry the empty wire default.
+        check_pin_hidden_net_name_write(None, "").unwrap();
+        // Replace may preserve the loaded value verbatim or clear it.
+        check_pin_hidden_net_name_write(Some("VCC"), "VCC").unwrap();
+        check_pin_hidden_net_name_write(Some("VCC"), "").unwrap();
+        for (original, written) in [(None, "VCC"), (Some("VCC"), "GND"), (Some(""), "VCC")] {
+            let error = check_pin_hidden_net_name_write(original, written)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("unsupported"), "{error}");
+            assert!(error.contains(written), "{error}");
+        }
     }
 
     #[test]
