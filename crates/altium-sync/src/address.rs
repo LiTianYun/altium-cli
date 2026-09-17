@@ -32,6 +32,21 @@
 //! - `OutOfRange` owner groups and owner-0 graphics are intent-unaddressable
 //!   preserved content: no owner path reaches them, and their presence in a
 //!   collection is invisible to the filtered index space.
+//!
+//! **Consumption status (step 2 → step 3)**: this vocabulary is landed and
+//! unit-tested but NOT yet consumed by intent elaboration — saved plans
+//! (NEXT.md step 3) are its intended consumer. Elaboration's scope targeting
+//! lives independently in `crate::schlib::positional`
+//! (`component_scope_pins_target` / `component_scope_graphics_target` /
+//! `group_member`), which matches by RAW owner id — deliberately treating an
+//! `OutOfRange(n)` group as a member of target `n` so a pre-growth projection
+//! selects the members the post-growth projection will — while resolution
+//! here filters by exact `SchOwnerGroup` equality and rejects parts beyond
+//! the effective count, so the two coincide on every resolvable address.
+//! When step 3 wires addresses into saved plans, either make one of the two
+//! mappings delegate to the other or add a cross-implementation equivalence
+//! test over the owner/effective-count matrix (including the OutOfRange
+//! pre-growth convention).
 
 use altium_format::api::{SchLibComponentSnapshot, SchLibSnapshot, SchOwnerGroup};
 use altium_spec_lang::ast::CollectionKind;

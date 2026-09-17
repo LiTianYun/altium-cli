@@ -31,6 +31,7 @@ language APIs.
 | [Blocks overview](language/blocks-overview.md) | Every top-level declaration and where it is valid. |
 | [Annotations](language/annotations.md) | The `#[annotation(...)]` attribute and its keys. |
 | [`schlib` blocks](blocks/schlib.md) | `component`, `pin`, `parameter`, `alias`, footprint maps, graphics. |
+| [SchLib collections](reference/schlib-collections.md) | Keyed/positional alignment, owner-group scoping, deletion permission, load normalizations, and hard-error classes for SchLib intent elaboration. |
 | [`pcblib` blocks](blocks/pcblib.md) | `footprint`, `pad`, `row`/`column`/`grid`, PCB graphics. |
 | [`schdoc` blocks](blocks/schdoc.md) | `sheet`, `net`, `power`, placed components, schematic objects. |
 | [`pcbdoc` blocks](blocks/pcbdoc.md) | `board`, primitives, `polygon`, `rule`, `class`, `differential_pair`, `routing`. |

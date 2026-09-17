@@ -1,7 +1,9 @@
 # Snapshot-bound plan/apply
 
-Updated: 2026-09-05. Accepted implementation direction; the replacement engine
-is not implemented yet. See [STATUS.md](STATUS.md) for current behavior.
+Updated: 2026-09-17. Accepted implementation direction. Steps 1–2 (language
+front end + SchLib snapshots and indexed patches) are implemented; saved
+plans, transactions, and the CLI surface are not. See [STATUS.md](STATUS.md)
+for current behavior.
 
 ## Decisions
 
@@ -28,29 +30,44 @@ persistent object bindings. Recovery journals are never inputs to later planning
 ## Current checkpoint and evidence
 
 The language front end, lossless CST, structured edits, and comment-preserving
-dump merge now live in `altium-spec-lang`, reexported by `altium-format-spec`.
+dump merge live in `altium-spec-lang`, reexported by `altium-format-spec`.
 Import resolution and immutable transitive source capture also live in the
-language crate. Collection scope and contextual operations parse into explicit
-AST/CST forms. The typed SchLib intent core compiles captured imports and retains
-field operations, collection scope, source provenance, and spread origins.
-Step 1 is complete under the revised image asset-reference scope, with an
-independent completeness review and 362 passing language tests. Image codecs
-are no longer a gate. See the [image import design](docs/proposals/typed-image-resources.md)
-and [closure evidence](docs/worklogs/next-image-assets-2026-09-05.md).
-Graphic field defaults/clear policies now match the current typed Rust API. Captured footprint
-imports now export generated pad names. Independent pin axes and owner-local auto-size constraints
-now resolve over effective target/base geometry. Physical line widths map exactly
-to the original AD26 0/10/30/50mil table. CLI plan still renders an ECO while apply recompiles
-the spec and invokes a different executor; preview/apply agreement is not guaranteed.
-`altium-sync` now captures image asset bytes, hashes and path preconditions and
-applies description, designator, component-kind and hidden-pin patches against
-complete typed SchLib snapshots.
-The native snapshot layer retains all parsed state privately; original-index
-collection assembly enforces explicit deletion permissions. Complete source
-elaboration and saved-plan/transaction execution are still outstanding. Native
-Data/Additional ownership assembly now supports designator creation/removal with
-reference remapping and orphan rejection; broader structural edits remain ahead. See the [step-2 evidence](docs/worklogs/next-snapshots-2026-09-05.md). There is
-no executable external state subsystem to migrate or delete.
+language crate. Step 1 is complete under the revised image asset-reference
+scope (image codecs are not a gate; see the
+[image import design](docs/proposals/typed-image-resources.md) and
+[closure evidence](docs/worklogs/next-image-assets-2026-09-05.md)).
+
+Step 2 (SchLib snapshots and indexed patches) is complete as of 2026-09-17
+(increments A1–F, baseline 436fa3c through 031cbf2 plus the F docs pass).
+`altium-format` owns complete typed SchLib snapshots with read-only child
+projections (`crates/altium-format/src/schlib/snapshot/views.rs`), batch
+structural editing of parameters/graphics/pins/footprint chains
+(`snapshot/children.rs`), part grow/shrink (`snapshot/parts.rs`), and declared
+library-level namespace transitions — component create/clone/remove, aliases,
+image assets, font appends — with deterministic `ReferenceContext` recompute
+(`snapshot/library.rs`); the strict `replace_components` path still rejects
+undeclared context drift. `altium-sync` owns the snapshot-bound address
+vocabulary (`src/address.rs` — landed and unit-tested, but a step-3-facing
+surface: elaboration does not consume it yet), the class-aware collection
+planner (`src/collection.rs`), and full definition-scope `SchLibIntent` →
+`SchLibPatch` elaboration (`src/schlib/elaborate.rs`,
+`src/schlib/positional.rs`, which implements elaboration's own owner-group
+scope targeting): keyed and positional alignment per the table below,
+owner-group scoping, field policies, layout/auto-size, part swap-group
+fan-out, and image-asset sources. Apply then
+re-elaborate is replan-empty at every level. The three-library corpus gate
+(Connectors/ICs/STM32F4, 223 components) passes scalar, structural, namespace,
+and intent passes with native save/reopen typed equality. Semantics reference:
+[docs/spec-lang/reference/schlib-collections.md](docs/spec-lang/reference/schlib-collections.md);
+evidence: [step-2 worklog](docs/worklogs/next-children-2026-09-16.md) and
+[the A1 contract memo](docs/worklogs/next-child-contracts-2026-09-16.md);
+recorded hard errors and gaps: [STATUS.md](STATUS.md).
+
+Step 2 does NOT include saved plans, file transactions, CLI migration, or
+dump-direction source lowering — that is step 3+ scope. CLI plan still renders
+an ECO while apply recompiles the spec through the legacy executor;
+preview/apply agreement is not guaranteed until step 5 migrates the SchLib
+slice. There is no executable external state subsystem to migrate or delete.
 
 The recorded SchLib / Altium 26.2 GUI-save experiment (2026-06-21) found:
 
@@ -129,6 +146,34 @@ build final collections from the immutable snapshot; multiple deletes/inserts
 must never shift another patch's target. Reject overlapping/contradictory patches.
 Preserve/rebuild native references and ownership through typed APIs. Reopen and
 validate insertion, deletion, and reorder cases before a domain can ship.
+
+### SchLib collection classes (step 2, shipped)
+
+The complete reference is
+[docs/spec-lang/reference/schlib-collections.md](docs/spec-lang/reference/schlib-collections.md).
+Implementation: `collection_class` in `crates/altium-sync/src/collection.rs`,
+owner-group scoping in `crates/altium-sync/src/schlib/positional.rs`,
+projections in `crates/altium-format/src/schlib/snapshot/views.rs`.
+
+| Collection | Class | Key / alignment |
+| --- | --- | --- |
+| components | keyed | exact `lib_reference`; renames never inferred |
+| parts | keyed (structural) | numeric slot `1..=effective`; complete scope = contiguous prefix from 1; trailing shrink only, under deletion permission |
+| parameters | keyed | name, case-insensitive (native `GetParameterByName` is OrdinalIgnoreCase); authored spelling written on update; root-owned records only |
+| aliases | keyed | exact string; membership-only (AD26 stores a sorted set — order is never authored) |
+| footprints | keyed | exact `model_name`, PCBLIB implementations only; `source:` is provenance, never a key |
+| pins | positional | per owner-part group (filtered projection index K) |
+| graphics | positional | per owner-part group; one ordered collection across kinds |
+| maps | positional | within each footprint (pin-pad definer order) |
+
+Swap groups are not a collection: they are scoped pin-field bindings
+(`SwapIdPin`, `PairSwapID`, and the combined `SwapIdPart |&| SwapIdPartPin`
+string), with the part-level `part_swap_group` a derived unanimity projection
+over the part's non-owner-0 pins plus fan-out on write; a `Mixed` projection
+blocks writes. Owner-group mapping: `part N` → owner N; component scope →
+owner 1 on single-part components and the shared owner-0 pin slot on
+multi-part ones; multi-part component-scope graphics are a hard error (no
+shared graphics owner exists natively).
 
 ## Direction, scope, and intent
 
@@ -304,21 +349,52 @@ plans and stages every affected artifact before any destination is committed.
 ## Implementation steps and gates
 
 Complete an independent agent completeness review after every numbered step;
-resolve findings before proceeding. Step 1 is complete under the image asset
-scope revision; steps 2 through 9 remain outstanding. Step 2 starts with complete
-format-owned typed snapshots; existing high-level Component reconstruction is
-not a lossless replacement path.
+resolve findings before proceeding. Steps 1 and 2 are complete; steps 3
+through 9 remain outstanding. Next: step 3 (saved plans and both directional
+planners).
 
 1. **Language boundary and full SchLib intent — complete.** Move/decouple CST, diagnostics,
    parser, and formatter into `altium-spec-lang`; port imports and SchLib intent
    passes. Specify absence, overrides, and collection scope. Gate: existing source
    preservation tests plus deterministic examples for imports, defaults,
    Set/Inherit/Reset/Clear, invalid keys, and partial/complete collections.
-2. **SchLib snapshots and indexed patches.** Implement complete elaboration and
-   projection, addresses, aggregate replacement, and scope checks. Cover components,
-   parts, pins, parameters, aliases, footprint maps, graphics, and swap groups.
-   Gate: materialize/project equality, ownership validation, multi-insert/delete/
-   reorder cases, and hard errors for unsupported content or unauthorized deletion.
+2. **SchLib snapshots and indexed patches — complete (2026-09-17).** Every
+   gate item landed and was independently reviewed per increment (worklog:
+   `docs/worklogs/next-children-2026-09-16.md`). Elaboration and projection:
+   `SchLibIntent` → `SchLibPatch` in `crates/altium-sync/src/schlib/elaborate.rs`
+   over the read-only projections in
+   `crates/altium-format/src/schlib/snapshot/views.rs`. Owner-group scope
+   targeting for elaboration: `crates/altium-sync/src/schlib/positional.rs`;
+   the snapshot-bound address vocabulary
+   (`crates/altium-sync/src/address.rs`) is landed and unit-tested but not
+   yet consumed by elaboration — saved plans (step 3) are its intended
+   consumer (its module docs record the divergence risk against
+   `positional.rs`). Aggregate replacement:
+   `replace_components` (`schlib/snapshot.rs`), `with_library_edit`
+   (`snapshot/library.rs`), `with_children` (`snapshot/children.rs`),
+   `with_parts_appended`/`with_parts_removed` (`snapshot/parts.rs`). Scope
+   checks: the class-aware planner in `crates/altium-sync/src/collection.rs`
+   plus `validate_scope` in `elaborate.rs`. Coverage: components, parameters,
+   aliases, footprint maps keyed and pins/graphics/maps positional
+   (`elaborate.rs`); parts structural (`snapshot/parts.rs`,
+   `resolve_parts_structure` in `positional.rs`); swap groups as pin-field
+   bindings with part-level projection (`views.rs` `parts()`) and fan-out
+   (`positional.rs` `part_swap_fanouts`/`apply_part_swap_fanouts`). Gate
+   evidence: materialize/project equality and multi-insert/delete/reorder in
+   the default `--lib` suites (482 format, 54 sync tests; every step-2 test
+   is fixture-free — the 11 ungated legacy CFB/IntLib tests recorded in
+   STATUS.md predate step 2) and the three-library corpus example
+   (`crates/altium-sync/examples/check_schlib_snapshots.rs`, all passes,
+   empty replans); ownership validation in `assemble_records`
+   (`crates/altium-format/src/schlib/ownership.rs`); unsupported-content and
+   unauthorized-deletion hard errors enumerated in
+   [docs/spec-lang/reference/schlib-collections.md](docs/spec-lang/reference/schlib-collections.md).
+   Deliberately out of step-2 scope: saved plans, transactions, CLI
+   migration, and dump-direction lowering (step 3+); recorded
+   unsupported-content classes (style_id, Additional-stream structural
+   edits, owner-0 single-part pins, multi-pad definer addressing,
+   `is_current` authoring) stay hard errors or preserved-only until their
+   evidence or address forms land.
 3. **Saved plans and both directional planners.** Implement schema/version,
    manifests, source/document lowering, and exact reporting. Gate: deterministic
    semantic plans, complete preconditions, no-op/create/update/delete examples,

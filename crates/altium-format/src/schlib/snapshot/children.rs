@@ -2533,8 +2533,9 @@ impl SchLibComponentSnapshot {
 /// Native PCBLIB model-type string (`ModelTypePCBLIB = "PCBLIB"`,
 /// EngineObjects/SchImplementation.cs:31). Local to altium-format for now —
 /// FLAGGED for promotion into `altium-format-types::constants` after user
-/// discussion (same class as the `"|&|"` swap separator).
-const MODEL_TYPE_PCBLIB: &str = "PCBLIB";
+/// discussion (same class as the `"|&|"` swap separator). `pub(super)` so the
+/// part-shrink door (`parts.rs`) mirrors the same PCBLIB membership predicate.
+pub(super) const MODEL_TYPE_PCBLIB: &str = "PCBLIB";
 /// Native default datafile-link kind for a PCBLIB implementation (exact
 /// casing; EngineObjects/SchImplementation.cs `HandleAfterImportEvent` and the
 /// corpus wire bytes `MODELDATAFILEKIND0=PCBLib`). Same promotion flag.

@@ -1,11 +1,20 @@
 # Snapshot-bound authored intent
 
-This is the proposed semantic contract for [NEXT.md](../../NEXT.md), step 1.
-It does not describe a shipped planner. Existing component/import/expression syntax
-is reused below. The front end and typed intent core now preserve `inherit`,
-`reset`, collection declarations, and supported `null` clearing. These operations
-are not yet executable through snapshot plans; the remaining gates are in STATUS.md. The legacy compiler's `Option` values,
-eager defaults, and additive executor do not establish this contract.
+This is the proposed semantic contract for [NEXT.md](../../NEXT.md), steps 1–2.
+Existing component/import/expression syntax is reused below. The front end and
+typed intent core preserve `inherit`, `reset`, collection declarations, and
+supported `null` clearing, and NEXT.md step 2 (completed 2026-09-17) shipped the
+SchLib elaboration of this contract (`SchLibIntent` → `SchLibPatch` over
+snapshot-bound addresses); saved plans, directional planners, and CLI migration
+remain step 3+. The authoritative promoted reference for the shipped SchLib
+collection semantics is
+[docs/spec-lang/reference/schlib-collections.md](../spec-lang/reference/schlib-collections.md);
+where this proposal and that page differ, the reference page and the code win.
+This document was amended in place during step-2 increment F (2026-09-17) where
+step-2 native evidence contradicted its original statements; the dated evidence
+trail is [the A1 contract memo](../worklogs/next-child-contracts-2026-09-16.md)
+and its errata section. The legacy compiler's `Option` values, eager defaults,
+and additive executor do not establish this contract.
 
 ## Context and authority
 
@@ -139,9 +148,17 @@ they are `pins` and `graphics`; at a footprint map they are `maps`. Swap-group
 blocks declare scoped bindings, not standalone native records or deletable native
 collections. Their assignments on pins are fields with Set/Inherit/Reset/Clear.
 
-Component library references, part numbers, parameter names, alias names, and
-footprint model names are exact parent-scoped natural keys for this contract.
-Duplicates on either side block a managed collection, with both locations reported.
+Component library references, part numbers, alias names, and footprint model
+names are exact parent-scoped natural keys for this contract. Parameter names
+are the one keying exception (amended 2026-09-17, step-2 increment F): they
+match case-insensitively (ordinal, per-character simple uppercase), because
+AD26's `GetParameterByName` compares with `StringComparison.OrdinalIgnoreCase`
+(`Altium.Sch.DataModel.Objects/SchDataContainer.cs:633-647`) — two case-variant
+spellings are one native parameter. The authored spelling is written on update,
+so a bare case-variant mention is a rename (idempotent and reviewable, never
+silently ignored); mirror-intent generators must emit destination spellings.
+Duplicates under a collection's matching equivalence on either side block a
+managed collection, with both locations reported.
 Pins and graphics align positionally, within their typed owner collection, without
 matching on designators, annotations, bindings, values, or native IDs. Map pairs
 are positional within each footprint map. A future native-ID matching rule requires
@@ -156,7 +173,12 @@ interior insertion. Such edits require a complete collection.
 
 A complete collection determines final order and membership from its authored
 items, including an empty list when no children occur. Surviving keyed entries
-retain outside-scope fields while taking source order. Positional item N uses
+retain outside-scope fields while taking source order, with one exception
+(amended 2026-09-17, step-2 increment F): aliases are membership-only. AD26
+stores aliases as a sorted set, so alias order carries no native meaning;
+surviving aliases keep destination order, authored order is honored only as
+append order, and a reorder-only alias listing elaborates to an empty patch.
+Positional item N uses
 original destination N for preserved fields. Removing any destination-only entry
 requires `delete: allow`; otherwise planning errors even if every remaining entry
 is valid. A complete collection does not make every field on its children writable.
@@ -201,12 +223,34 @@ count growth blocks the requested part insertion rather than silently omitting i
 All indices refer to the immutable, fully parsed input projection. The projection
 uses typed API collection order, filtered by owner part, not display sorting or
 CFB record offsets. Projection preserves each existing child's native numeric
-owner; source omissions never reclassify it. New component-level children use owner
-part zero if the effective resulting part count exceeds one or explicit part
-blocks exist, otherwise owner part one. Thus `part_count: 2` gives new top-level
-children owner zero even without part blocks. Children explicitly authored in
-`part N` use owner N. Growing a component from one to several parts does not move
-existing owner-one children into the shared owner-zero collection. Positional
+owner; source omissions never reclassify it.
+
+New children take owner parts per the native creation evidence (rewritten
+2026-09-16 per [the A1 contract memo](../worklogs/next-child-contracts-2026-09-16.md)
+§2; the original "owner zero when the effective resulting part count exceeds
+one or explicit part blocks exist" rule was contradicted by AD26 — no native
+creation path assigns 0, and 0 is a pins-only wildcard, meaningless for
+non-pin graphics):
+
+- Children explicitly authored in `part N` use owner N, validated
+  `1 <= N <= effective` at the mutation boundary.
+- Component-level pins and graphics on a single-part component use owner 1
+  (native-faithful: editor placement assigns the current part, which is 1).
+- Component-level pins on a multi-part component use owner 0, the natively
+  defined shared-pin slot (the native part filter treats 0 as a pins-only
+  wildcard).
+- Component-level graphics on a multi-part component are a hard error at
+  elaboration: no shared graphics owner exists natively; author the graphic
+  inside a part block. Creating any graphic with owner 0 or an out-of-range
+  owner is a hard error at the mutation boundary.
+- New root-owned parameter and designator records use owner −1, the native
+  constructor sentinel.
+- New children take owner-part display mode 0, the constructor default; batch
+  APIs have no "current display mode" cursor.
+
+Growing a component from one to several parts never reclassifies existing
+children (native `AddPart`/`DeletePart` precedent): existing owner-one children
+never move into the shared owner-zero pin slot. Positional
 alignment is within the resulting source owner's collection, so changing an
 authoring context cannot silently retarget children from another owner.
 Independent delete/insert patches cannot shift another patch's target. Graphics of
@@ -214,6 +258,75 @@ different kinds remain in one ordered graphic collection, not separate type buck
 A type-changing positional replacement preserves only fields with an explicit
 cross-kind typed mapping; if an outside-scope field cannot be preserved, planning
 must block rather than discard it.
+
+## Creation metadata, load normalization, and reference namespaces
+
+These rules were resolved during NEXT.md step 2. The dated evidence is
+[the A1 contract memo](../worklogs/next-child-contracts-2026-09-16.md); its
+errata section marks the corrections already folded into this section, and the
+memo itself stays verbatim as evidence.
+
+**IndexInSheet.** A new in-objectList child is written with the 0-based
+position in its owner's final child sequence (pins and Additional-destined
+subtree roots count as siblings). Component field objects — the designator and
+the root parameter named `Comment` — serialize −1. The synthetic
+ImplementationList wrapper serializes wire 0, not −1: its constructor calls
+`SetIndexInSheetForSave(0)` (`Objects/SchDataImplementationList.cs:9-14`), and
+gate-fixture bytes show bare `|RECORD=44` blocks with the key absent
+(absent ≡ 0). When a batch structurally touches an owner's child sequence, all
+of that owner's in-objectList children are renumbered to final 0-based sibling
+positions; untouched owners preserve stored values verbatim — a deliberate
+deviation from AD26's renumber-everything-on-save that keeps no-op save
+equality. AD26's import attach (`SchDataParameter.UpdateOwner`,
+`Objects/SchDataParameter.cs:128-196`) dispatches on parameter NAME alone
+(DefaultNet / HiddenNetName / PinSelectionMemory / Comment / Description /
+PinUniqueId) with owner-interface guards inside the branches; a special-named
+parameter whose owner lacks the matching interface (for example a root
+`Description` — `SchDataComponent` is not an `ISchDataDescriptionOwner`)
+attaches nowhere and AD26 silently drops it on its next save. We never
+replicate that drop: only owner/name combinations AD26 actually consumes (root
+`Comment`; the pin-owned specials) are exempt from sibling numbering, and
+preserved records AD26 would drop are numbered as ordinary siblings.
+IndexInSheet is never an address, never identity, and never validated at
+capture.
+
+**Load normalization (reported, never silent).** Native `PartCount < 2`
+(including wire-absent) floors to 2 and `DisplayModeCount < 1` floors to 1 at
+SchLib load, mirroring AD26's after-import event; every floored field is
+reported via `SchLib::load_normalizations()`. `CurrentPartID` is never touched
+at load — no native clamp exists — and a stored value outside `[1, native)`
+blocks part mutations until explicitly resolved, never a silent clamp.
+
+**Fonts.** Every font id our APIs write must reference an existing font-table
+entry; new text-bearing children resolve the native default (Times New Roman,
+size 10) find-only against the captured table. Fonts are part of the captured
+`ReferenceContext`; a font-table append is a library-level namespace transition
+declared via `SchLibEdit::font_appends`, which recomputes the resulting
+snapshot's context. (This corrects the memo §8a rule-3 parenthetical "fonts are
+not part of ReferenceContext".)
+
+**style_id.** Authoring or modifying style_id references or style tables
+through any step-2 API is a hard error with context: the managed V5 format
+neither reads, writes, nor validates StyleID, and the native (Delphi)
+style-table implementation has not been reverse engineered. Loaded values are
+preserved verbatim. Upgrade path: ghidra-cli decompilation (project altium26)
+of the Delphi binary consuming STYLEID/STYLEIDCOUNT on the SchLib load/save
+path — specifically its import lookup, bounds handling, and dangling-id
+behavior — or discovery of a managed reader.
+
+**Embedded images.** A created or retargeted embedded image record must
+reference a storage asset that is either preexisting or inserted by a PRIOR
+library-level image-asset op whose result snapshot the component edit is taken
+from — component content edits run against a snapshot's captured context, so
+"inserted by the same batch" is not expressible; same-edit composition applies
+only to new components created within the library edit itself. (This corrects
+the memo §8c rule-2 "same batch's library-level image-asset op" wording.)
+Intent elaboration folds the two steps into one patch: asset ops ride the
+single library edit that precedes component content. Removing or renaming an
+image record's concrete pairing target (first exact, then first
+case-insensitive name match — the native pairing order) is blocked while the
+record survives; orphan assets and wild dangling references stay legal and are
+preserved verbatim.
 
 ## Required checks before shipping
 
@@ -244,10 +357,16 @@ the old compiler exposes coordinates and the old executor ignores them. Polyline
 API. The new intent compiler rejects those properties. Named pen widths and exact
 physical widths of 0/10/30/50mil are supported, with that table now verified against
 the original AD26 managed assembly. Font defaults require validation against the
-destination font table. Other creation policy choices remain checked against
+destination font table; font-table appends are a library-level namespace
+transition declared via `SchLibEdit::font_appends`, and fonts are part of the
+captured `ReferenceContext` (see the reference-namespace section above).
+Other creation policy choices remain checked against
 current Rust code, without independent AD26 verification of every default.
 
 The old `image_data` compiler field has no corresponding public image-resource
 mutation boundary and is ignored by its executor. The replacement intent compiler
-rejects it. A complete implementation needs typed resource APIs and strict image
-validation; no raw payload retention can fill that gap.
+rejects it. The typed replacement shipped in step 2: image graphics author a
+`source:` bundle reference, elaborated through caller-captured asset bytes into
+whole-resource library-level ops on the same patch's library edit, under the
+two-step embedded-image reference rule above. Codec decoding stays outside
+scope per the image-asset boundary in [NEXT.md](../../NEXT.md).

@@ -139,6 +139,15 @@ Splits a component into multiple parts (gates). Component-level pins and
 graphics are shared (owner part 0); pins/graphics inside a `part N { }` block
 belong to part `N`.
 
+> **Scope note**: the owner-0 mapping above describes the LEGACY
+> `altium-format-spec` executor documented on this page
+> (`crates/altium-format-spec/src/executor.rs`). Native evidence contradicts
+> it for graphics: the step-2 elaboration maps component-scope children on a
+> single-part component to owner 1, keeps owner 0 only as the native
+> shared-PIN slot on multi-part components, and hard-errors on multi-part
+> component-scope graphics. See the owner-group mapping in
+> [SchLib collection semantics](../reference/schlib-collections.md).
+
 ```hcl
 [binding =] part N {
     pin "..." { ... }

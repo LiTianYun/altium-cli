@@ -1,6 +1,6 @@
 # Codebase Status
 
-Updated: 2026-09-05 (plan/apply direction; older corpus results remain dated below)
+Updated: 2026-09-17 (NEXT.md step 2 complete; older corpus results remain dated below)
 
 ## Workspace Overview
 
@@ -15,7 +15,7 @@ altium-format          (core: parsing, serialization, high-level API, rendering 
   └→ altium-format-render-png  (PNG rasterization via resvg)
 altium-format-spec     (declarative spec language for Altium documents — being replaced)
 altium-spec-lang       (lossless CST, parser, formatter, expression evaluation)
-altium-sync            (asset capture, snapshot-bound patches, library ops, keyed intent elaboration; positional/E2 elaboration pending)
+altium-sync            (asset capture, snapshot-bound addresses/patches, library ops, full SchLib intent elaboration)
 altium-cli             (CLI binary)
 ```
 
@@ -42,379 +42,109 @@ scope instead of ignoring it. The typed SchLib intent core now preserves field o
 scope, typed definition references, imported source provenance, and nested spread
 origins. It compiles captured transitive values without reopening imports.
 Step 1 is complete under the revised image asset-reference scope, following
-independent completeness review. Steps 2 through 9 remain outstanding.
-Step 2 now has format-owned complete typed snapshots and immutable batch component
-replacement. Native record fields, Data/Additional separation, global settings,
-aliases and image resources remain private and intact. Cross-namespace component
-replacement is rejected using the captured native library/font/style/image/alias
-context; this does not replace ownership validation or reference relocation.
-The sync scalar path applies explicitly addressed descriptions, designators,
-component kinds and hidden-pin flags, preserves other typed fields, binds execution
-to complete typed input equality,
-and publishes only a validated candidate. The shared collection planner checks
-original indices, partial preservation, complete order, deletion permission and
-conflicting edits. Native Data/Additional ownership assembly remaps references
-for designator creation/removal, preserves sibling metadata, and rejects retained
-orphans and loader-incompatible ownership. Full field/collection elaboration,
-saved-plan serialization, filesystem transactions and CLI migration remain ahead.
-Real snapshot checks pass on Connectors, ICs and STM32F4: 223 components retain
-complete typed equality through native no-op save/reopen and 223 component
-replacements covering all four scalar properties, with empty replans. The ICs check exposed and fixed an unjustified pin-count cache
-recalculation; the original AD26 exporter uses the stored data-object value.
-See the [snapshot investigation](docs/worklogs/next-snapshots-2026-09-05.md).
-Snapshot increment validation: 403 core, 168 legacy spec and 12 sync tests pass;
-the CLI builds. Independent reviews passed for each implemented boundary.
-Step-2 increment A2 (2026-09-16) added the read-only child projection on
-`SchLibComponentSnapshot` — raw-truthful `SchOwnerGroup` classification,
-`parts()` with derived swap groups (native `|&|` combined-string split/encode
-helpers; untouched pins stay byte-verbatim), root-owned `parameters()`,
-`graphics()` with explicit unrepresentable Symbol/Hyperlink variants,
-PCBLIB-only `footprint_maps()` with a preserved non-PCBLIB count, `aliases()`,
-and captured font/image/style namespace projections — plus the documented load
-upgrade flooring native PartCount < 2 to 2 and DisplayModeCount < 1 to 1
-(mirroring AD26's after-import event; `effective_part_count()` now always ≥ 1
-on success; every floored field is reported via
-`SchLib::load_normalizations()` as `SchLegacyCountNormalization` entries,
-provenance metadata excluded from equality), `pub(crate)` mutation-boundary
-validation helpers (font/owner part/display mode/image reference checks;
-style_id authoring hard-errors as unproven), and the public snapshot-bound
-address vocabulary in `altium-sync::address`. Contract authority:
-[the persisted A1 resolutions memo](docs/worklogs/next-child-contracts-2026-09-16.md);
-worklog: [next-children-2026-09-16.md](docs/worklogs/next-children-2026-09-16.md),
-including the post-review findings resolution (Image view now carries all
-intent axes incl. color/line_width/is_solid).
-A2 validation (post-review fixes): 438 format, 18 sync, 362 spec-lang and 168
-format-spec tests pass; the CLI builds; the three-library corpus gate passes
-with empty replans.
-Step-2 increment B (2026-09-16) added public batch structural editing of the
-`parameters()` and `graphics()` collections on `SchLibComponentSnapshot`:
-`with_children(SchChildBatch)` takes per-collection FINAL ordered sequences of
-`Keep(i)`/`Replace(i, init)`/`New(init)` items resolved entirely against the
-immutable input projections, applied through one `assemble_records` pass;
-deletion is omission plus an explicit `allow_deletion` flag; duplicate slot
-references, cross-kind Replace targets (incl. unrepresentable Symbol/Hyperlink
-targets), Additional-stream creation, and cross-stream original migration are
-hard errors. The documented stream-order rule places non-members verbatim and
-the edited collection's finals in its members' original stream positions
-(extras after the last member, or at the Data-stream end for empty
-collections), so the resulting projections equal the requested sequences
-exactly. New records get typed defaults, fresh UniqueIds, owner_part_id per
-memo §2 (parameters −1; graphics 1..=effective via
-`check_written_owner_part_id`), display mode per §4, fonts via
-`check_font_id_exists`/default find-only resolution (a missing default-font
-entry hard-errors pending increment D's namespace transitions), image storage
-references per §8c; style_id is never authorable (§8b guard wired).
-IndexInSheet per memo §6: batch-touched owners get their in-objectList
-children renumbered to final 0-based sibling positions (pins count, store
-nothing; field objects — Designator and root "Comment" parameters — and the
-implementation chain occupy no slots); untouched owners preserve stored values
-verbatim. Blank-library reconciliation: corpus evidence confirmed AD26 writes
-OWNERPARTID=-1/INDEXINSHEET=-1 on root Designator/Comment records, so
-`new_blank_ad26` and `with_designator` creation now write −1/−1 and the
-creation path is wired through `check_written_owner_part_id`.
-B review fix pass (2026-09-16): Replace with `None` optionals now PRESERVES
-the original's stored display mode/font (creation defaults apply only on New);
-`New` of the indexed-coordinate kinds (Polyline/Polygon/Bezier) no longer
-hard-errors on the missing `LocationCount` key, with all-13-kinds creation +
-save/reopen coverage; the parameter-creation missing-default-font error names
-the real limitation (no authorable font field until increment D); the
-IndexInSheet field-object classification is recorded as a deliberate
-owner-conditional narrowing of AD26's name-first import dispatch (AD26 drops
-unattached special-named parameters on save — we preserve and number them,
-e.g. wild root "Description" parameters); the worklog's INDEXINSHEET=-1
-evidence was corrected (−1 is carried only by Designator/Comment field
-objects; ordinary root parameters carry sibling ordinals); memo errata (§6
-ImplementationList serializes 0, §6 dispatch scoping, §8a ReferenceContext
-fonts) are queued for increment F in the contracts worklog.
-B validation (post-fix): 451 format, 18 sync, 362 spec-lang and 168
-format-spec tests pass; the CLI builds; the corpus gate structural pass now
-covers insert/reorder/recolor-at-exact-index, a per-component graphic reorder
-round-trip, and authorized removal of both probes (parameter + rectangle) with
-save/reopen typed equality and projection equality on all 223 components of
-the three gate libraries.
-Step-2 increment C (2026-09-16) extended the batch engine to `pins()`
-(`SchChildBatch.pins` with `SchPinEdit::{Keep, Replace, New}` over the full A2
-pin projection, same final-sequence/stream-order/deletion/atomicity
-semantics): `SchPinInit` covers the `SchPinView` surface; Replace preserves
-every unaddressed field including the sidecar-backed ones
-(defined/selected functions, package length, propagation delay, frac coords,
-custom text positioning, symbol line width, long descriptions, pair swap);
-combined swap strings follow memo §5 rule 3 (both halves `None` → byte
-verbatim incl. wild `"|&|"`, either half addressed → native split/re-encode);
-new pins get typed wire defaults with NO UniqueId (the binary pin body carries
-none — documented deviation) and pin owner parts accept 0 or 1..=effective
-(−1 forbidden); authored `hidden_net_name` values without a verified
-serialization path hard-error (`check_pin_hidden_net_name_write`).
-Additional-stream pins freeze the whole collection: while any Additional pin
-member exists the final pin sequence must be positional (Additional members
-strictly Keep, Data members Keep or field Replace, no membership change), so
-pin insert/delete/reorder — Data-only permutations included — is a hard error
-(Additional pin sidecars unproven); Keep-in-place flows through. Binary pin
-`owner_part_id` values beyond the signed-16 body field hard-error instead of
-truncating, at serialization, at the pin mutation boundary, and as a
-part-growth cap (`with_parts_appended` bounds native count at `i16::MAX`).
-`all_pin_count` stays hands-off per memo §7 (verbatim through every edit; no
-recompute path exists; `stored_all_pin_count()` projects it for verification).
-Sidecar consistency needs no new recompute layer — `serialize_pin_sidecars`
-enumerates final Data pin encounter order at save time; targeted tests prove
-all nine sidecar streams stay consistent under insert/remove/reorder.
-Parts ops landed on `SchLibComponentSnapshot`: `with_parts_appended(n)`
-(growth never reclassifies children; composes with a following
-`with_children`, whose projections are index-identical) and
-`with_parts_removed(&[slots], allow_descendant_deletion)` (trailing slots
-only, ≥ 1 effective part remains; part-owned children plus ownership
-descendants deleted only with authorization, else the error lists them; the
-memo §3 rule 4 `current_part_id` decrement is returned as a typed
-`SchCurrentPartIdAdjustment` in `SchPartsShrink`, never silent; deleted
-children are reported with a typed `SchRecordType` kind; native count =
-effective + 1 maintained on the record and the header index entry; display
-modes untouched; wild stored `current_part_id` blocks both ops until
-explicitly resolved; recorded deviations from native `AddPart`/`DeletePart` —
-no current-part move on append, out-of-range owners preserved verbatim where
-native would renumber — live in the parts.rs module docs and the worklog).
-`check_custom_display_mode_name_index` stays dead by design (no C path writes
-display-mode-adjacent state) with a C→D note. New-pin creation keeps typed
-wire defaults (show flags false, wire-zero formal type) — a recorded
-deviation from native `SchDataPin.SetDefault` with a queued user decision.
-C validation (post-fix): 465 format, 18 sync, 362 spec-lang and 168
-format-spec tests pass; the CLI builds; `cargo fmt --check` clean; the corpus
-gate adds a pin structural pass (insert probe pin STEP2C_{i} into part 1,
-reorder, authorized removal, with pins() projection equality, save/reopen
-typed equality, and verbatim AllPinCount at every stage) AND a part
-structural pass (append one empty trailing slot, save/reopen, remove it with
-an empty expected deletion list and the typed current-part adjustment
-asserted, save/reopen, restore equality modulo reported adjustments) — all
-checks true on all three gate libraries, exit 0.
-Step-2 increment D1 (2026-09-16) added library-level namespace transitions:
-`SchLibSnapshot::with_library_edit(SchLibEdit)` (module
-`schlib/snapshot/library.rs`) is the DECLARED-transition variant of component
-replacement — the strict `replace_components` path still hard-errors on any
-undeclared context change. One `SchLibEdit` batch carries the final ordered
-component sequence (`SchLibComponentEdit::{Keep, ReplaceWith, New}`; omission
-is removal under `allow_component_removal`, listed otherwise; `ReplaceWith`
-requires input-context equality, no rename, no alias change), the
-context-independent new-component factory (`SchNewComponent::CloneOf` — deep
-copy under a new name with fresh component UniqueId and cleared alias state —
-and `::Blank` reusing the extracted `blank_ad26_component` shape, validating
-font id 1), per-name alias ops (`SchAliasOp::{Add, Remove}`; removes before
-adds so Remove+Add retargets; removal of an aliased component blocks unless
-the same edit releases/retargets every alias), ordered image-asset ops
-(`SchImageAssetEdit` wrapping the existing SchLib resource operations, plus
-the memo §8c rule: references that resolved against the input asset set must
-still resolve against the final set — referenced-asset removal/rename blocks,
-orphan removal and wild dangling references stay legal), and typed font-table
-appends (`SchFontAppend`, all native axes, positional ids, duplicate-axis and
-non-sequential-table rejections). The resulting `ReferenceContext` is always
-RECOMPUTED from the assembled final library (deterministic: fresh UniqueIds
-never enter the context; no-op edits are context-and-state identical). The
-three alias representations stay synchronized (header index aliases, root
-`AliasList` comma-join for touched components, global Redirections preserved
-verbatim or rebuilt in header order; self-alias storage sharing supported);
->31-char names ride the existing SectionKeys save path; header weight applies
-the canonical cardinality delta to the stored value (input convention kept).
-This resolves the recorded B font limitation (memo errata item 3: fonts stay
-in the context; appends are declared transitions) — `with_children` errors
-now point at `with_library_edit`. `SchFontEntryView` grew the style axes.
-D1 validation: 470 format, 18 sync, 362 spec-lang and 168 format-spec tests
-pass; the CLI builds; `cargo fmt --check` clean; the corpus gate adds a
-namespace pass (alias STEP2D_0 add/remove with restore-to-input equality;
-clone of component 0 under a 42-char SectionKeys name with save/reopen typed
-equality and full projection-fingerprint equality vs the source minus
-name/aliases; authorized clone removal restoring the original snapshot
-exactly) — all checks true on all three gate libraries, exit 0.
-The D1 review fix pass (2026-09-16) hardened the namespace boundary: final
-lib_ref/alias uniqueness in `with_library_edit` is now checked on the
-storage-namespace form (illegal-char sanitize + the CFB directory namespace's
-case-insensitive fold), so case-variant names/aliases — including case-variant
-"self-aliases", which the save path does not storage-share — are rejected at
-the declared boundary instead of failing later inside `SchLib::save`;
-`build_section_keys` became order- and case-robust (short names claim their
-storage identities before any truncated key is generated; `generate_unique_key`
-folds its used-set), so long-name truncation collisions save correctly in any
-header order. The §8c guard was strengthened to per-pairing-target semantics
-(each embedded reference resolves to its concrete input asset — first exact,
-then first case-insensitive — which must survive name-intact; duplicate-name
-siblings are no substitute), sharing one `resolve_image_asset_reference`
-helper with the creation-time check; `SchFontAppend::native_default()` now
-uses the shared validation constants. Alias `Remove` resolution releases a
-removed component's alias even when a New component re-takes the name in the
-same edit. Plan D item 1's sync-side `SchLibPatch` library-level op variants
-were re-scoped to increment E by the 2026-09-16 orchestrator decision
-(recorded in the plan and worklog; elaboration consumes the D1 format API).
-Post-fix validation: 474 format, 18 sync tests pass; CLI builds; corpus gate
-all-true, exit 0.
-Step-2 increment D2 (2026-09-17) extended the batch engine to the footprint/
-implementation chain: `SchChildBatch.footprints` with
-`SchFootprintEdit::{Keep, Replace, New}` over the A2
-`footprint_maps().footprints` projection (PCBLIB implementations only); each
-member is the Implementation record plus its whole owned subtree, handled as
-a unit, and the serialized compatibility-container chain (ImplementationList
-→ Implementation → ImplementationMap → MapDefiner, ParameterList) is
-preserved as serialized, never flattened. Non-PCBLIB implementations
-(SIM/PCB3D/SI/…) are OUTSIDE the collection: preserved verbatim in their
-original relative slots under every footprint edit including complete
-replacement with deletion authorized (the red-team [12] SIM-preservation test
-exists); reordering permutes only footprint slots. `SchFootprintInit` covers
-model_name/description/is_current/pin_pad_maps (`Option`; `None` =
-unaddressed → definers preserved verbatim on Replace); Replace preserves
-everything unaddressed (unique_id, datafile links, GUIDs, stored model_type
-casing, the ParameterList subtree); creation materializes the full native
-chain per decompiled-source + fixture-byte evidence — shared
-ImplementationList reused (created only when none exists; AD26 emits exactly
-one per component unconditionally), Implementation with model_type PCBLIB,
-fresh UniqueId, IndexInSheet −1, owner_part_id 0, and the native single
-default datafile link (entity = model name, kind "PCBLib"), plus one
-ImplementationMap and one ParameterList (both emitted unconditionally by
-AD26; fixture 45/46/48 counts are 1:1:1) and one MapDefiner per pin-pad map.
-MapDefiners were reclassified as objectList children (native 0-based map
-ordinals via the shared memo-§6 renumbering; wild-byte verified) and
-ParameterList-owned parameters as non-objectList (−1) content. Duplicate pin
-designators are rejected (AD26 silently drops case-insensitive duplicate
-definers on load). is_current: the native single-current-per-model-type
-invariant (AD26's importer repairs it silently at load) is enforced at the
-mutation boundary as a no-new-divergence rule — a batch may neither break a
-coherent input nor author an active current claim into an incoherent final
-state; pre-existing wild states (keyless ISCURRENT ⇒ zero currents — two of
-the three gate fixtures, lucashudson-Connectors and STM32F4) pass through
-verbatim when no current value is written and are resolvable in the same
-batch. Additional-stream chain records freeze the
-collection to the all-positional-Keep no-op (native exporter cannot emit
-them; zero corpus occurrences). Footprint subtrees containing pins are hard
-errors; subtree records that are graphics members conflict when both
-collections are edited in one batch.
-D2 validation: 481 format, 18 sync, 362 spec-lang and 168 format-spec tests
-pass; the CLI builds; `cargo fmt --check` clean; the corpus gate adds a
-footprint structural pass (per component: first-footprint description
-replace, PROBE_STEP2D2 add with a pin-pad map from an existing pin,
-authorized removal + description restore to exact input equality, with
-projection equality and the non-PCBLIB count invariant at every stage) — all
-checks true on all 223 components of the three gate libraries, exit 0.
-Step-2 increment E1 (2026-09-17) delivered the sync-side keyed elaboration
-plus the deferred D1 library-level op surface. The crate-private collection
-planner is now class-aware (`CollectionClass::{Keyed, Positional}` derived
-totally from `CollectionKind`): partial scope is "updates in original slots +
-appends" for BOTH classes — interior insertion is a hard error at one named
-enforcement point (`reject_partial_interior_insert`) and partial removal is
-inexpressible by construction (`IndexedEdit::Remove` was deleted: the
-ratified contract gives it no legal authorization since `delete: allow`
-requires `mode: complete`, where removal is omission); complete positional
-requests must pair item N with original destination N
-(`PositionalCompleteMisalignment`), while keyed complete reorders freely.
-The formerly dead planner surface (Insert appends, Complete/FinalItem,
-`materialize`, `items`, `removed`) is production-consumed by elaboration and
-altium-sync builds with zero warnings. `SchLibPatch` gained: a cached
-reviewed result (computed once — creations carry fresh UniqueIds, so
-recomputation would diverge from review), `from_library_ops`
-(`SchLibLibraryOp`: alias add/remove, image-asset insert/replace/remove with
-`CapturedImageAsset` payloads re-verified hash/path at construction AND
-before every apply, font appends, component create Blank/CloneOf and
-explicit by-name remove) lowering to exactly ONE `SchLibEdit` per
-application, and `from_intent(input, &SchLibIntent)` — definition-scope
-keyed elaboration: components keyed by exact lib_reference (partial = update
-matched + append-create in source order; complete = final membership/order,
-omission removes only under delete:allow with the D1 authorization flag and
-auto-releases the removed aggregate's aliases; renames never inferred),
-parameters keyed case-insensitively per the native
-`GetParameterByName`/OrdinalIgnoreCase comparison (authored spelling wins on
-update), aliases keyed exactly (membership semantics; surviving order stays
-destination order per the D1 sorted-set deviation), footprints keyed by
-exact model_name (`source` is provenance, never a key; `explicit_maps=false`
-⇒ definers unaddressed/preserved; explicit maps elaborate positionally
-through the planner incl. `materialize`; an authored maps entry addressing a
-multi-pad destination definer is a hard error — native MapDefiners may carry
-several pads while a pin-pad intent pair expresses one, so narrowing is never
-silent, while unaddressed tails preserve all pads and complete+allow shorter
-lists remove definers explicitly; `is_current` is not intent-expressible —
-preserved on update, first-created-on-empty rule on create; whole-set
-replacement takes two patches: empty via complete+allow, then author),
-scalars via the existing FieldPolicies with Absent-never-writes on
-matched AND created components. Every collection scope in a hand-built
-intent must be self-consistent: non-default mode/delete without a
-declaration span, or partial+`delete: allow` (contract-illegal), hard-error
-at the `from_intent` boundary instead of being silently dropped. Duplicate keys on either side of a managed
-collection block with both locations; unmanaged collections never touch wild
-duplicates. Application order is the
-D1 two-step: one library edit first, then component content replacements
-captured against its result (replacement indices address the
-post-library-edit sequence). Inspection surface: replacements with
-before/after snapshots + `scalar_changes()` deltas, created/removed
-components, alias/image/font op accessors — the exact-indexed-diff
-foundation, no rendering. No-op detection at every level makes
-apply→re-elaborate replan-empty.
-E1 validation (post findings-fix pass 2026-09-17: multi-pad definer guard +
-programmatic scope validation): 481 format, 35 sync, 362 spec-lang and 168
-format-spec tests pass; the CLI builds; altium-sync builds with zero
-warnings; `cargo fmt --check` clean; the corpus gate adds an intent pass (per file: partial
-parameters probe STEP2E on component 0 with apply/save-reopen equality and
-replan-empty; partial append of Blank STEP2E_PROBE with one parameter and one
-alias, replan-empty; COMPLETE components intent built from the final library
-minus the probe with delete:allow removing exactly the probe and restoring
-the pre-probe state) — all checks true on all three gate libraries, exit 0.
-Step-2 increment E2 (2026-09-17) completed `SchLibIntent` elaboration
-(`crates/altium-sync/src/schlib/positional.rs` + the reworked `elaborate.rs`;
-the E1 staging errors are gone, created components included). Pins/graphics
-elaborate POSITIONALLY per owner group (memo §1/§2): `part N` → Part(N);
-component scope → Part(1) single-part / SharedPins(0) multi-part for pins
-(matched components crossing the single/multi boundary while managing
-component-scope pins hard-error; created components map by resulting count)
-and Part(1)-or-hard-error for graphics (no shared graphics owner exists
-natively). Authored item K addresses FILTERED index K of its group (the
-recorded B/C filtered→full mapping obligation, resolved with a multi-part
-isolation test); partial scope updates the prefix + appends overflow with
-owner forced to the group (append order: component scope, then parts
-ascending); complete scope defines THAT group's membership/order only —
-every other group, and the structurally unaddressable
-PartIndependent/OutOfRange/owner-0-graphic owners, preserve verbatim.
-Unrepresentable graphic KINDS (Symbol/Hyperlink/other) block a complete
-scope always and a partial scope only when addressed (tail fine); cross-kind
-positional replacement blocks naming both kinds. Pin fields elaborate
-through their policies (location via `resolve_pin_location` with independent
-x/y axis preservation; hidden_net_name is stored-or-empty — an unsatisfiable
-Set hard-errors with the C rationale; swap halves per memo §5 rule 3 —
-unauthored prefixes stay byte-verbatim). `inherit` on a native
-pin/graphic/part field hard-errors citing step-7 SchDoc scope (layout
-metadata keeps its documented inherit≡reset defaults). Parts: `part_count`
-through its contextual policy; partial growth = max(destination, highest
-authored); complete scope re-checks the contiguous 1..=n prefix, agreement,
-≥1 slot, and lowers trailing shrink to `with_parts_removed` under
-delete:allow with the typed report surfaced via
-`SchLibPatch::parts_shrinks()` (removed slots, deleted descendants,
-current_part_id adjustment). `PartIntent::part_swap_group` fans out over the
-FINAL sequence's non-owner-0 pins of that part (destination `parts()` Mixed
-projection blocks; contradicting pin-level authoring blocks; equal stored
-prefixes stay byte-verbatim). Pin placements and auto-sized boxes evaluate
-per owner through `evaluate_layout` with effective geometry
-authored-else-destination-else-default; component-owner geometry feeds part
-units; outputs override pin location/orientation and box corners before
-no-op comparison (fixed point on re-elaboration). Image graphics with
-authored `source:` resolve caller-captured bundles via the new
-`SchLibIntentAssets` provider (`from_intent_with_assets`; `from_intent` =
-empty provider; elaboration never sources bundle bytes from the filesystem —
-a missing capture blocks and the captured bytes are authoritative — but it
-re-verifies each required capture's path resolution and hash against disk
-via `verify_unchanged`, so bundles must still exist unchanged at plan time),
-lower to whole-resource insert/replace ops in the SAME library edit
-that precedes component content (resource name = authored file_name else the
-addressed destination image's stored name, never a basename derivation;
-stored-payload equality skips the op for replan-empty; conflicting bodies
-for one resolved pairing target block — the target, exact-then-
-case-insensitive against the stored assets else the case-folded new-insert
-name, is the resource identity, so case-variant spellings of one slot can
-never emit self-overwriting duplicate ops; clear/reset never deletes
-assets), and
-`SchLibSnapshot::image_assets()` (altium-format) exposes the stored
-name+payload store for that pairing.
-E2 validation (post-review, 2026-09-17): 481 format, 54 sync, 362
-spec-lang, 168 format-spec tests pass; the CLI checks;
-altium-sync builds with zero warnings; `cargo fmt --check` clean; the corpus
-gate adds an intent-E2 pass per file (positional partial pin rename of
-component 0's first pin through its owner group with exact restore;
-part-block graphic add + complete-scope removal on the first eligible
-multi-part component — ICs and STM32F4 run it, Connectors records
-skipped=1 with no multi-part components; part growth with a probe pin in
-the new slot + complete-parts removal with the shrink report asserted
-through patch inspection) — all checks true on all three gate libraries,
-exit 0.
+independent completeness review. Step 2 is complete (2026-09-17, section
+below); steps 3 through 9 remain outstanding.
+
+### NEXT.md step 2 — SchLib snapshots and indexed patches (complete, 2026-09-17)
+
+Step 2 is complete: format-owned typed SchLib snapshots, batch structural
+editing, declared namespace transitions, and full definition-scope
+`SchLibIntent` → `SchLibPatch` elaboration over snapshot-bound addresses and
+scope checks. The authoritative collection-semantics reference is
+[docs/spec-lang/reference/schlib-collections.md](docs/spec-lang/reference/schlib-collections.md),
+promoted from [the A1 contract memo](docs/worklogs/next-child-contracts-2026-09-16.md);
+the full increment history and every review trail is in
+[docs/worklogs/next-children-2026-09-16.md](docs/worklogs/next-children-2026-09-16.md).
+Increment history, brief (baseline 436fa3c through 031cbf2, each with an
+independent review and fix pass): 2026-09-05 foundation (complete typed
+snapshots, immutable batch component replacement with captured
+`ReferenceContext` drift rejection, scalar patches, ownership assembly);
+A1/A2 evidence memo + read-only child projections, owner groups, reported
+load normalization, address vocabulary; B parameters/graphics batch editing;
+C pins + part grow/shrink; D1 library-level namespace transitions; D2
+footprint/implementation-chain editing; E1 keyed elaboration + sync-side
+library ops; E2 positional elaboration, parts, layout, swap fan-out,
+image-asset sources; F gate review + docs promotion.
+
+**What works** (all snapshot-bound, atomic against immutable inputs):
+
+- Capture and materialize: complete typed snapshots of every gate-corpus
+  SchLib (lucashudson-Connectors, ICs, arthurbenemann-STM32F4 — 223
+  components) with native save/reopen typed equality; the wider `data/schlib`
+  fixture set is exercised by open/validate only (feature-gated), not by the
+  snapshot equality gate. Capture never validates wild values
+  — out-of-range owners, wild swap encodings, dangling font/image references,
+  and orphan storage assets load and round-trip verbatim. The one load-time
+  exception is reported, never silent: native PartCount < 2 floors to 2 and
+  DisplayModeCount < 1 to 1 (mirroring AD26's after-import event), surfaced
+  via `SchLib::load_normalizations()`.
+- Read-only projections on `SchLibComponentSnapshot`
+  (`crates/altium-format/src/schlib/snapshot/views.rs`): parts with derived
+  swap-group projections, pins, root-owned parameters, graphics with explicit
+  unrepresentable variants, aliases, PCBLIB-only footprint maps, captured
+  font/image/style namespaces, and raw-truthful `SchOwnerGroup`
+  classification (`PartIndependent`/`SharedPins`/`Part(n)`/`OutOfRange`).
+- Structural editing: `with_children` (parameters, graphics, pins, footprint
+  chains — final ordered Keep/Replace/New sequences over the input
+  projections, one `assemble_records` pass, stream-order and IndexInSheet
+  policies per the promoted reference), `with_parts_appended`/
+  `with_parts_removed` (trailing-only shrink with typed deletion and
+  `current_part_id` reports), and `with_library_edit` (component
+  create/clone/remove, aliases with three synchronized representations,
+  whole-resource image assets, font appends) with the resulting
+  `ReferenceContext` always recomputed; strict `replace_components` still
+  rejects undeclared context drift. Deletion always requires explicit
+  authorization and unauthorized deletion errors list the doomed members.
+- Sync-side elaboration (`altium-sync`): the snapshot-bound address
+  vocabulary (`src/address.rs` — landed and unit-tested, but step-3-facing:
+  elaboration does not consume it yet; its module docs record the divergence
+  risk against `positional.rs`'s own scope targeting), the class-aware
+  collection planner
+  (`src/collection.rs`: keyed = components/parts/parameters/aliases/
+  footprints, positional = pins/graphics/maps; partial = in-slot updates plus
+  appends with interior insertion a hard error; complete = final
+  membership/order with deletion only under `delete: allow`), owner-group
+  positional scoping (`src/schlib/positional.rs`), field policies
+  (Set/Clear/Inherit/Reset/Absent), layout/auto-size evaluation, part
+  swap-group fan-out, image-asset sources (`from_intent_with_assets` with
+  hash/path re-verified captures), and imperative library ops
+  (`from_library_ops`). Patches carry a cached reviewed result plus
+  inspection accessors (the exact-indexed-diff foundation), and apply
+  followed by re-elaboration is replan-empty at every level.
+
+**Recorded unsupported-content hard errors** (fail-fast with context;
+triggers, rationale, and enforcement points in the reference page): style_id
+authoring (Delphi style tables not reverse engineered); Additional-stream pin
+or implementation-chain structural edits (positional freeze; Additional
+sidecars unproven; the pin freeze and the single-current footprint invariant
+are mirrored on the part-shrink door, so neither can be bypassed through a
+part removal's deletion set); non-stored `hidden_net_name` writes (no proven
+serialization path); component-scope graphics on multi-part components (no
+native shared owner); multi-pad definer addressing (a pin-pad intent pair
+expresses one pad); Symbol/Hyperlink/other unrepresentable graphic kinds
+under a complete scope or when addressed; owner-0 shared pins on single-part
+components (unaddressable, preserved-only); `inherit` on native
+pin/graphic/part fields at definition scope (instance bases are step 7);
+single/multi-part boundary crossing while managing component-scope pins;
+authoring `is_current` incoherence (no-new-divergence rule); wild stored
+`current_part_id` blocking part ops until explicitly resolved.
+
+**Step 2 does NOT include** (step 3+ scope): saved plans (schema, manifests,
+hashes, frozen payloads), filesystem transactions and recovery, CLI migration
+(plan/apply still run the legacy ECO/executor path — preview/apply agreement
+is not guaranteed until step 5), and dump-direction source lowering
+(document → spec structured edits through the new planner). Elaboration is
+compile-direction and in-memory only.
+
+Step-2 validation at the final code state: 482 altium-format `--lib`, 54
+altium-sync, 362 altium-spec-lang and 168 altium-format-spec tests pass; the
+CLI builds; altium-sync builds with zero warnings; the three-library corpus
+gate (lucashudson-Connectors 56, ICs 32, arthurbenemann-STM32F4 135
+components) passes all scalar/structural/namespace/intent checks with native
+save/reopen typed equality and empty replans, exit 0. Open questions queued
+for the user are collected in the step-2 closure section of
+[the step-2 worklog](docs/worklogs/next-children-2026-09-16.md).
+
 Full image codecs were removed from the gate by the user's 2026-09-05 scope change.
 Graphic field policies now cover all 13 kinds against the existing typed Rust
 API/creation defaults, including optional arc endpoints and named PenWidth values.
@@ -534,11 +264,12 @@ Auto-size is a bounded edge-chain evaluator: unsupported containment errors, and
 part layouts treat inherited component boxes as fixed effective geometry.
 
 Current CLI execution architecture is unchanged: `plan` renders the legacy ECO and `apply`
-recompiles/runs the separate executor. Saved-plan execution, precondition checks,
-typed snapshot patches, and recovery transactions are not implemented. The
+recompiles/runs the separate executor. Typed snapshot patches exist in-memory
+(step 2), but saved-plan execution, precondition manifests, and recovery
+transactions are not implemented. The
 plan/apply checkmarks below indicate legacy command availability, not these
-guarantees. Next: finish language/SchLib intent separation, then the complete
-SchLib snapshot → plan → checked apply slice before migrating other domains.
+guarantees. Next: NEXT.md step 3 — saved plans and both directional planners —
+then the checked transaction executor and the SchLib CLI slice.
 
 PcbDoc bulk routing is planned as an explicitly referenced typed binary design
 artifact, separate from synchronization state. AutoPCB has `.routes` binary I/O;

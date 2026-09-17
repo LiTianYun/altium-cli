@@ -31,6 +31,24 @@
 //!   adjustment is RETURNED as a typed reported change, never applied
 //!   silently.
 //!
+//! Two `with_children` collection invariants are mirrored on this door so
+//! they hold library-wide (they cannot be bypassed by routing a membership
+//! change through a part removal; neither is curable by the deletion
+//! authorization):
+//!
+//! - **Additional-pin freeze** (increment C, `children.rs`
+//!   `resolve_pin_edits`): while ANY pin member lives in the Additional
+//!   stream, a shrink whose deletion set contains a pin hard-errors —
+//!   sidecars serialize from final Data pin encounter order only and
+//!   Additional pin sidecars are unproven, so pin membership may not change
+//!   through any door. Without Additional pin members, shrink pin deletion
+//!   remains supported (and round-trip tested).
+//! - **Single-current footprint invariant** (increment D2, `children.rs`
+//!   "is_current"): a shrink may not break a coherent input's single-current
+//!   PCBLIB state by deleting a (wild, part-owned) current Implementation
+//!   while other members remain; pre-existing incoherent states pass through
+//!   because the shrink writes no current value.
+//!
 //! A stored `current_part_id` outside `[1, native_count)` blocks BOTH ops
 //! (memo §3 rule 3: wild loaded values are preserved verbatim and must be
 //! explicitly resolved before any parts mutation — never silently clamped).
@@ -79,7 +97,7 @@
 use std::collections::HashSet;
 
 use super::SchLibComponentSnapshot;
-use super::children::{Identity, identity_of, renumber_touched_owners};
+use super::children::{Identity, MODEL_TYPE_PCBLIB, identity_of, renumber_touched_owners};
 use crate::sch_records::{SchRecord, record_type_for};
 use crate::schlib::ownership::{
     RecordAddress, RecordItem, RecordStream, assemble_records, owner_of,
@@ -255,6 +273,78 @@ impl SchLibComponentSnapshot {
                     owner_part_id,
                 });
             }
+        }
+        // Increment-C Additional-pin freeze, mirrored from `with_children`
+        // (`children.rs`, "Additional-stream pins freeze the collection"):
+        // the nine pin sidecar streams are serialized from final DATA pin
+        // encounter order only and Additional pin sidecars are unproven, so
+        // while ANY pin member lives in the Additional stream pin membership
+        // may not change through ANY door. A shrink whose deletion set
+        // contains a pin therefore hard-errors here regardless of
+        // descendant-deletion authorization — the same membership change is
+        // rejected by `resolve_pin_edits` on the batch door.
+        let additional_pins_present = component
+            .additional_records
+            .iter()
+            .any(|record| matches!(record, SchRecord::Pin(_)));
+        if additional_pins_present {
+            if let Some(doomed) = deleted_children
+                .iter()
+                .find(|child| child.kind == SchRecordType::Pin)
+            {
+                return Err(AltiumFormatError::InvalidParamValue {
+                    key: "pins".to_owned(),
+                    detail: format!(
+                        "removing part slots {removed:?} would delete pin child[{}] \
+                         (owner_part_id {}) while pin members live in the Additional stream; \
+                         the pin collection is frozen to membership-preserving edits \
+                         (Additional pin sidecars are unproven), so part removal deleting \
+                         pins is unsupported here regardless of deletion authorization",
+                        doomed.child_index, doomed.owner_part_id
+                    ),
+                });
+            }
+        }
+        // D2 single-current invariant, mirrored from `with_children`
+        // (`children.rs`, "is_current"): a shrink may not BREAK a coherent
+        // input's single-current PCBLIB state — a wild part-owned current
+        // Implementation would otherwise be deleted through this door without
+        // the batch door's guard. Membership mirrors `footprint_maps()`:
+        // PCBLIB implementations in encounter order. Pre-existing incoherent
+        // (wild) states pass through: the shrink writes no current value.
+        let mut input_members = 0usize;
+        let mut input_currents = 0usize;
+        let mut final_members = 0usize;
+        let mut final_currents = 0usize;
+        for (address, record) in all_child_records(component) {
+            let SchRecord::Implementation(implementation) = record else {
+                continue;
+            };
+            if !implementation
+                .model_type
+                .eq_ignore_ascii_case(MODEL_TYPE_PCBLIB)
+            {
+                continue;
+            }
+            input_members += 1;
+            input_currents += usize::from(implementation.is_current);
+            if !marked.contains(&address) {
+                final_members += 1;
+                final_currents += usize::from(implementation.is_current);
+            }
+        }
+        let input_coherent = input_members == 0 || input_currents == 1;
+        if input_coherent && final_members > 0 && final_currents != 1 {
+            return Err(AltiumFormatError::InvalidParamValue {
+                key: "footprints".to_owned(),
+                detail: format!(
+                    "removing part slots {removed:?} would leave {final_currents} current \
+                     footprint(s) across {final_members} retained PCBLIB implementation(s); \
+                     a coherent single-current input may never be broken (native model: \
+                     exactly one current implementation per model type) — resolve the \
+                     doomed current footprint through the footprints collection first"
+                ),
+            });
         }
         if !deleted_children.is_empty() && !allow_descendant_deletion {
             let listing: Vec<String> = deleted_children
@@ -720,5 +810,126 @@ mod tests {
             assert!(error.contains("explicitly resolved"), "{error}");
             assert!(error.contains("current_part_id 9"), "{error}");
         }
+    }
+
+    /// The two `with_children` collection invariants mirrored on the shrink
+    /// door (module docs): the increment-C Additional-pin freeze and the D2
+    /// single-current footprint invariant hold even when the membership
+    /// change arrives as a part removal with full deletion authorization.
+    #[test]
+    fn shrink_mirrors_additional_pin_freeze_and_current_footprint_coherence() {
+        use super::super::{SchChildBatch, SchFootprintEdit, SchFootprintInit};
+
+        // Native PARTCOUNT 3 (effective 2): a Data pin owned by doomed slot 2
+        // plus a retained part-1 pin living in the Additional stream.
+        let mut library = SchLib::new_blank_ad26().unwrap();
+        {
+            let aggregate = &mut library.components[0];
+            aggregate.component.part_count = 3;
+            aggregate.records.push(pin(2, "2"));
+            aggregate.additional_records.push(pin(1, "X"));
+        }
+        library.header.components[0].part_count = 3;
+        library.header.weight = compute_weight(&library.header, &library.components);
+        library.validate_invariants().unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        library.save(file.path()).unwrap();
+        let library = SchLib::open(file.path()).unwrap();
+        let component = library.snapshot().unwrap().component(0).unwrap();
+
+        // Deleting the Data pin while an Additional pin member exists is
+        // frozen even under full authorization (the batch-door contract:
+        // "such pins can only be kept untouched" / no membership change).
+        let error = component
+            .with_parts_removed(&[2], true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Additional stream"), "{error}");
+        assert!(
+            error.contains("regardless of deletion authorization"),
+            "{error}"
+        );
+
+        // The same freeze covers a doomed ADDITIONAL pin (wild part-owned).
+        let mut doomed_additional = component.clone();
+        let SchRecord::Pin(record) = &mut doomed_additional.component.additional_records[0] else {
+            unreachable!()
+        };
+        record.owner_part_id = 2;
+        let error = doomed_additional
+            .with_parts_removed(&[2], true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Additional stream"), "{error}");
+
+        // Single-current invariant: two PCBLIB footprints (one current), then
+        // the CURRENT implementation is made wild part-2-owned. Removing slot
+        // 2 would delete it and leave one retained non-current member — the
+        // coherent input may not be broken through the shrink door.
+        let mut library = SchLib::new_blank_ad26().unwrap();
+        library.components[0].component.part_count = 3;
+        library.header.components[0].part_count = 3;
+        library.header.weight = compute_weight(&library.header, &library.components);
+        library.validate_invariants().unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        library.save(file.path()).unwrap();
+        let library = SchLib::open(file.path()).unwrap();
+        let component = library
+            .snapshot()
+            .unwrap()
+            .component(0)
+            .unwrap()
+            .with_children(SchChildBatch {
+                parameters: None,
+                graphics: None,
+                pins: None,
+                footprints: Some(vec![
+                    SchFootprintEdit::New(SchFootprintInit {
+                        model_name: "FP-A".to_owned(),
+                        description: String::new(),
+                        is_current: true,
+                        pin_pad_maps: None,
+                    }),
+                    SchFootprintEdit::New(SchFootprintInit {
+                        model_name: "FP-B".to_owned(),
+                        description: String::new(),
+                        is_current: false,
+                        pin_pad_maps: None,
+                    }),
+                ]),
+                allow_deletion: false,
+            })
+            .unwrap();
+        let retarget_implementation = |snapshot: &SchLibComponentSnapshot, current: bool| {
+            let mut wild = snapshot.clone();
+            for record in &mut wild.component.records {
+                if let SchRecord::Implementation(implementation) = record {
+                    if implementation.is_current == current {
+                        implementation.base.owner_part_id = 2;
+                    }
+                }
+            }
+            wild
+        };
+        let error = retarget_implementation(&component, true)
+            .with_parts_removed(&[2], true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("0 current footprint(s)"), "{error}");
+        assert!(error.contains("coherent single-current"), "{error}");
+
+        // The inverse wild shape — a doomed NON-current implementation —
+        // breaks no coherence and shrinks fine, reporting the deletion.
+        let shrink = retarget_implementation(&component, false)
+            .with_parts_removed(&[2], true)
+            .unwrap();
+        assert!(
+            shrink.deleted_children.iter().any(
+                |child| child.kind == SchRecordType::Implementation && child.owner_part_id == 2
+            ),
+            "{:?}",
+            shrink.deleted_children
+        );
+        assert_eq!(shrink.component.effective_part_count().unwrap(), 1);
     }
 }

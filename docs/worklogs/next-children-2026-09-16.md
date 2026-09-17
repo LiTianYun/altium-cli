@@ -2288,3 +2288,177 @@ altium-sync` — 54 passed, 0 failed (was 49; +5 new tests, one extended);
 `cargo fmt --check -p altium-format -p altium-sync` — clean; corpus gate
 (Connectors/ICs/STM32F4) — exit 0, every enforced field true
 (`intent_part_graphic_skipped: 1` on Connectors only, as before).
+
+## Step-2 closure: open questions for the user (increment F, 2026-09-17)
+
+Everything below was queued during increments A2–E2 for an explicit user
+decision. None blocks the step-2 gate — each has a recorded safe default
+(hard error, local constant, or documented deviation) — but each needs a
+user call before or during the follow-on work that consumes it.
+
+1. **Constant promotions into `altium-format-types::constants`** (plan
+   standing rule: no unilateral types-crate additions):
+   - The pin combined-swap separator `"|&|"`
+     (`SWAP_ID_PART_INFO_SEPARATOR`,
+     `crates/altium-format/src/sch_records.rs:132`; native
+     `SchPin.cs:31 SwapIdPartInfoSeparator`) — proposed home
+     `constants::pin`.
+   - `MODEL_TYPE_PCBLIB` (`"PCBLIB"`) and `MODEL_DATAFILE_KIND_PCBLIB`
+     (`"PCBLib"`), currently local consts in
+     `crates/altium-format/src/schlib/snapshot/children.rs` (native
+     `EngineObjects/SchImplementation.cs:31 ModelTypePCBLIB`). The promotion
+     must unify all five raw-literal predicate sites onto the promoted
+     constants: `schlib/snapshot/views.rs:532` (the A2 projection membership
+     predicate that must stay in lockstep with the children.rs engine
+     predicate for `SchFootprintEdit` index-space equivalence),
+     `api/sch_common.rs:410` and `:501`, `api/schdoc_write.rs:527`,
+     `api/schlib_write.rs:138`. Predicates are character-identical today.
+2. **New-pin creation defaults vs native `SetDefault`** (C finding 6): pins
+   created through the batch engine keep typed wire defaults —
+   `show_name`/`show_designator` FALSE (PIN_CONGLOMERATE wire zero) and the
+   wire-zero formal type — whereas AD26's editor default
+   (`Objects/SchDataPin.cs SetDefault`) sets both show flags TRUE and
+   `formalType = eStdLogic_ForcingUnknown`. Round-trip is exact and pinned
+   by tests, but an engine-created pin renders with hidden name/designator
+   unlike an editor-created pin. Decide: adopt the SetDefault values on
+   `New`, or grow authored `show_name`/`show_designator` fields on
+   `SchPinInit`/`SchPinView`.
+3. **Owner-0 shared pins on SINGLE-part components are unaddressable** (E2
+   recorded consequence): component scope maps to `Part(1)` there per the
+   memo §1 rule, so a wild single-part component's owner-0 pins are
+   preserved-only content; the corpus pass records such components as
+   skipped, never silent. Decide whether a dedicated shared-pin address form
+   should land (F/step-7 candidate) or the gap stays recorded.
+4. **Multi-pad definer base-state rebuild** (D2 finding 4): an authored
+   `pin_pad_maps: Some(..)` Replace rebuilds MapDefiners from typed wire
+   defaults, so a hypothetical wild non-default `SchPrimitiveBase` field on a
+   REPLACED definer (e.g. `graphically_locked`) is reset — zero corpus
+   occurrences, `None` preserves verbatim, and a guard was considered and
+   declined as fragile. Flagged per the D2 resolution: revisit only if
+   evidence of the wild class appears.
+5. **api-layer `default_base()` sentinels** (B finding 7): the pre-existing
+   `api/sch_common.rs:540` creation defaults (owner_part_id 0 /
+   index_in_sheet 0, used by `api/schlib_write.rs` creation) contradict the
+   memo §2/§6 sentinels the snapshot engine now writes (−1/−1 for root
+   text). Decide: align the legacy api-layer creation path or deprecate it
+   in favor of the snapshot engine.
+6. **Blank-factory ImplementationList** (D2 deferral): `new_blank_ad26`
+   components carry NO ImplementationList, whereas an AD26-saved blank
+   always emits exactly one (unconditional emit). Creation handles both
+   shapes; decide whether the blank factory should materialize the list for
+   byte-parity with AD26 saves (alongside item 5).
+7. **Component-scalar `inherit` consistency** (E2 finding 6): the four
+   component scalars (`description`/`designator`/`component_kind`/
+   `show_hidden_pins`) resolve `inherit` ≡ reset (documented E1 behavior),
+   while E2 hard-errors `inherit` on native pin/graphic/part fields at
+   definition scope with the same no-instance-base argument. Decide whether
+   the scalars adopt the hard error for consistency or keep the documented
+   E1 resolution.
+8. **Candidate extensions awaiting prioritization** (recorded limitations,
+   not defects): `is_current` intent authoring — including the E1 finding-3
+   candidate to fire the created-footprint current rule when no SURVIVING
+   original footprint is current, which would make single-patch whole-set
+   footprint replacement expressible; a multi-pad pin-pad intent axis; alias
+   ORDER authoring (blocked by the native sorted-set storage — likely
+   permanent); an explicit `current_part_id` resolve op (wild stored values
+   currently block part ops); Additional-pin freeze relaxation once
+   Additional pin sidecars are proven (or proven absent) against native
+   evidence; and the pre-existing SchLib Data-stream parser gap for
+   RECORD=226 Hyperlink records (zero corpus occurrences).
+
+## Increment F — review findings resolution (2026-09-17)
+
+The independent seam review of the F closure returned 8 findings (3 major, 5
+minor; one purely informational). Each was verified against code/docs before
+acting; all were CONFIRMED (none refuted). Resolution:
+
+1. **"Fixture-free 481 suite" mischaracterization (minor) — CONFIRMED,
+   DOCS FIXED.** The default `cargo test -p altium-format --lib` run includes
+   ungated `data/`-reading tests in `crates/altium-format/src/intlib.rs`
+   (actually all five tests in that module read `data/intlib/`, not just the
+   two the review named) — a pre-existing defect already recorded in
+   STATUS.md ("11 legacy CFB/IntLib tests remain ungated"), untouched by step
+   2. Fix: NEXT.md's step-2 gate sentence now says "the default `--lib`
+   suites … every step-2 test is fixture-free — the 11 ungated legacy
+   CFB/IntLib tests recorded in STATUS.md predate step 2" instead of calling
+   the whole suite fixture-free. The tests were NOT gated in this pass
+   (out of step-2 scope; gating them changes advertised counts and belongs
+   with the recorded STATUS.md defect).
+2. **Independent gate confirmation (informational).** No action; the
+   reviewer's clause-by-clause verification stands as the F gate record.
+3. **Parts-shrink bypass of the C Additional-pin freeze and the D2
+   current-footprint no-break rule (major) — CONFIRMED, CODE FIXED.**
+   `with_parts_removed` deleted children by raw `owner_part_id` match with no
+   Additional-pin or coherence check, so the intent path (complete parts
+   scope + `delete: allow` → `elaborate_component_content` →
+   `with_parts_removed`) could delete pin members while Additional pins
+   existed (including doomed Additional pins outright) and could delete a
+   wild part-owned CURRENT PCBLIB Implementation from a coherent component —
+   both shapes the batch door hard-errors on. Fix
+   (`crates/altium-format/src/schlib/snapshot/parts.rs`): two guards after
+   the deletion scan, firing regardless of `allow_descendant_deletion` —
+   (a) while any pin member lives in the Additional stream, a deletion set
+   containing any pin hard-errors (exact mirror of `resolve_pin_edits`'
+   freeze condition; Data-pin deletion WITHOUT Additional pins remains
+   supported and round-trip tested); (b) mirroring the `with_children`
+   "is_current" no-break half, a shrink whose retained PCBLIB implementation
+   set would be non-empty with current-count ≠ 1 on a coherent input
+   hard-errors (incoherent wild inputs still pass through — the shrink
+   writes no current value). `MODEL_TYPE_PCBLIB` in `children.rs` became
+   `pub(super)` so both doors share one membership predicate (promotion to
+   `altium-format-types::constants` remains queued, closure item 1). New
+   test `shrink_mirrors_additional_pin_freeze_and_current_footprint_coherence`
+   covers: doomed Data pin with a retained Additional pin, doomed Additional
+   pin, doomed current implementation (blocked), and doomed non-current
+   implementation (allowed, reported). Module docs, the reference page
+   (hard-error table rows + `is_current` section + parts paragraph), and
+   STATUS.md record the mirrors.
+4. **`address.rs` is unconsumed step-3-facing vocabulary presented as wired
+   step-2 surface (major) — CONFIRMED, DOCS FIXED.** Zero consumers outside
+   its own unit tests; elaboration's scope targeting is implemented
+   independently in `positional.rs` (raw-owner-id matching with the
+   pre-growth `OutOfRange` convention) vs `address.rs` (projection-filtered
+   `SchOwnerGroup` equality) — coinciding on every resolvable address only
+   because resolution rejects parts beyond effective. Fix: NEXT.md (both the
+   checkpoint paragraph and the step-2 gate item), STATUS.md, and the
+   reference page now state address.rs is landed and unit-tested but NOT yet
+   consumed by elaboration (saved plans, step 3, are its intended consumer);
+   `address.rs` module docs record the consumption status, the exact
+   semantic difference, and the step-3 obligation (delegate one mapping to
+   the other or add a cross-implementation equivalence test). No code
+   unification attempted here: visibility restructuring for a cross-module
+   equivalence test is step-3 work, when the consumer lands.
+5. **Third copy of the image-asset pairing rule (minor) — CONFIRMED,
+   DOCSTRINGS FIXED.** `collect_image_asset_ops`
+   (`crates/altium-sync/src/schlib/elaborate.rs`) re-implements the
+   exact-then-ASCII-case-insensitive pairing inline (the format-side helper
+   is `pub(crate)` behind the privacy boundary), contradicting
+   `resolve_image_asset_reference`'s "single helper" docstring
+   (`crates/altium-format/src/schlib/validation.rs`). Fix: the validation.rs
+   docstring now names the elaborate.rs copy as a must-update-together site,
+   and the elaborate.rs comment cites validation.rs as the rule authority.
+   Exposing the helper publicly was declined (format privacy rule).
+6. **STATUS.md "every corpus SchLib" overclaim (major) — CONFIRMED, DOCS
+   FIXED.** Rescoped to "every gate-corpus SchLib (lucashudson-Connectors,
+   ICs, arthurbenemann-STM32F4 — 223 components)", noting the wider
+   `data/schlib` fixture set is exercised by feature-gated open/validate
+   only, not by the snapshot equality gate.
+7. **Swap fan-out enforcement point miscited (minor) — CONFIRMED, DOCS
+   FIXED.** The fan-out and its Mixed block live in `positional.rs`
+   (`part_swap_fanouts` :1865 / `apply_part_swap_fanouts` :1895);
+   `elaborate.rs` only routes. Both citations corrected (reference-page
+   Mixed row, NEXT.md step-2 swap sentence).
+8. **`blocks/schlib.md` owner-0 statement unflagged (minor) — CONFIRMED,
+   DOCS FIXED.** Added a scope note to the `part` section: the owner-0
+   mapping describes the legacy `altium-format-spec` executor (which does
+   write owner 0, `executor.rs`), native evidence contradicts it for
+   graphics, and the step-2 elaboration semantics live in the reference
+   page's owner-group mapping.
+
+Post-fix verification (re-run after the last edit): `cargo test -p
+altium-sync` — 54 passed, 0 failed; `cargo test -p altium-format --lib` —
+482 passed, 0 failed (was 481; +1 new shrink-mirror test); `cargo check
+--workspace` — clean; `cargo fmt --check -p altium-format -p altium-sync` —
+clean; corpus gate (Connectors 56 / ICs 32 / STM32F4 135 components) — exit
+0, every enforced field true (`intent_part_graphic_skipped: 1` on Connectors
+only, as before).

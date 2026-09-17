@@ -529,7 +529,11 @@ fn collect_image_asset_ops(
         // The native pairing order: exact name first, then the first
         // case-insensitive match; an unmatched name inserts under its folded
         // identity so case-variant spellings collide HERE instead of landing
-        // as silently self-overwriting duplicate ops on one slot.
+        // as silently self-overwriting duplicate ops on one slot. This
+        // mirrors `resolve_image_asset_reference` in
+        // `crates/altium-format/src/schlib/validation.rs` (the rule
+        // authority, pub(crate) behind the format privacy boundary); any
+        // change to the pairing rule must land in both places.
         let target = stored
             .iter()
             .position(|(stored_name, _)| *stored_name == entry.name)

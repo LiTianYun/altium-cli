@@ -216,9 +216,14 @@ pub(crate) fn check_custom_display_mode_name_index(
 /// Native pairing-order resolution of an embedded image reference against an
 /// ordered asset name list (resolutions §8c): the first exact match wins,
 /// otherwise the first case-insensitive match; `None` for a dangling
-/// reference. This single helper backs both the creation-time existence check
-/// (`check_embedded_image_reference`) and the `with_library_edit` final-state
-/// pairing-target guard, so the two boundaries can never drift apart.
+/// reference. This helper backs both format-side boundaries — the
+/// creation-time existence check (`check_embedded_image_reference`) and the
+/// `with_library_edit` final-state pairing-target guard — so those two cannot
+/// drift apart. One more copy of the rule exists OUTSIDE this crate:
+/// `collect_image_asset_ops` in `crates/altium-sync/src/schlib/elaborate.rs`
+/// re-implements the same exact-then-ASCII-case-insensitive pairing inline
+/// (this helper is `pub(crate)` behind the format privacy boundary). Any
+/// change to the pairing rule MUST be applied there too.
 pub(crate) fn resolve_image_asset_reference<'a>(
     asset_names: impl IntoIterator<Item = &'a str> + Clone,
     file_name: &str,
