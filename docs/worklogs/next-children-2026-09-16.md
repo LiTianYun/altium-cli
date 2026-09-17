@@ -917,3 +917,287 @@ Post-fix verification (all after the last edit):
 - Corpus gate: all checks true — the five pin fields AND the four new part
   fields — for lucashudson-Connectors (56), ICs (32),
   arthurbenemann-STM32F4 (135); exit 0.
+
+## Increment D1 — library-level namespace transitions (implemented)
+
+Contract authority: memo §8a/§8c incl. the errata section (fonts-in-
+ReferenceContext contradiction), plan increment D items 1 and 3. New module
+`crates/altium-format/src/schlib/snapshot/library.rs`, exported through
+`schlib`, `api`, and the snapshot module.
+
+### API shape
+
+- `SchLibSnapshot::with_library_edit(SchLibEdit) -> Result<SchLibSnapshot>` —
+  the DECLARED-transition variant of component replacement. The strict path
+  is untouched: `replace_components` with an UNDECLARED context change
+  remains a hard error (re-asserted in tests), so namespace changes are only
+  expressible through this explicit typed batch.
+- `SchLibEdit { components: Option<Vec<SchLibComponentEdit>>, alias_ops:
+  Vec<SchAliasOp>, image_assets: Vec<SchImageAssetEdit>, font_appends:
+  Vec<SchFontAppend>, allow_component_removal: bool }`.
+- `SchLibComponentEdit::{Keep(i), ReplaceWith(i, SchLibComponentSnapshot),
+  New(SchNewComponent)}` over the FINAL ordered component sequence
+  (`None` = component set untouched; omission of an input slot = removal,
+  requiring `allow_component_removal` and listing the omitted slots
+  otherwise). `ReplaceWith` keeps the strict rules: input-context equality,
+  no renames, no alias-list changes (alias changes go through `SchAliasOp`).
+- `SchNewComponent::{CloneOf { source, lib_reference }, Blank
+  { lib_reference }}` — the context-independent factory. CloneOf deep-copies
+  an INPUT component under the new name with a fresh component (root)
+  `UniqueId` and cleared alias state (`index.aliases` + root `AliasList`);
+  every other axis, child-record unique ids included, is copied verbatim
+  ("minus name/UniqueId"). Blank reuses the `new_blank_ad26` component
+  shape via the extracted `blank_ad26_component(lib_reference)` factory
+  (schlib.rs) and validates that font id 1 exists in the post-append table.
+- `SchAliasOp::{Add, Remove} { component: lib_ref, alias }` — addressed by
+  name so a Remove can target a component the same edit deletes (releasing
+  its alias); removes apply before adds, so Remove+Add retargets an alias.
+- `SchImageAssetEdit::{Insert, Replace, Remove}` — ordered ops wrapping the
+  existing `SchLib::{insert,replace,remove}_image_resource` (serialization
+  constraints validated there, per-op position context added).
+- `SchFontAppend` — every native font axis except the positionally assigned
+  id; `SchFontAppend::native_default()` is Times New Roman 10.
+  `SchFontEntryView` grew the style axes (rotation/bold/italic/underline/
+  strikeout) so the captured-table projection covers the append surface.
+
+### Context-recompute rule
+
+The result's `ReferenceContext` is recomputed via `ReferenceContext::capture`
+over the assembled final library — never hand-patched — and all component
+snapshots taken from the result bind to it (they share the recomputed Arc).
+Determinism: the final state is a pure function of (input, edit) except the
+fresh `UniqueId`s of New components, which never enter the context — same
+edit on same input yields identical contexts always, and identical full
+snapshots for New-free edits (both tested). A no-op edit (empty batch or
+all-Keep) yields a context-and-state-identical snapshot; any actual state
+change compares unequal (replan visibility). Both tested.
+
+### Composition decision (resolves the recorded B font limitation)
+
+Fonts STAY inside `ReferenceContext`; increment D adopted the errata's
+"declared font-table append that recomputes the context" option. Within one
+edit the application order is: font appends → image-asset ops → component
+slots → alias ops (removes, then adds) → namespace/reference validation →
+context recapture. Component CONTENT edits (`with_children`) still run
+against a snapshot's captured context, so a child needing a namespace
+addition is authored in TWO steps: the library edit first, then component
+edits taken from the RESULT snapshot ("font appends apply first and
+component edits reference the extended table"). The B-era hard errors in
+`children.rs` now name `SchLibSnapshot::with_library_edit` as the resolution
+path, and the end-to-end flow (library lacking the default font → parameter
+creation blocked → declared append → parameter creation resolves the
+appended entry → save/reopen equality) is tested
+(`font_appends_recompute_context_and_unlock_child_creation`). Inside a
+single edit, New Blank components DO see same-edit font appends (fonts apply
+first; tested with an empty-font-table library).
+
+### SectionKeys / Redirection handling
+
+- Storage keys need no op surface: `SchLib::save` derives SectionKeys from
+  the final header names via the existing `build_section_keys` path; a
+  42-character clone name is save/reopened in unit tests AND per corpus file.
+- Aliases keep three synchronized representations: header
+  `SchLibComponentIndex.aliases` (removals splice, additions append), the
+  root record `AliasList` param (recomputed as the comma-join of the final
+  vector for alias-touched components only; untouched components stay
+  byte-verbatim), and the global `SchLibAlias` Redirection entries —
+  preserved verbatim when the ordered header pair sequence is unchanged,
+  otherwise rebuilt deterministically in header order (the parse order).
+  RECORDED DEVIATION: AD26 keeps aliases in a sorted set
+  (`SchDataAliasList`, SortedList; V5 export writes both the header entries
+  and `AliasList` comma-text from it — FileFormatV5.cs:2894,
+  SchDataExporterLibraryV5.cs:143-150); we preserve loaded order and append,
+  never re-sort. The self-alias storage-sharing case round-trips (tested).
+- Namespace rules at the mutation boundary: final lib_refs unique; alias
+  names globally unique and colliding with no OTHER component's lib_ref
+  (self-alias allowed); added aliases non-empty and comma-free (the native
+  comma-join cannot represent commas). Component removal with a surviving
+  alias is a hard error listing the dangling redirections unless the same
+  edit removes/retargets them.
+- Image-asset reference rule (memo §8c rules 2-3): an embedded image record
+  whose `file_name` resolved against the INPUT asset set (exact, then
+  case-insensitive — the native pairing order) must still resolve against
+  the FINAL asset set; removal/rename of a referenced asset is blocked,
+  orphan-asset removal and preservation of already-dangling references stay
+  legal, and removing the referencing record in the SAME edit unblocks the
+  asset removal (validation runs over the final state).
+- Weight keeps the input's stored convention: the canonical cardinality
+  delta (records + aliases per component, plus one root per component)
+  between final and input states is applied to the stored value — the
+  `replace_components` policy extended with the component-root term; never
+  recanonicalized. (A wild historical weight formula that cannot absorb a
+  component-cardinality delta fails loudly at final invariant validation;
+  all three gate fixtures pass.)
+
+### Memo obligations resolved / still open
+
+- RESOLVED: errata item 3 (§8a rule 3 "fonts are not part of
+  ReferenceContext" contradiction) — D adopted the declared append; fonts
+  remain in the context; increment F rewrites the memo parenthetical to
+  "font-table appends are a library-level namespace transition declared via
+  SchLibEdit::font_appends". A dated resolution note was appended to the
+  errata entry.
+- RESOLVED: the recorded B limitation "parameter creation impossible in a
+  library lacking the default font until increment D lands" — see the
+  composition section; error text updated.
+- OPEN (unchanged): `check_custom_display_mode_name_index` stays dead —
+  D1 covers plan-D items 1 and 3 only; component-level display-mode/custom-
+  name edits (plan D item 2, implementation chains) remain for the next D
+  increment.
+- OPEN (unchanged): no explicit `current_part_id` resolve op; Additional-pin
+  freeze; the `"|&|"` constant promotion discussion.
+
+### Test evidence (fixture-free)
+
+New tests in `library.rs` (5): empty/all-Keep no-op identity + inequality on
+real change; font appends (context recompute, end-to-end child creation on
+the extended snapshot, strict-path drift rejection, duplicate/empty-name/
+non-sequential rejections); alias ops (three-representation sync asserted on
+private state, self-alias save/reopen, weight, removal resync, determinism,
+7 rejection paths); clone/blank/removal (deep-copy-minus-name/UniqueId
+equality, weight delta, >31-char SectionKeys save/reopen, context
+determinism, unauthorized-removal listing, restore-to-input equality, blank
+shape + same-edit font composition, dangling-alias block + release +
+retarget, slot misuse and duplicate-name rejections incl. clone-under-alias
+-name, ReplaceWith context/alias-smuggle rejections); image-asset ops
+(orphan removal, referenced-asset remove/rename blocks incl. case-
+insensitive, same-name payload replace recomputing the context, same-edit
+record-removal unblocking, op-position error context, dangling-reference
+preservation).
+
+### Corpus example (namespace pass)
+
+`check_schlib_snapshots.rs` gains `namespace_pass` from a fresh open, per
+file: (1) add alias `STEP2D_0` to component 0 — save/reopen typed equality +
+alias projected; (2) remove it — save/reopen typed equality AND equality
+with the ORIGINAL input snapshot; (3) clone component 0 under the
+42-character `STEP2D_CLONE_WITH_A_VERY_LONG_STORAGE_NAME` (SectionKeys) —
+save/reopen typed equality + full public-projection fingerprint equality of
+the clone vs source (description/designator/kind/hidden-pins/effective
+parts/AllPinCount/parts/footprints/parameters/pins/graphics; lib reference
+and aliases excluded by design); (4) authorized removal of the clone —
+save/reopen typed equality AND restoration to the original input snapshot
+exactly. New JSON fields enforced in `main()`:
+`namespace_alias_add_equal`, `namespace_alias_remove_equal`,
+`namespace_clone_equal`, `namespace_clone_projection_equal`,
+`namespace_restore_equal`.
+
+### Verification (all default suites, fixture-free)
+
+- `cargo test -p altium-format --lib` — 470 passed, 0 failed.
+- `cargo test -p altium-sync` — 18 passed, 0 failed (6 pre-existing
+  `collection.rs` dead-code warnings, unchanged).
+- `cargo test -p altium-spec-lang` — 362 passed, 0 failed.
+- `cargo test -p altium-format-spec` — 168 passed, 0 failed.
+- `cargo check -p altium-cli` — clean.
+- `cargo fmt --check -p altium-format -p altium-sync` — clean.
+- Corpus gate: all checks true — incl. the five namespace fields — for
+  lucashudson-Connectors (56), ICs (32), arthurbenemann-STM32F4 (135);
+  exit 0.
+
+## Increment D1 — review findings resolution (2026-09-16)
+
+Fix pass over the independent-review findings; where a statement below
+contradicts the D1 section above, this section governs.
+
+1. **[MAJOR, FIXED] Case-insensitive CFB namespace collisions.** The D1
+   namespace checks compared raw strings, but the CFB directory namespace is
+   case-insensitive (cfb 0.12.1 `compare_names`, per-char simple uppercase),
+   so a clone under `COMPONENT_1` beside `Component_1`, a case-variant alias
+   of another component's lib_ref, or a case-variant "self-alias" (which the
+   save path does NOT storage-share — sharing requires exact equality) all
+   passed `with_library_edit` and then failed inside `SchLib::save` with a
+   low-level `create_storage` error. Fixed at the declared boundary:
+   final lib_ref uniqueness and the global alias/lib_ref name-set check now
+   compare **storage-namespace keys** — `cfb_storage_fold(sanitize_cfb_name(
+   name))`, where `cfb_storage_fold` (new, `schlib.rs`) applies the
+   container's per-character simple-uppercase fold — and collision errors
+   name both colliding strings plus the case-insensitivity rationale. The
+   exact self-alias remains legal; names colliding only after illegal-char
+   sanitize (`A_B` vs `a?b`) are rejected too. Full-name case variants are
+   rejected even when >31 chars (one namespace rule, no length special case).
+   These stay mutation-boundary policies: wild loaded state captures verbatim
+   (`validate_schlib_invariants` unchanged).
+   Test: `namespace_collisions_are_rejected_case_insensitively`.
+2. **[MINOR, FIXED] Order-dependent SectionKeys truncation collisions.**
+   `build_section_key_for_name` registered short-name keys only as it walked
+   the header, so a >31-char name truncating onto a LATER short name produced
+   two colliding storages and save failed (`AAAA…`×42 before `A`×31), and
+   `generate_unique_key`'s used-set was case-sensitive (two long case-variant
+   names could truncate to case-colliding keys). `build_section_keys` is now
+   two-pass — every no-entry name claims its case-folded storage identity
+   first, then keys are generated against the complete claimed set (pending
+   names deduplicated, so a long self-alias no longer burns a wasted key) —
+   and `generate_unique_key` checks/records case-folded membership. Long
+   truncation collisions now save correctly in ANY header order.
+   Test: `section_keys_disambiguate_truncation_collisions_in_any_header_order`
+   (long-before-short prefix pair + case-variant 32-char pair, save/reopen
+   typed equality).
+3. **[DEFERRAL RECORDED] Plan D item 1's sync-side `SchLibPatch`
+   library-level op variants.** Not implemented in D1 and no longer owed by
+   it: the ORCHESTRATOR SCOPE DECISION of 2026-09-16 (recorded in the step-2
+   completion plan, increment D item 1) moves the `SchLibPatch` op-variant
+   surface to increment E, where intent elaboration consumes the D1 format
+   API (`with_library_edit`) — consistent with the redteam finding [3] seam
+   split (format-level engine vs sync-side elaboration). Increment E MUST
+   add typed library-level ops (alias set changes, image-asset
+   insert/replace/remove, component create/remove, font appends) to
+   `crates/altium-sync/src/schlib.rs` and elaborate intents through them;
+   until then namespace transitions are format-API-only. This supersedes the
+   D1 section's "plan D items 1 and 3" claim: D1 delivered item 1's
+   FORMAT-LEVEL clauses and item 3.
+4. **[MINOR, FIXED] §8c rule 3 strengthened to per-pairing-target
+   semantics.** The D1 guard checked name-set resolvability, which allowed
+   removing a record's concrete pairing target when a duplicate-name or
+   case-variant sibling still satisfied resolution (silent rebinding to a
+   different asset body; the store explicitly permits duplicate names).
+   `with_library_edit` now tracks every INPUT asset's position through the
+   ordered ops and requires each embedded reference's concrete pairing
+   target (first exact match, then first case-insensitive — the native
+   order) to survive with its name intact. Same-name payload replacement,
+   orphan removal, wild dangling preservation, and same-edit
+   referencing-record removal all stay legal, and errors now name the input
+   pairing position. The resolution logic is one shared helper —
+   `validation::resolve_image_asset_reference` — also used by the
+   creation-time `check_embedded_image_reference`, eliminating the
+   duplicated exact/case-insensitive logic (drift-class fix); likewise
+   `SchFontAppend::native_default()` now uses the shared
+   `DEFAULT_FONT_NAME`/`DEFAULT_FONT_SIZE` constants.
+   Tests: duplicate-name + insert-shift assertions in
+   `image_asset_ops_wrap_schlib_resources_with_reference_validation`,
+   pairing-order assertions in the validation unit test.
+5. **[MINOR, FIXED] Shadowed-name alias release.** `SchAliasOp::Remove`
+   resolved against final components first and reached a removed component's
+   aliases only when NO final component carried the name, so the
+   content-reset flow (remove aliased `X` + New clone under `X` in one edit)
+   could not release the alias and the dangling check made the edit
+   inexpressible. Resolution is now: the final component actually CARRYING
+   the alias, then the removed input component of that name — unambiguous
+   because a New slot cannot carry an alias while removes apply (additions
+   come after). Module doc updated; test:
+   `removed_component_aliases_release_when_a_new_component_retakes_the_name`
+   (release, retarget, and both not-present error paths).
+6. **[MINOR, FIXED] Missing success-path/two-step image-asset test.**
+   Added `image_asset_insert_unlocks_two_step_record_creation`: creation
+   referencing a missing asset blocked on the input context → declared
+   `SchImageAssetEdit::Insert` recomputes the context → `with_children` on
+   the RESULT snapshot creates the embedded image record → save/reopen typed
+   equality → the inserted asset is now a protected pairing target (removal
+   blocked). This is the image analogue of the font two-step test, closing
+   the untested half of the §8c rule 2 composition.
+7. **[MINOR, FIXED] Untested `with_library_edit` rename rejection.** Added a
+   `ReplaceWith(0, component(1))` assertion (same context, different
+   lib_ref) covering the "renaming is unsupported (clone under the new
+   name…)" branch in `resolve_component_edit`.
+8. **[MINOR, FIXED] Memo §8c rule 2 "same batch" wording.** The memo's
+   "inserted by the same batch's library-level image-asset op" is not
+   expressible under the adopted composition (record creation runs through
+   `with_children` against a captured context); the supported path is the
+   two-step flow. A dated errata item (4) was appended to the contracts memo
+   assigning increment F the §8c rule 2 rewrite alongside the §8a one; the
+   D1 module doc states the two-step path explicitly.
+
+Post-fix verification (verbatim, after the last edit): see the increment's
+final report — `cargo test -p altium-format --lib` 474 passed;
+`cargo test -p altium-sync` 18 passed; `cargo check -p altium-cli` clean;
+corpus gate exit 0, all checks true on all three fixtures.

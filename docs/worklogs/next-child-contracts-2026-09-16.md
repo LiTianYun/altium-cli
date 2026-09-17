@@ -598,3 +598,37 @@ stands as-written EXCEPT where contradicted below.
    the context, or moving fonts out of the context — after which the find-or-create
    rule becomes implementable as the memo states. F updates the memo parenthetical
    to match whichever D adopts.
+
+   **RESOLVED by increment D1 (2026-09-16):** D adopted the FIRST option —
+   fonts remain inside `ReferenceContext`, and font-table appends are a
+   declared library-level namespace transition (`SchLibEdit::font_appends`
+   via `SchLibSnapshot::with_library_edit`,
+   `crates/altium-format/src/schlib/snapshot/library.rs`), which recomputes
+   the resulting snapshot's context from the final library state. The
+   `with_children` default-font resolution stays find-only against the
+   captured table; its hard error now names `with_library_edit` as the
+   declared path (apply the library edit first, then take component
+   snapshots from the result). Increment F must rewrite the §8a rule 3
+   parenthetical to: "font-table appends are a library-level namespace
+   transition declared via `SchLibEdit::font_appends`; fonts are part of
+   `ReferenceContext`".
+
+4. **§8c rule 2 — "inserted by the same batch's library-level image-asset op" does not
+   match the adopted composition.** (Appended by the increment-D1 review fix pass,
+   2026-09-16.) Under D1's composition, embedded image records are created through
+   `with_children` against a snapshot's CAPTURED context, so a record referencing an
+   asset inserted "by the same batch" is not expressible; the supported path is the
+   TWO-STEP flow: a library edit declaring the asset insert (which recomputes the
+   result's `ReferenceContext`), then component edits taken from the RESULT snapshot
+   (tested end-to-end: `image_asset_insert_unlocks_two_step_record_creation`,
+   crates/altium-format/src/schlib/snapshot/library.rs). Increment F must rewrite the
+   §8c rule 2 clause to: "either preexisting or inserted by a PRIOR library-level
+   image-asset op whose result snapshot the component edit is taken from (increment D's
+   namespace-transition ops recompute ReferenceContext; same-edit composition applies
+   only to NEW components created within the library edit itself)" — alongside the §8a
+   parenthetical rewrite from item 3. Additionally, D1's review fix pass strengthened
+   the §8c rule 3 implementation to per-pairing-target semantics (the record's concrete
+   input pairing target — first exact, then first case-insensitive match — must survive
+   name-intact; a duplicate-name or case-variant sibling is no substitute), which is
+   STRICTER than plain name resolvability and exactly matches rule 3's "an asset still
+   referenced by any image record" reading; no memo change needed for rule 3.

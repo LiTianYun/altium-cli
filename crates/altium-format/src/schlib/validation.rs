@@ -16,9 +16,11 @@ use altium_format_types::sch::SchFont;
 
 /// Native default font entry for new text-bearing children (resolutions §8a
 /// rule 3, mirroring AD26 `SchDataFontManager.GetFontID` find-or-create for
-/// Times New Roman, size 10, rotation 0, no styles).
-const DEFAULT_FONT_NAME: &str = "Times New Roman";
-const DEFAULT_FONT_SIZE: i32 = 10;
+/// Times New Roman, size 10, rotation 0, no styles). Shared with
+/// `SchFontAppend::native_default()` so the creation-time resolution and the
+/// declared-append surface can never drift apart.
+pub(crate) const DEFAULT_FONT_NAME: &str = "Times New Roman";
+pub(crate) const DEFAULT_FONT_SIZE: i32 = 10;
 
 fn invalid(key: &str, detail: impl std::fmt::Display) -> AltiumFormatError {
     AltiumFormatError::InvalidParamValue {
@@ -43,10 +45,33 @@ pub(crate) fn check_font_id_exists(fonts: &[SchFont], font_id: i32) -> Result<()
     ))
 }
 
+/// Checks that the font table is positional with 1-based sequential ids —
+/// the shape every append relies on. Refusal is a mutation-boundary check
+/// (capture of a non-sequential table stays permitted elsewhere); the table
+/// is never silently renumbered.
+pub(crate) fn check_sequential_font_table(fonts: &[SchFont]) -> Result<()> {
+    for (position, font) in fonts.iter().enumerate() {
+        let expected = i32::try_from(position + 1)
+            .map_err(|_| invalid("FontIdCount", "font table length exceeds native id range"))?;
+        if font.id != expected {
+            return Err(invalid(
+                "FontId",
+                format!(
+                    "font table entry at position {position} carries id {} (expected {expected}); \
+                     cannot append behind a non-sequential table",
+                    font.id
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Finds the native default font entry (Times New Roman 10, rotation 0, no
 /// styles; name compared case-insensitively) or appends it, returning its id
-/// (resolutions §8a rule 3). Font-table appends are an ordinary format-level
-/// mutation; the table must be the destination file's table.
+/// (resolutions §8a rule 3). Appends require a declared library-level
+/// namespace transition; the only production caller that may actually append
+/// is the `SchLibSnapshot::with_library_edit` engine.
 pub(crate) fn find_or_create_default_font(fonts: &mut Vec<SchFont>) -> Result<i32> {
     if let Some(font) = fonts.iter().find(|font| {
         font.name.eq_ignore_ascii_case(DEFAULT_FONT_NAME)
@@ -59,23 +84,7 @@ pub(crate) fn find_or_create_default_font(fonts: &mut Vec<SchFont>) -> Result<i3
     }) {
         return Ok(font.id);
     }
-    // The serialized table is positional with 1-based sequential ids; refuse
-    // to append behind a table that violates that (mutation-boundary check —
-    // capture of such state stays permitted elsewhere).
-    for (position, font) in fonts.iter().enumerate() {
-        let expected = i32::try_from(position + 1)
-            .map_err(|_| invalid("FontIdCount", "font table length exceeds native id range"))?;
-        if font.id != expected {
-            return Err(invalid(
-                "FontId",
-                format!(
-                    "font table entry at position {position} carries id {} (expected {expected}); \
-                     cannot append the default font behind a non-sequential table",
-                    font.id
-                ),
-            ));
-        }
-    }
+    check_sequential_font_table(fonts)?;
     let id = i32::try_from(fonts.len() + 1)
         .map_err(|_| invalid("FontIdCount", "font table length exceeds native id range"))?;
     fonts.push(SchFont {
@@ -204,6 +213,28 @@ pub(crate) fn check_custom_display_mode_name_index(
     ))
 }
 
+/// Native pairing-order resolution of an embedded image reference against an
+/// ordered asset name list (resolutions §8c): the first exact match wins,
+/// otherwise the first case-insensitive match; `None` for a dangling
+/// reference. This single helper backs both the creation-time existence check
+/// (`check_embedded_image_reference`) and the `with_library_edit` final-state
+/// pairing-target guard, so the two boundaries can never drift apart.
+pub(crate) fn resolve_image_asset_reference<'a>(
+    asset_names: impl IntoIterator<Item = &'a str> + Clone,
+    file_name: &str,
+) -> Option<usize> {
+    if let Some(position) = asset_names
+        .clone()
+        .into_iter()
+        .position(|name| name == file_name)
+    {
+        return Some(position);
+    }
+    asset_names
+        .into_iter()
+        .position(|name| name.eq_ignore_ascii_case(file_name))
+}
+
 /// Existence check for an embedded image's storage reference our APIs write
 /// (resolutions §8c rule 2): an embedded image must reference an asset present
 /// in the resulting library state, matched exactly first and then
@@ -218,14 +249,7 @@ pub(crate) fn check_embedded_image_reference<'a>(
     if !embed_image {
         return Ok(());
     }
-    let exact = asset_names
-        .clone()
-        .into_iter()
-        .any(|name| name == file_name);
-    let case_insensitive = asset_names
-        .into_iter()
-        .any(|name| name.eq_ignore_ascii_case(file_name));
-    if exact || case_insensitive {
+    if resolve_image_asset_reference(asset_names, file_name).is_some() {
         return Ok(());
     }
     Err(invalid(
@@ -396,6 +420,24 @@ mod tests {
 
     #[test]
     fn embedded_image_references_require_existing_assets_external_paths_do_not() {
+        // Pairing order: the first exact match wins, then the first
+        // case-insensitive match (duplicate and case-variant names stay
+        // distinct assets).
+        let duplicates = ["a.png", "logo.png", "LOGO.png"];
+        assert_eq!(
+            resolve_image_asset_reference(duplicates, "LOGO.png"),
+            Some(2)
+        );
+        assert_eq!(
+            resolve_image_asset_reference(duplicates, "logo.png"),
+            Some(1)
+        );
+        assert_eq!(
+            resolve_image_asset_reference(duplicates, "Logo.PNG"),
+            Some(1)
+        );
+        assert_eq!(resolve_image_asset_reference(duplicates, "b.png"), None);
+
         let names = ["logo.png", "Photo.BMP"];
         check_embedded_image_reference(names, "logo.png", true).unwrap();
         // Case-insensitive fallback mirrors the native pairing pass.

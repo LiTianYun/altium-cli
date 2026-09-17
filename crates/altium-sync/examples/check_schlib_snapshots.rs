@@ -1,10 +1,12 @@
 //! Real-file probe for complete typed snapshots, explicit scalar patches,
-//! structural parameter/graphic/pin batches, and part grow/shrink round-trips.
+//! structural parameter/graphic/pin batches, part grow/shrink round-trips,
+//! and library-level namespace transitions (aliases + component clone/remove).
 //! Writes only temporary documents. This is not a user-facing saved-plan command.
 use altium_format::SchLib;
 use altium_format::schlib::{
-    SchChildBatch, SchGraphicEdit, SchGraphicInit, SchGraphicShape, SchLibComponentSnapshot,
-    SchLibSnapshot, SchOwnerGroup, SchParameterEdit, SchParameterInit, SchPinEdit, SchPinInit,
+    SchAliasOp, SchChildBatch, SchGraphicEdit, SchGraphicInit, SchGraphicShape,
+    SchLibComponentEdit, SchLibComponentSnapshot, SchLibEdit, SchLibSnapshot, SchNewComponent,
+    SchOwnerGroup, SchParameterEdit, SchParameterInit, SchPinEdit, SchPinInit,
 };
 use altium_format_types::{
     Color, ComponentKind, Coord, CoordPoint, LineStyle, PenWidth, PinElectricalType, RotationBy90,
@@ -39,6 +41,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || result["structural_part_shrink_equal"] != true
             || result["structural_part_report_correct"] != true
             || result["structural_part_restore_equal"] != true
+            || result["namespace_alias_add_equal"] != true
+            || result["namespace_alias_remove_equal"] != true
+            || result["namespace_clone_equal"] != true
+            || result["namespace_clone_projection_equal"] != true
+            || result["namespace_restore_equal"] != true
         {
             failures += 1;
         }
@@ -114,6 +121,12 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
     // the typed report), save/reopen, restoring the original typed state.
     let parts = part_structural_pass(SchLib::open(path)?.snapshot()?, temp.path())?;
 
+    // Namespace pass (increment D1): alias add/remove on component 0, then a
+    // clone of component 0 under a >31-char name (SectionKeys storage path)
+    // with projection equality, then authorized removal restoring the
+    // original snapshot state exactly.
+    let namespace = namespace_pass(SchLib::open(path)?.snapshot()?, temp.path())?;
+
     Ok(serde_json::json!({
         "file": path,
         "components": input.component_count(),
@@ -138,6 +151,11 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
         "structural_part_shrink_equal": parts.shrink_equal,
         "structural_part_report_correct": parts.report_correct,
         "structural_part_restore_equal": parts.restore_equal,
+        "namespace_alias_add_equal": namespace.alias_add_equal,
+        "namespace_alias_remove_equal": namespace.alias_remove_equal,
+        "namespace_clone_equal": namespace.clone_equal,
+        "namespace_clone_projection_equal": namespace.clone_projection_equal,
+        "namespace_restore_equal": namespace.restore_equal,
     }))
 }
 
@@ -687,6 +705,137 @@ fn part_structural_pass(
         growth_equal,
         shrink_equal,
         report_correct,
+        restore_equal,
+    })
+}
+
+struct NamespaceOutcome {
+    alias_add_equal: bool,
+    alias_remove_equal: bool,
+    clone_equal: bool,
+    clone_projection_equal: bool,
+    restore_equal: bool,
+}
+
+const NAMESPACE_ALIAS: &str = "STEP2D_0";
+/// 42 characters — beyond the 31-character CFB storage-name limit, so the
+/// save path must route it through SectionKeys.
+const NAMESPACE_CLONE: &str = "STEP2D_CLONE_WITH_A_VERY_LONG_STORAGE_NAME";
+
+/// Complete owned fingerprint of a component's public typed projection
+/// surface, deliberately excluding lib reference, component UniqueId (not
+/// projected), and aliases — the axes a clone legitimately differs on.
+fn component_fingerprint(
+    component: &SchLibComponentSnapshot,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut fingerprint = vec![
+        format!("description={:?}", component.description()),
+        format!("designator={:?}", component.designator()?),
+        format!("kind={:?}", component.component_kind()),
+        format!("hidden_pins={:?}", component.show_hidden_pins()),
+        format!("effective_parts={:?}", component.effective_part_count()?),
+        format!("all_pin_count={}", component.stored_all_pin_count()),
+        format!("parts={:?}", component.parts()?),
+        format!("footprints={:?}", component.footprint_maps()?),
+    ];
+    fingerprint.extend(
+        component
+            .parameters()?
+            .iter()
+            .map(|view| format!("param {view:?}")),
+    );
+    fingerprint.extend(component.pins().iter().map(|view| format!("pin {view:?}")));
+    fingerprint.extend(
+        component
+            .graphics()
+            .iter()
+            .map(|view| format!("graphic {view:?}")),
+    );
+    Ok(fingerprint)
+}
+
+fn namespace_pass(
+    input: SchLibSnapshot,
+    temp: &std::path::Path,
+) -> Result<NamespaceOutcome, Box<dyn std::error::Error>> {
+    let canonical = input.component(0)?.lib_reference().to_owned();
+
+    // Stage 1: add alias STEP2D_0 to component 0 (declared transition; the
+    // three alias representations are validated together at save/reopen).
+    let with_alias = input.with_library_edit(SchLibEdit {
+        alias_ops: vec![SchAliasOp::Add {
+            component: canonical.clone(),
+            alias: NAMESPACE_ALIAS.to_owned(),
+        }],
+        ..Default::default()
+    })?;
+    let alias_path = temp.join("namespace-alias.SchLib");
+    with_alias.materialize()?.save(&alias_path)?;
+    let reopened_alias = SchLib::open(&alias_path)?.snapshot()?;
+    let alias_add_equal = reopened_alias == with_alias
+        && reopened_alias
+            .component(0)?
+            .aliases()
+            .any(|alias| alias == NAMESPACE_ALIAS);
+
+    // Stage 2: remove the alias again; the typed state must restore the
+    // original input snapshot exactly.
+    let without_alias = reopened_alias.with_library_edit(SchLibEdit {
+        alias_ops: vec![SchAliasOp::Remove {
+            component: canonical.clone(),
+            alias: NAMESPACE_ALIAS.to_owned(),
+        }],
+        ..Default::default()
+    })?;
+    let alias_removed_path = temp.join("namespace-alias-removed.SchLib");
+    without_alias.materialize()?.save(&alias_removed_path)?;
+    let restored_alias = SchLib::open(&alias_removed_path)?.snapshot()?;
+    let alias_remove_equal = restored_alias == without_alias && restored_alias == input;
+
+    // Stage 3: clone component 0 under a fresh >31-char name.
+    let component_count = restored_alias.component_count();
+    let mut clone_slots: Vec<SchLibComponentEdit> = (0..component_count)
+        .map(SchLibComponentEdit::Keep)
+        .collect();
+    clone_slots.push(SchLibComponentEdit::New(SchNewComponent::CloneOf {
+        source: 0,
+        lib_reference: NAMESPACE_CLONE.to_owned(),
+    }));
+    let cloned = restored_alias.with_library_edit(SchLibEdit {
+        components: Some(clone_slots),
+        ..Default::default()
+    })?;
+    let clone_path = temp.join("namespace-clone.SchLib");
+    cloned.materialize()?.save(&clone_path)?;
+    let reopened_clone = SchLib::open(&clone_path)?.snapshot()?;
+    let clone_equal = reopened_clone == cloned;
+    let clone = reopened_clone.component(component_count)?;
+    let source = reopened_clone.component(0)?;
+    let clone_projection_equal = clone.lib_reference() == NAMESPACE_CLONE
+        && clone.aliases().len() == 0
+        && component_fingerprint(&clone)? == component_fingerprint(&source)?;
+
+    // Stage 4: authorized removal of the clone restores the original
+    // snapshot state exactly.
+    let removed = reopened_clone.with_library_edit(SchLibEdit {
+        components: Some(
+            (0..component_count)
+                .map(SchLibComponentEdit::Keep)
+                .collect(),
+        ),
+        allow_component_removal: true,
+        ..Default::default()
+    })?;
+    let removed_path = temp.join("namespace-clone-removed.SchLib");
+    removed.materialize()?.save(&removed_path)?;
+    let restored = SchLib::open(&removed_path)?.snapshot()?;
+    let restore_equal = restored == removed && restored == input;
+
+    Ok(NamespaceOutcome {
+        alias_add_equal,
+        alias_remove_equal,
+        clone_equal,
+        clone_projection_equal,
         restore_equal,
     })
 }

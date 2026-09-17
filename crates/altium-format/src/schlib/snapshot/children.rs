@@ -157,14 +157,15 @@
 //! Font ids are validated against the captured font table; a text-bearing
 //! graphic created with no authored font resolves the native default (Times
 //! New Roman 10) against EXISTING table entries only — appending a missing
-//! default entry is a library-level namespace change owned by increment D's
-//! declared-transition ops, so it is a hard error here until D lands. NOTE:
+//! default entry is a library-level namespace change that must be DECLARED
+//! through `SchLibSnapshot::with_library_edit` font appends (which recompute
+//! the reference context), so it is a hard error here: apply the library edit
+//! first and re-take the component snapshot from the edited library. NOTE:
 //! `SchParameterInit` mirrors `SchParameterView` and therefore has no font
 //! field, so in a library whose captured table lacks the native default
-//! entry, parameter creation is impossible until increment D lands (the hard
-//! error names that limitation). Embedded image records must reference an
-//! existing captured storage asset (memo §8c rule 2); external-path images
-//! are exempt.
+//! entry, parameter creation requires that library edit first (the hard error
+//! names it). Embedded image records must reference an existing captured
+//! storage asset (memo §8c rule 2); external-path images are exempt.
 
 use std::collections::{HashMap, HashSet};
 
@@ -1324,8 +1325,9 @@ impl SchLibComponentSnapshot {
         .with_context(|| format!("creating parameter at final position {position}"))?;
         record.font_id = self
             .default_font_id(
-                "SchParameterInit has no font field, so parameter creation in this library \
-                 is impossible until increment D lands",
+                "SchParameterInit has no font field, so append the default font through a \
+                 library edit (SchLibSnapshot::with_library_edit font_appends) and re-take \
+                 the component snapshot from the edited library first",
             )
             .with_context(|| format!("creating parameter at final position {position}"))?;
         check_style_id_write(None, record.base.style_id)?;
@@ -1357,9 +1359,11 @@ impl SchLibComponentSnapshot {
 
     /// Resolves the native default font (Times New Roman 10) against EXISTING
     /// captured table entries only — a required append is a library-level
-    /// namespace change owned by increment D and hard-errors here, with
-    /// caller-specific advice (parameters have no authorable font field, so
-    /// their advice cannot suggest one).
+    /// namespace change that must be DECLARED through
+    /// `SchLibSnapshot::with_library_edit` font appends (which recompute the
+    /// reference context); it hard-errors here with caller-specific advice
+    /// (parameters have no authorable font field, so their advice cannot
+    /// suggest one).
     fn default_font_id(&self, advice: &str) -> Result<i32> {
         let fonts = &self.reference_context.fonts;
         let mut probe = fonts.clone();
@@ -1371,8 +1375,8 @@ impl SchLibComponentSnapshot {
                 detail: format!(
                     "the captured font table ({} entries) has no default-font entry \
                      (Times New Roman 10); appending one is a library-level namespace \
-                     change that requires increment D's declared namespace transition — \
-                     {advice}",
+                     change that must be declared through SchLibSnapshot::with_library_edit \
+                     — {advice}",
                     fonts.len()
                 ),
             });
@@ -2804,7 +2808,7 @@ mod tests {
         assert_eq!(record.font_id, 1, "blank table's Times New Roman 10");
 
         // A table without the native default cannot resolve an unspecified
-        // font until increment D's namespace transitions.
+        // font without a declared library-level namespace transition first.
         let mut foreign = library.clone();
         foreign.header.fonts[0].name = "Arial".to_owned();
         let foreign = finish(foreign);
@@ -2816,7 +2820,7 @@ mod tests {
             .with_children(batch(label(None)))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("increment D"), "{error}");
+        assert!(error.contains("with_library_edit"), "{error}");
         foreign
             .snapshot()
             .unwrap()

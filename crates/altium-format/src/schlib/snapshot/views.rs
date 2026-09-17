@@ -330,12 +330,18 @@ pub struct SchPinPadMapView<'a> {
     pub pads: &'a [String],
 }
 
-/// One captured font-table entry from the reference namespace.
+/// One captured font-table entry from the reference namespace, projecting
+/// every native font axis (ids are 1-based positional).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SchFontEntryView<'a> {
     pub id: i32,
     pub name: &'a str,
     pub size: i32,
+    pub rotation: i32,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikeout: bool,
 }
 
 impl SchLibComponentSnapshot {
@@ -557,7 +563,7 @@ impl SchLibComponentSnapshot {
         })
     }
 
-    /// Captured font-table entries (id, name, size) from the reference
+    /// Captured font-table entries (every native axis) from the reference
     /// namespace this snapshot was taken in.
     pub fn captured_fonts(&self) -> impl ExactSizeIterator<Item = SchFontEntryView<'_>> {
         self.reference_context
@@ -567,6 +573,11 @@ impl SchLibComponentSnapshot {
                 id: font.id,
                 name: &font.name,
                 size: font.size,
+                rotation: font.rotation,
+                bold: font.bold,
+                italic: font.italic,
+                underline: font.underline,
+                strikeout: font.strikeout,
             })
     }
 
@@ -1261,6 +1272,11 @@ mod tests {
                 id: 1,
                 name: "Times New Roman",
                 size: 10,
+                rotation: 0,
+                bold: false,
+                italic: false,
+                underline: false,
+                strikeout: false,
             }
         );
         assert_eq!(

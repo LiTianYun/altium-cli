@@ -2,11 +2,12 @@ mod ownership;
 mod snapshot;
 pub(crate) mod validation;
 pub use snapshot::{
-    SchChildBatch, SchCurrentPartIdAdjustment, SchFontEntryView, SchFootprintMapView,
-    SchFootprintMapsView, SchGraphicDetail, SchGraphicEdit, SchGraphicInit, SchGraphicShape,
-    SchGraphicView, SchLibComponentSnapshot, SchLibSnapshot, SchOwnerGroup, SchParameterEdit,
-    SchParameterInit, SchParameterView, SchPartSwapGroup, SchPartView, SchPartsShrink, SchPinEdit,
-    SchPinInit, SchPinPadMapView, SchPinView, SchRemovedPartChild,
+    SchAliasOp, SchChildBatch, SchCurrentPartIdAdjustment, SchFontAppend, SchFontEntryView,
+    SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail, SchGraphicEdit, SchGraphicInit,
+    SchGraphicShape, SchGraphicView, SchImageAssetEdit, SchLibComponentEdit,
+    SchLibComponentSnapshot, SchLibEdit, SchLibSnapshot, SchNewComponent, SchOwnerGroup,
+    SchParameterEdit, SchParameterInit, SchParameterView, SchPartSwapGroup, SchPartView,
+    SchPartsShrink, SchPinEdit, SchPinInit, SchPinPadMapView, SchPinView, SchRemovedPartChild,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -406,7 +407,8 @@ pub(crate) fn resolve_component_key(name: &str, section_keys: &HashMap<String, S
 }
 
 // NOTE: The local `sanitize_cfb_name` function is NOT removed — it is still called
-// by `build_section_key_for_name` (write-path code). Only `resolve_component_key`
+// by `build_section_keys`/`section_key_needed` (write-path code) and by the
+// snapshot library-edit namespace validation. Only `resolve_component_key`
 // delegates to the shared version. Both can coexist.
 
 fn is_end_marker(block: &Block) -> Result<bool> {
@@ -1838,56 +1840,88 @@ fn serialize_additional_data(records: &[SchRecord]) -> Result<Vec<u8>> {
 // default fallback in `resolve_component_key` (which replaces `/` with `_`).
 // Names that only contain `/` from the illegal character set don't need
 // SectionKeys entries because the fallback handles them.
+//
+// Collision safety is order- and case-independent: names needing no entry
+// claim their storage names FIRST (case-folded like the CFB directory
+// namespace), so a truncated/generated key can never collide with a short
+// name that appears later in the header, and two generated keys differing
+// only by letter case can never both be emitted.
 fn build_section_keys(header: &SchLibHeader) -> Result<HashMap<String, String>> {
     let mut keys = HashMap::new();
     let mut used_keys = std::collections::HashSet::new();
+    let mut pending: Vec<&str> = Vec::new();
+    let mut pending_seen = std::collections::HashSet::new();
 
-    for comp in &header.components {
-        build_section_key_for_name(&comp.lib_ref, &mut keys, &mut used_keys)?;
-        for alias in &comp.aliases {
-            build_section_key_for_name(alias, &mut keys, &mut used_keys)?;
+    let names = header.components.iter().flat_map(|comp| {
+        std::iter::once(comp.lib_ref.as_str()).chain(comp.aliases.iter().map(String::as_str))
+    });
+    // Pass 1: short/clean names claim their storage identities; names that
+    // need a generated key are queued (deduplicated: a self-alias reuses its
+    // component's single entry and storage).
+    for name in names {
+        if section_key_needed(name) {
+            if pending_seen.insert(name) {
+                pending.push(name);
+            }
+        } else {
+            used_keys.insert(cfb_storage_fold(&sanitize_cfb_name(name)));
         }
+    }
+    // Pass 2: generate keys against the complete claimed set.
+    for name in pending {
+        let short_key = generate_unique_key(&sanitize_cfb_name(name), &mut used_keys)?;
+        keys.insert(name.to_owned(), short_key);
     }
     Ok(keys)
 }
 
-fn build_section_key_for_name(
-    name: &str,
-    keys: &mut HashMap<String, String>,
-    used_keys: &mut std::collections::HashSet<String>,
-) -> Result<()> {
+/// Whether a component/alias name requires a generated SectionKeys entry: the
+/// sanitized form differs from the `resolve_component_key` default fallback
+/// (which only replaces `/` with `_`) or exceeds the 31-character CFB
+/// storage-name limit.
+fn section_key_needed(name: &str) -> bool {
     let sanitized = sanitize_cfb_name(name);
-    // The default fallback in resolve_component_key replaces '/' with '_'.
-    // Only generate a SectionKeys entry when the sanitized name differs from
-    // that default fallback, i.e., the name contains illegal characters OTHER
-    // than '/' or the name exceeds 31 chars.
-    let default_fallback = name.replace('/', "_");
-    if sanitized != default_fallback || sanitized.len() > 31 {
-        let short_key = generate_unique_key(&sanitized, used_keys)?;
-        keys.insert(name.to_owned(), short_key.clone());
-        used_keys.insert(short_key);
-    } else {
-        used_keys.insert(sanitized);
-    }
-    Ok(())
+    sanitized != name.replace('/', "_") || sanitized.len() > 31
 }
 
-fn sanitize_cfb_name(name: &str) -> String {
+pub(crate) fn sanitize_cfb_name(name: &str) -> String {
     name.chars()
         .map(|c| if "/\\:*?\"<>|!".contains(c) { '_' } else { c })
         .collect()
 }
 
+/// Case-folds a storage name the way the CFB directory namespace compares
+/// entries: per-character simple uppercase (MS-CFB §2.6.4; the `cfb` crate's
+/// `compare_names` uses the same one-to-one mapping). Characters whose only
+/// uppercase form is a multi-character expansion (e.g. `ß`) have no simple
+/// mapping and stay unchanged, matching the container's comparison.
+pub(crate) fn cfb_storage_fold(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            let mut upper = c.to_uppercase();
+            match (upper.next(), upper.next()) {
+                (Some(single), None) => single,
+                _ => c,
+            }
+        })
+        .collect()
+}
+
 fn generate_unique_key(
     sanitized: &str,
-    used: &std::collections::HashSet<String>,
+    used: &mut std::collections::HashSet<String>,
 ) -> Result<String> {
     let base = if sanitized.len() > 31 {
         &sanitized[..31]
     } else {
         sanitized
     };
-    if !used.contains(base) {
+    // Membership is checked on the case-folded form because the CFB storage
+    // namespace is case-insensitive: two keys differing only by letter case
+    // would collide at `create_storage`.
+    let folded = cfb_storage_fold(base);
+    if !used.contains(&folded) {
+        used.insert(folded);
         return Ok(base.to_owned());
     }
     for suffix in 1..u64::MAX {
@@ -1898,7 +1932,9 @@ fn generate_unique_key(
             &sanitized[..max_base_len.min(sanitized.len())],
             suffix_str
         );
-        if !used.contains(&candidate) {
+        let folded = cfb_storage_fold(&candidate);
+        if !used.contains(&folded) {
+            used.insert(folded);
             return Ok(candidate);
         }
     }
@@ -1908,23 +1944,129 @@ fn generate_unique_key(
     })
 }
 
+/// Builds the blank AD26 component aggregate and its header index entry under
+/// the given name: the `new_blank_ad26` component shape (native part count 2,
+/// one display mode, Designator + Comment field objects with the −1/−1
+/// sentinels, font id 1). The records reference font id 1, so the destination
+/// library's font table must carry an entry with that id; callers validate
+/// that against their own table.
+pub(crate) fn blank_ad26_component(
+    lib_reference: &str,
+) -> crate::Result<(SchLibComponent, SchLibComponentIndex)> {
+    let mut params = ParameterCollection::new();
+    params.insert(LIB_REFERENCE, lib_reference.to_owned());
+    let mut component = parse_component_record(&mut params)
+        .with_context(|| format!("creating blank component '{lib_reference}'"))?;
+    component.lib_reference = lib_reference.to_owned();
+    component.part_count = 2;
+    // AD26 floors DisplayModeCount to 1 on load, so a native blank always
+    // carries 1; matching it keeps blank state a save/reopen fixed point
+    // under the documented load upgrade (upgrade_legacy_part_display_counts).
+    component.display_mode_count = 1;
+    component.custom_display_mode_names = vec![String::new()];
+    component.current_part_id = 1;
+    component.unique_id = generate_unique_id();
+
+    let mut aggregate = SchLibComponent {
+        component,
+        records: Vec::new(),
+        additional_records: Vec::new(),
+    };
+    // Append default designator record. Root Designator/Comment records
+    // are native component FIELD OBJECTS: AD26 writes OWNERPARTID=-1 (the
+    // "no part" ctor sentinel, SchDataGraphicalObject.cs:34-39; corpus:
+    // dominant on root text, with recorded wild tails at >=1 — memo §1)
+    // and INDEXINSHEET=-1 (field objects never live in the owner's
+    // objectList; ordinary root parameters carry sibling ordinals instead;
+    // resolutions memo §1/§6).
+    aggregate.records.push(SchRecord::Designator(SchDesignator {
+        base: SchPrimitiveBase {
+            owner_index: 0,
+            is_not_accessible: false,
+            owner_index_additional_list: false,
+            index_in_sheet: -1,
+            owner_part_id: -1,
+            owner_part_display_mode: 0,
+            selection_memory: 0,
+            graphically_locked: false,
+            union_index: 0,
+            style_id: 0,
+        },
+        location: CoordPoint::zero(),
+        color: Color::new(0x00000080),
+        font_id: 1,
+        text: "U?".to_owned(),
+        name: "Designator".to_owned(),
+        is_hidden: false,
+        orientation: RotationBy90::Rotate0,
+        justification: TextJustification::BottomLeft,
+        is_mirrored: false,
+        unique_id: generate_unique_id(),
+        show_name: false,
+        read_only_state: ParameterReadOnlyState::Name,
+        not_auto_position: false,
+        override_not_auto_position: false,
+        not_allow_library_synchronize: false,
+        not_allow_database_synchronize: false,
+        description: String::new(),
+        param_type: ParameterType::String,
+        text_horz_anchor: TextHorzAnchor::None,
+        text_vert_anchor: TextVertAnchor::None,
+        is_image_parameter: false,
+    }));
+
+    // Append default comment record (RECORD=41, Parameter): the comment
+    // field object, same -1/-1 evidence as the designator above.
+    aggregate.records.push(SchRecord::Parameter(SchParameter {
+        base: SchPrimitiveBase {
+            owner_index: 0,
+            is_not_accessible: false,
+            owner_index_additional_list: false,
+            index_in_sheet: -1,
+            owner_part_id: -1,
+            owner_part_display_mode: 0,
+            selection_memory: 0,
+            graphically_locked: false,
+            union_index: 0,
+            style_id: 0,
+        },
+        location: CoordPoint::zero(),
+        color: Color::new(0x00000080),
+        font_id: 1,
+        name: "Comment".to_owned(),
+        text: "*".to_owned(),
+        read_only_state: ParameterReadOnlyState::None,
+        is_hidden: true,
+        orientation: RotationBy90::Rotate0,
+        justification: TextJustification::BottomLeft,
+        is_mirrored: false,
+        unique_id: generate_unique_id(),
+        param_type: ParameterType::String,
+        show_name: false,
+        description: String::new(),
+        not_allow_library_synchronize: false,
+        not_allow_database_synchronize: false,
+        not_auto_position: false,
+        override_not_auto_position: false,
+        text_horz_anchor: TextHorzAnchor::None,
+        text_vert_anchor: TextVertAnchor::None,
+        is_image_parameter: false,
+    }));
+
+    let index = SchLibComponentIndex {
+        lib_ref: lib_reference.to_owned(),
+        description: String::new(),
+        part_count: 2,
+        aliases: Vec::new(),
+    };
+    Ok((aggregate, index))
+}
+
 impl SchLib {
     pub fn new_blank_ad26() -> crate::Result<Self> {
-        let mut params = ParameterCollection::new();
-        params.insert(LIB_REFERENCE, "Component_1".to_owned());
-        let mut component = parse_component_record(&mut params)
+        let (component, index) = blank_ad26_component("Component_1")
             .context("creating default component for blank SchLib")?;
-        component.lib_reference = "Component_1".to_owned();
-        component.part_count = 2;
-        // AD26 floors DisplayModeCount to 1 on load, so a native blank always
-        // carries 1; matching it keeps blank state a save/reopen fixed point
-        // under the documented load upgrade (upgrade_legacy_part_display_counts).
-        component.display_mode_count = 1;
-        component.custom_display_mode_names = vec![String::new()];
-        component.current_part_id = 1;
-        component.unique_id = generate_unique_id();
-
-        let mut lib = Self {
+        let lib = Self {
             header: SchLibHeader {
                 weight: 0,
                 minor_version: 9,
@@ -1957,107 +2099,13 @@ impl SchLib {
                     area_color: Some(Color::new(16_317_695)),
                     ..SchDisplaySettings::default()
                 },
-                components: vec![SchLibComponentIndex {
-                    lib_ref: "Component_1".to_owned(),
-                    description: String::new(),
-                    part_count: 2,
-                    aliases: Vec::new(),
-                }],
+                components: vec![index],
             },
-            components: vec![SchLibComponent {
-                component,
-                records: Vec::new(),
-                additional_records: Vec::new(),
-            }],
+            components: vec![component],
             embedded_images: Vec::new(),
             aliases: Vec::new(),
             load_normalizations: Vec::new(),
         };
-        // Append default designator record. Root Designator/Comment records
-        // are native component FIELD OBJECTS: AD26 writes OWNERPARTID=-1 (the
-        // "no part" ctor sentinel, SchDataGraphicalObject.cs:34-39; corpus:
-        // dominant on root text, with recorded wild tails at >=1 — memo §1)
-        // and INDEXINSHEET=-1 (field objects never live in the owner's
-        // objectList; ordinary root parameters carry sibling ordinals instead;
-        // resolutions memo §1/§6).
-        lib.components[0]
-            .records
-            .push(SchRecord::Designator(SchDesignator {
-                base: SchPrimitiveBase {
-                    owner_index: 0,
-                    is_not_accessible: false,
-                    owner_index_additional_list: false,
-                    index_in_sheet: -1,
-                    owner_part_id: -1,
-                    owner_part_display_mode: 0,
-                    selection_memory: 0,
-                    graphically_locked: false,
-                    union_index: 0,
-                    style_id: 0,
-                },
-                location: CoordPoint::zero(),
-                color: Color::new(0x00000080),
-                font_id: 1,
-                text: "U?".to_owned(),
-                name: "Designator".to_owned(),
-                is_hidden: false,
-                orientation: RotationBy90::Rotate0,
-                justification: TextJustification::BottomLeft,
-                is_mirrored: false,
-                unique_id: generate_unique_id(),
-                show_name: false,
-                read_only_state: ParameterReadOnlyState::Name,
-                not_auto_position: false,
-                override_not_auto_position: false,
-                not_allow_library_synchronize: false,
-                not_allow_database_synchronize: false,
-                description: String::new(),
-                param_type: ParameterType::String,
-                text_horz_anchor: TextHorzAnchor::None,
-                text_vert_anchor: TextVertAnchor::None,
-                is_image_parameter: false,
-            }));
-
-        // Append default comment record (RECORD=41, Parameter): the comment
-        // field object, same -1/-1 evidence as the designator above.
-        lib.components[0]
-            .records
-            .push(SchRecord::Parameter(SchParameter {
-                base: SchPrimitiveBase {
-                    owner_index: 0,
-                    is_not_accessible: false,
-                    owner_index_additional_list: false,
-                    index_in_sheet: -1,
-                    owner_part_id: -1,
-                    owner_part_display_mode: 0,
-                    selection_memory: 0,
-                    graphically_locked: false,
-                    union_index: 0,
-                    style_id: 0,
-                },
-                location: CoordPoint::zero(),
-                color: Color::new(0x00000080),
-                font_id: 1,
-                name: "Comment".to_owned(),
-                text: "*".to_owned(),
-                read_only_state: ParameterReadOnlyState::None,
-                is_hidden: true,
-                orientation: RotationBy90::Rotate0,
-                justification: TextJustification::BottomLeft,
-                is_mirrored: false,
-                unique_id: generate_unique_id(),
-                param_type: ParameterType::String,
-                show_name: false,
-                description: String::new(),
-                not_allow_library_synchronize: false,
-                not_allow_database_synchronize: false,
-                not_auto_position: false,
-                override_not_auto_position: false,
-                text_horz_anchor: TextHorzAnchor::None,
-                text_vert_anchor: TextVertAnchor::None,
-                is_image_parameter: false,
-            }));
-
         Ok(lib)
     }
 

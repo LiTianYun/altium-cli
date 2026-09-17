@@ -185,6 +185,64 @@ structural pass (append one empty trailing slot, save/reopen, remove it with
 an empty expected deletion list and the typed current-part adjustment
 asserted, save/reopen, restore equality modulo reported adjustments) — all
 checks true on all three gate libraries, exit 0.
+Step-2 increment D1 (2026-09-16) added library-level namespace transitions:
+`SchLibSnapshot::with_library_edit(SchLibEdit)` (module
+`schlib/snapshot/library.rs`) is the DECLARED-transition variant of component
+replacement — the strict `replace_components` path still hard-errors on any
+undeclared context change. One `SchLibEdit` batch carries the final ordered
+component sequence (`SchLibComponentEdit::{Keep, ReplaceWith, New}`; omission
+is removal under `allow_component_removal`, listed otherwise; `ReplaceWith`
+requires input-context equality, no rename, no alias change), the
+context-independent new-component factory (`SchNewComponent::CloneOf` — deep
+copy under a new name with fresh component UniqueId and cleared alias state —
+and `::Blank` reusing the extracted `blank_ad26_component` shape, validating
+font id 1), per-name alias ops (`SchAliasOp::{Add, Remove}`; removes before
+adds so Remove+Add retargets; removal of an aliased component blocks unless
+the same edit releases/retargets every alias), ordered image-asset ops
+(`SchImageAssetEdit` wrapping the existing SchLib resource operations, plus
+the memo §8c rule: references that resolved against the input asset set must
+still resolve against the final set — referenced-asset removal/rename blocks,
+orphan removal and wild dangling references stay legal), and typed font-table
+appends (`SchFontAppend`, all native axes, positional ids, duplicate-axis and
+non-sequential-table rejections). The resulting `ReferenceContext` is always
+RECOMPUTED from the assembled final library (deterministic: fresh UniqueIds
+never enter the context; no-op edits are context-and-state identical). The
+three alias representations stay synchronized (header index aliases, root
+`AliasList` comma-join for touched components, global Redirections preserved
+verbatim or rebuilt in header order; self-alias storage sharing supported);
+>31-char names ride the existing SectionKeys save path; header weight applies
+the canonical cardinality delta to the stored value (input convention kept).
+This resolves the recorded B font limitation (memo errata item 3: fonts stay
+in the context; appends are declared transitions) — `with_children` errors
+now point at `with_library_edit`. `SchFontEntryView` grew the style axes.
+D1 validation: 470 format, 18 sync, 362 spec-lang and 168 format-spec tests
+pass; the CLI builds; `cargo fmt --check` clean; the corpus gate adds a
+namespace pass (alias STEP2D_0 add/remove with restore-to-input equality;
+clone of component 0 under a 42-char SectionKeys name with save/reopen typed
+equality and full projection-fingerprint equality vs the source minus
+name/aliases; authorized clone removal restoring the original snapshot
+exactly) — all checks true on all three gate libraries, exit 0.
+The D1 review fix pass (2026-09-16) hardened the namespace boundary: final
+lib_ref/alias uniqueness in `with_library_edit` is now checked on the
+storage-namespace form (illegal-char sanitize + the CFB directory namespace's
+case-insensitive fold), so case-variant names/aliases — including case-variant
+"self-aliases", which the save path does not storage-share — are rejected at
+the declared boundary instead of failing later inside `SchLib::save`;
+`build_section_keys` became order- and case-robust (short names claim their
+storage identities before any truncated key is generated; `generate_unique_key`
+folds its used-set), so long-name truncation collisions save correctly in any
+header order. The §8c guard was strengthened to per-pairing-target semantics
+(each embedded reference resolves to its concrete input asset — first exact,
+then first case-insensitive — which must survive name-intact; duplicate-name
+siblings are no substitute), sharing one `resolve_image_asset_reference`
+helper with the creation-time check; `SchFontAppend::native_default()` now
+uses the shared validation constants. Alias `Remove` resolution releases a
+removed component's alias even when a New component re-takes the name in the
+same edit. Plan D item 1's sync-side `SchLibPatch` library-level op variants
+were re-scoped to increment E by the 2026-09-16 orchestrator decision
+(recorded in the plan and worklog; elaboration consumes the D1 format API).
+Post-fix validation: 474 format, 18 sync tests pass; CLI builds; corpus gate
+all-true, exit 0.
 Full image codecs were removed from the gate by the user's 2026-09-05 scope change.
 Graphic field policies now cover all 13 kinds against the existing typed Rust
 API/creation defaults, including optional arc endpoints and named PenWidth values.
