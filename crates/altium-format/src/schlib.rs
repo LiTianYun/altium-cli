@@ -2,9 +2,10 @@ mod ownership;
 mod snapshot;
 pub(crate) mod validation;
 pub use snapshot::{
-    SchFontEntryView, SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail, SchGraphicView,
-    SchLibComponentSnapshot, SchLibSnapshot, SchOwnerGroup, SchParameterView, SchPartSwapGroup,
-    SchPartView, SchPinPadMapView, SchPinView,
+    SchChildBatch, SchFontEntryView, SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail,
+    SchGraphicEdit, SchGraphicInit, SchGraphicShape, SchGraphicView, SchLibComponentSnapshot,
+    SchLibSnapshot, SchOwnerGroup, SchParameterEdit, SchParameterInit, SchParameterView,
+    SchPartSwapGroup, SchPartView, SchPinPadMapView, SchPinView,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -1971,7 +1972,13 @@ impl SchLib {
             aliases: Vec::new(),
             load_normalizations: Vec::new(),
         };
-        // Append default designator record
+        // Append default designator record. Root Designator/Comment records
+        // are native component FIELD OBJECTS: AD26 writes OWNERPARTID=-1 (the
+        // "no part" ctor sentinel, SchDataGraphicalObject.cs:34-39; corpus:
+        // dominant on root text, with recorded wild tails at >=1 — memo §1)
+        // and INDEXINSHEET=-1 (field objects never live in the owner's
+        // objectList; ordinary root parameters carry sibling ordinals instead;
+        // resolutions memo §1/§6).
         lib.components[0]
             .records
             .push(SchRecord::Designator(SchDesignator {
@@ -1979,8 +1986,8 @@ impl SchLib {
                     owner_index: 0,
                     is_not_accessible: false,
                     owner_index_additional_list: false,
-                    index_in_sheet: 0,
-                    owner_part_id: 0,
+                    index_in_sheet: -1,
+                    owner_part_id: -1,
                     owner_part_display_mode: 0,
                     selection_memory: 0,
                     graphically_locked: false,
@@ -2010,7 +2017,8 @@ impl SchLib {
                 is_image_parameter: false,
             }));
 
-        // Append default comment record (RECORD=41, Parameter)
+        // Append default comment record (RECORD=41, Parameter): the comment
+        // field object, same -1/-1 evidence as the designator above.
         lib.components[0]
             .records
             .push(SchRecord::Parameter(SchParameter {
@@ -2018,8 +2026,8 @@ impl SchLib {
                     owner_index: 0,
                     is_not_accessible: false,
                     owner_index_additional_list: false,
-                    index_in_sheet: 0,
-                    owner_part_id: 0,
+                    index_in_sheet: -1,
+                    owner_part_id: -1,
                     owner_part_display_mode: 0,
                     selection_memory: 0,
                     graphically_locked: false,

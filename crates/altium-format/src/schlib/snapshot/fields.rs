@@ -163,6 +163,23 @@ impl SchLibComponentSnapshot {
                 })?;
                 record.text = text;
                 record.unique_id = crate::util::generate_unique_id();
+                // New root text takes the native "no part" sentinel −1
+                // (resolutions §2), and a Designator is a component FIELD
+                // OBJECT that never occupies an objectList sibling slot, so
+                // it carries IndexInSheet −1 (resolutions §6 rule 1).
+                record.base.owner_part_id = -1;
+                record.base.index_in_sheet = -1;
+                crate::schlib::validation::check_written_owner_part_id(
+                    crate::schlib::validation::WrittenOwnerPartClass::RootText,
+                    record.base.owner_part_id,
+                    self.component.component.part_count,
+                )
+                .with_context(|| {
+                    format!(
+                        "creating Designator for component '{}'",
+                        self.lib_reference()
+                    )
+                })?;
                 let mut data: Vec<_> = (0..self.component.records.len())
                     .map(|index| {
                         RecordItem::Original(RecordAddress {

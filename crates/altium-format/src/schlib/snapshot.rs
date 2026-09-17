@@ -1,9 +1,14 @@
 //! Complete typed state for SchLib planning. No native record internals escape
 //! this module; source scope and authorization belong to the planner.
 
+mod children;
 mod fields;
 mod views;
 
+pub use children::{
+    SchChildBatch, SchGraphicEdit, SchGraphicInit, SchGraphicShape, SchParameterEdit,
+    SchParameterInit,
+};
 pub use views::{
     SchFontEntryView, SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail, SchGraphicView,
     SchOwnerGroup, SchParameterView, SchPartSwapGroup, SchPartView, SchPinPadMapView, SchPinView,

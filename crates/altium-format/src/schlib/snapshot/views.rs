@@ -586,10 +586,13 @@ impl SchLibComponentSnapshot {
     }
 }
 
-fn graphic_view<'a>(record: &'a SchRecord, native_part_count: i32) -> Option<SchGraphicView<'a>> {
-    // Not graphic-like: pins, root text projections, and the implementation
-    // compatibility chain, each covered by its own projection or scalar API.
-    if matches!(
+/// Membership predicate of the ordered `graphics()` collection. Not
+/// graphic-like: pins, root text projections, and the implementation
+/// compatibility chain, each covered by its own projection or scalar API.
+/// The structural batch engine (`children.rs`) uses the same predicate so the
+/// edited collection and the projection agree exactly.
+pub(super) fn is_graphic_like(record: &SchRecord) -> bool {
+    !matches!(
         record,
         SchRecord::Pin(_)
             | SchRecord::Designator(_)
@@ -599,7 +602,11 @@ fn graphic_view<'a>(record: &'a SchRecord, native_part_count: i32) -> Option<Sch
             | SchRecord::ImplementationMap(_)
             | SchRecord::MapDefiner(_)
             | SchRecord::ParameterList(_)
-    ) {
+    )
+}
+
+fn graphic_view<'a>(record: &'a SchRecord, native_part_count: i32) -> Option<SchGraphicView<'a>> {
+    if !is_graphic_like(record) {
         return None;
     }
     let detail = match record {

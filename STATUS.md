@@ -86,6 +86,52 @@ intent axes incl. color/line_width/is_solid).
 A2 validation (post-review fixes): 438 format, 18 sync, 362 spec-lang and 168
 format-spec tests pass; the CLI builds; the three-library corpus gate passes
 with empty replans.
+Step-2 increment B (2026-09-16) added public batch structural editing of the
+`parameters()` and `graphics()` collections on `SchLibComponentSnapshot`:
+`with_children(SchChildBatch)` takes per-collection FINAL ordered sequences of
+`Keep(i)`/`Replace(i, init)`/`New(init)` items resolved entirely against the
+immutable input projections, applied through one `assemble_records` pass;
+deletion is omission plus an explicit `allow_deletion` flag; duplicate slot
+references, cross-kind Replace targets (incl. unrepresentable Symbol/Hyperlink
+targets), Additional-stream creation, and cross-stream original migration are
+hard errors. The documented stream-order rule places non-members verbatim and
+the edited collection's finals in its members' original stream positions
+(extras after the last member, or at the Data-stream end for empty
+collections), so the resulting projections equal the requested sequences
+exactly. New records get typed defaults, fresh UniqueIds, owner_part_id per
+memo §2 (parameters −1; graphics 1..=effective via
+`check_written_owner_part_id`), display mode per §4, fonts via
+`check_font_id_exists`/default find-only resolution (a missing default-font
+entry hard-errors pending increment D's namespace transitions), image storage
+references per §8c; style_id is never authorable (§8b guard wired).
+IndexInSheet per memo §6: batch-touched owners get their in-objectList
+children renumbered to final 0-based sibling positions (pins count, store
+nothing; field objects — Designator and root "Comment" parameters — and the
+implementation chain occupy no slots); untouched owners preserve stored values
+verbatim. Blank-library reconciliation: corpus evidence confirmed AD26 writes
+OWNERPARTID=-1/INDEXINSHEET=-1 on root Designator/Comment records, so
+`new_blank_ad26` and `with_designator` creation now write −1/−1 and the
+creation path is wired through `check_written_owner_part_id`.
+B review fix pass (2026-09-16): Replace with `None` optionals now PRESERVES
+the original's stored display mode/font (creation defaults apply only on New);
+`New` of the indexed-coordinate kinds (Polyline/Polygon/Bezier) no longer
+hard-errors on the missing `LocationCount` key, with all-13-kinds creation +
+save/reopen coverage; the parameter-creation missing-default-font error names
+the real limitation (no authorable font field until increment D); the
+IndexInSheet field-object classification is recorded as a deliberate
+owner-conditional narrowing of AD26's name-first import dispatch (AD26 drops
+unattached special-named parameters on save — we preserve and number them,
+e.g. wild root "Description" parameters); the worklog's INDEXINSHEET=-1
+evidence was corrected (−1 is carried only by Designator/Comment field
+objects; ordinary root parameters carry sibling ordinals); memo errata (§6
+ImplementationList serializes 0, §6 dispatch scoping, §8a ReferenceContext
+fonts) are queued for increment F in the contracts worklog.
+B validation (post-fix): 451 format, 18 sync, 362 spec-lang and 168
+format-spec tests pass; the CLI builds; the corpus gate structural pass now
+covers insert/reorder/recolor-at-exact-index, a per-component graphic reorder
+round-trip, and authorized removal of both probes (parameter + rectangle) with
+save/reopen typed equality and projection equality on all 223 components of
+the three gate libraries.
 Full image codecs were removed from the gate by the user's 2026-09-05 scope change.
 Graphic field policies now cover all 13 kinds against the existing typed Rust
 API/creation defaults, including optional arc endpoints and named PenWidth values.

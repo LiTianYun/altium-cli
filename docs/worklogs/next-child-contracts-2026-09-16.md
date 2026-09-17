@@ -551,3 +551,50 @@ Doc changes queued for increment F: rewrite snapshot-intent.md:204-210 (new-chil
 assignment, §2); note the §3/§4 load normalizations and the §6 renumber-touched/preserve-
 untouched policy wherever the addressing section lands; record §8b's style_id hard error
 and its upgrade path.
+
+---
+
+# Errata (appended 2026-09-16, increment-B review fix pass — NOT part of the verbatim memo above)
+
+Corrections to the memo body discovered while implementing/reviewing increment B.
+Each is queued for the increment-F promotion pass; until then the memo text above
+stands as-written EXCEPT where contradicted below.
+
+1. **§6 — the synthetic ImplementationList wrapper serializes IndexInSheet 0, not −1.**
+   The memo's "Objects not in an objectList serialize −1" list wrongly includes the
+   ImplementationList wrapper. Its constructor calls `SetIndexInSheetForSave(0)`
+   (Objects/SchDataImplementationList.cs:9-14), and raw bytes of all three gate
+   fixtures show the RECORD=44 param block as literally `|RECORD=44` with NO other
+   keys (INDEXINSHEET absent ⇒ wire 0) — e.g. ICs.SchLib
+   `…|UNIQUEID=WTPYYOAU\0 … |RECORD=44\0 … |RECORD=45|OWNERINDEX=13|INDEXINSHEET=-1|…`.
+   (Implementation records themselves DO serialize −1, as the bytes show.) Harmless
+   for B — the chain is never renumbered and round-trips byte-identically — but the
+   memo sentence must be corrected in F.
+2. **§6 — field-object classification scoping.** The "Designator/Comment field
+   objects" phrasing under-describes the native mechanism: `SchDataParameter.
+   UpdateOwner` (Objects/SchDataParameter.cs:128-196) dispatches on NAME ALONE
+   (DefaultNet/HiddenNetName/PinSelectionMemory/Comment/Description/PinUniqueId)
+   with owner-interface guards INSIDE the branches, and a special-named parameter
+   whose owner lacks the interface (e.g. root "Description" — `SchDataComponent`
+   is not an `ISchDataDescriptionOwner`, and `GetFieldObjects` yields only
+   designator+comment) attaches nowhere and is silently DROPPED by AD26 on the
+   next save. Rule 1's "New Designator/Comment field objects … get −1" remains
+   correct; F must add: (a) the name-dispatch/interface-guard mechanics, (b) that
+   AD26 drops unattached specials on save and our engine instead preserves AND
+   numbers them as ordinary siblings (deliberate no-silent-drop deviation; wild
+   corpus precedent: Custom.SchLib root Description INDEXINSHEET=3,
+   kmilo17pet-PIC16_Part1 INDEXINSHEET=4), and (c) that INDEXINSHEET=-1 in the
+   corpus is carried ONLY by Designators and root Comments — ordinary root
+   parameters carry sibling ordinals (the §1 census figures are OWNERPARTID-only
+   evidence).
+3. **§8a rule 3 — "fonts are not part of ReferenceContext" is contradicted by the
+   implementation.** `ReferenceContext` carries the captured font table
+   (crates/altium-format/src/schlib/snapshot.rs:25-32) and `replace_components`
+   enforces context equality (snapshot.rs:179), so a font-table append is NOT an
+   ordinary format-level mutation today. Increment B therefore implements the
+   default-font resolution find-only and hard-errors when an append would be
+   required, naming the increment-D dependency. Increment D's namespace-transition
+   design must explicitly own one of: a declared font-table append that recomputes
+   the context, or moving fonts out of the context — after which the find-or-create
+   rule becomes implementable as the memo states. F updates the memo parenthetical
+   to match whichever D adopts.

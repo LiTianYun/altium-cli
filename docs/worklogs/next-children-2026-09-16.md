@@ -219,3 +219,365 @@ Post-fix verification: `cargo test -p altium-format --lib` — 438 passed,
 `cargo check -p altium-cli` — clean; `cargo fmt --check` clean on
 altium-format and altium-sync; corpus gate re-run — all checks true for all
 three files, exit 0.
+
+## Increment B — structural editing of parameters + graphics (implemented)
+
+Contract authority: memo §1/§2/§4/§6/§8 (cited as "memo §N"). New module
+`crates/altium-format/src/schlib/snapshot/children.rs`, exported through
+`schlib`, `api`, and the snapshot module.
+
+### API shape
+
+- `SchLibComponentSnapshot::with_children(SchChildBatch) -> Result<Self>` —
+  one batch over both collections, applied through a SINGLE `assemble_records`
+  pass; the input snapshot is immutable and errors leave no partial state.
+- `SchChildBatch { parameters: Option<Vec<SchParameterEdit>>, graphics:
+  Option<Vec<SchGraphicEdit>>, allow_deletion: bool }` — `None` leaves a
+  collection untouched; `Some(vec![])` deletes every member (authorization
+  required).
+- `SchParameterEdit::{Keep(usize), Replace(usize, SchParameterInit),
+  New(SchParameterInit)}` and `SchGraphicEdit::{Keep, Replace, New}` with
+  `SchGraphicInit { owner_part_id, owner_part_display_mode: Option<i32>,
+  shape: SchGraphicShape }`. `SchGraphicShape` mirrors the 13 representable
+  `SchGraphicDetail` kinds field-for-field (owned data; angles as `f64`;
+  `font_id: Option<i32>` on Label/TextFrame). `SchParameterInit` =
+  name/text/is_hidden. `SchParameterInit::from_view` /
+  `SchGraphicInit::from_view` copy the addressable surface out of the A2
+  views (`from_view` errors for unrepresentable kinds and for owner groups
+  other than `Part(n)`).
+- OPTIONAL-FIELD SEMANTICS (post-B review fix): `owner_part_display_mode:
+  None` and `font_id: None` (Label/TextFrame) mean "unaddressed" — on `New`
+  they resolve the creation defaults (mode 0; the native default font found in
+  the existing table), on `Replace` they PRESERVE the original record's stored
+  value verbatim (wild out-of-range values included; nothing is validated for
+  a value we do not write). An absent optional never resets a stored value.
+  `from_view` populates both explicitly. Test:
+  `replace_with_unaddressed_optionals_preserves_display_mode_and_font`.
+- INDEX SPACE DECISION: `Keep`/`Replace` indices are positions in the FULL A2
+  projections of the input snapshot (`parameters()[i]` / `graphics()[i]`),
+  because deliverable 2's projection-equality gate is stated over those views
+  and one final sequence per collection needs one index space. This deviates
+  from the plan's "per-owner-part addressed per A2 rule" wording; the
+  deviation is flagged for orchestrator/user acceptance. BINDING OBLIGATION ON
+  INCREMENT E: sync-side per-owner-part positional addresses MUST be resolved
+  through the owner_group-filtered → full-projection mapping (the views'
+  `owner_group` field gives the injective mapping), with a test proving the
+  mapping on a multi-part component.
+- Rejections (all hard errors with component/collection/index context):
+  duplicate references to one original slot (Keep+Keep, Keep+Replace, …);
+  out-of-range indices; omission without `allow_deletion` (message lists the
+  omitted member indices); Replace target kind ≠ replacement kind (no
+  cross-kind mapping — includes any Replace of Symbol/Hyperlink/Other);
+  deleting a record that still owns retained dependents (assembly orphan
+  check); creating records in the Additional stream; final arrangements that
+  would migrate an original between streams (assembly check). Child Component
+  insertion is not expressible through the API surface at all (and stays
+  rejected inside `assemble_records`).
+- Existing `api::Graphic`/`Parameter` types were NOT reused for inits: they
+  carry caller-supplied `unique_id` (conflicts with the fresh-UniqueId
+  creation rule), lack `owner_part_display_mode`, and use `SchAngle`; the new
+  init types mirror the A2 views exactly, which the projection-equality gate
+  is defined against.
+
+### Stream-order rule (documented on the module, tested directly)
+
+Within each stream, non-members keep their original relative order. The edited
+collection's final sequence occupies its members' original stream positions in
+encounter order (Data slots, then Additional slots); extras are placed
+contiguously right after the last original member in that member's stream; a
+previously empty collection appends extras at the END of the Data stream
+(parameters before graphics when both append there). Deletions vacate the
+trailing member slots. The resulting A2 projection of the edited collection
+equals the requested final sequence exactly — asserted in unit tests
+(`batch_insert_reorder_replace_projects_exactly…`,
+`stream_order_rule_places_extras_after_last_member_or_at_data_end`) and per
+component in the corpus example.
+
+### IndexInSheet policy (memo §6) as implemented
+
+Touched owner = an owner whose ordered child-identity sequence (original
+addresses / batch-local new ids, both streams in encounter order) differs
+between input and output. For every touched owner, ALL its in-objectList
+children are renumbered to final 0-based sibling positions; pins count as
+siblings but carry no stored field. Untouched owners preserve stored values
+verbatim (deliberate deviation from AD26's renumber-everything, per memo §6
+rule 2). The objectList-membership classification (sources re-read in the
+post-B fix pass; the original wording "mirrors the native attach mechanics
+verified this increment" overstated the match — see the recorded deviation
+below):
+
+- Designator records: designator field object → never in an objectList.
+- Root-owned Parameter records named "Comment" (ordinal case-insensitive):
+  comment field object. New ones are created with IndexInSheet −1.
+- Pin-owned parameters named DefaultNet/HiddenNetName/PinSelectionMemory/
+  PinUniqueId: consumed as pin fields, never objectList children.
+- ImplementationList/Implementation/ImplementationMap/MapDefiner/
+  ParameterList: the compatibility chain never participates in sibling
+  numbering (implementations are Add-then-Removed before AD26 numbers
+  siblings, so they neither receive numbers nor occupy slots) — and stays
+  byte-identical because its owners are never touched by a B batch.
+- Everything else occupies a slot and (non-pins) gets the ordinal stored.
+
+RECORDED DEVIATION (name-dispatch narrowing; post-B review). AD26's import
+attach, `SchDataParameter.UpdateOwner`
+(Altium.Sch.DataModel.Objects/SchDataParameter.cs:128-196), selects its
+special branches by NAME ALONE — DefaultNet, HiddenNetName,
+PinSelectionMemory, Comment, Description, PinUniqueId — and never calls
+`base.UpdateOwner` from those branches; when the resolved owner lacks the
+matching interface the parameter attaches NOWHERE. `SchDataComponent`
+implements `ISchDataCommentOwner` but NOT `ISchDataDescriptionOwner`
+(SchDataComponent.cs:19) and its `GetFieldObjects` yields only
+designator+comment (SchDataComponent.cs:842-859), so a root-owned Parameter
+named "Description" (or a pin-owned "Comment", etc.) is in no objectList and
+is silently DROPPED by AD26 on its next save (`FillChildrenListForSave`
+iterates only the objectList; `ProcessFieldObjects` only the field objects —
+SchDataContainer.cs:709-731, 385). We must never replicate that silent drop
+(cardinal rule), so `occupies_object_list_slot` is deliberately
+owner-conditional — NARROWER than the name-only dispatch: only combinations
+AD26 actually consumes (root "Comment"; pin-owned specials) are exempt from
+numbering, and preserved records AD26 would drop are numbered as ordinary
+siblings when their owner is touched. Wild-file precedent supports numbering
+them: editor-attached root "Description" parameters carry sibling ordinals in
+the corpus (Custom.SchLib `RECORD=41|INDEXINSHEET=3|OWNERPARTID=-1|…|NAME=
+Description`; kmilo17pet-PIC16_Part1.SchLib INDEXINSHEET=4 — raw-byte
+verified 2026-09-16). Functional exposure is nil on load (both AD26's SchLib
+importer and ours ignore IndexInSheet), and our own save/reopen stays a fixed
+point. A memo §6 correction is queued for increment F (see the errata section
+appended to `next-child-contracts-2026-09-16.md`).
+
+Caveats recorded: a Replace that renames a parameter to/from "Comment" changes
+its field-object classification for numbering; the stale stored index on a
+renamed-to-Comment parameter is preserved (the importer ignores IndexInSheet;
+AD26's next save writes −1 for field objects). Root-owned parameters named
+"Description" (and the other special names under non-consuming owners) are
+numbered as ordinary siblings per the deviation above.
+
+### Blank-library reconciliation (deliverable 5)
+
+CORRECTED 2026-09-16 (post-B review): the paragraph originally shipped here
+overclaimed the INDEXINSHEET evidence ("every AD26-written root Designator and
+root Parameter carries INDEXINSHEET=-1", citing the §1 census figures 74,510 +
+1,603,004). That sentence was false as written: the 74,510/1,603,004 census is
+the memo §1 **OWNERPARTID** distribution only, and INDEXINSHEET=-1 is carried
+ONLY by the component FIELD OBJECTS — Designator records and root Parameters
+named "Comment". Re-verified raw dumps of all component Data streams
+(2026-09-16, this fix pass):
+
+- ICs.SchLib (32 components): 32 RECORD=34, all `INDEXINSHEET=-1`; 89
+  RECORD=41 of which exactly 32 (one Comment per component) carry
+  `INDEXINSHEET=-1` — the other 57 root parameters carry 0-based sibling
+  ordinals (7 with the key absent ⇒ 0, 50 at 1..10).
+- arthurbenemann-STM32F4.SchLib (135 components): 135 RECORD=34 all at −1;
+  3,858 RECORD=41 of which 135 (the Comments) are −1 and 3,723 carry ordinals
+  (≥ 51 — pins occupy the lower sibling slots).
+- lucashudson-Connectors.SchLib (56 components, legacy key casing
+  `IndexInSheet`/`OwnerPartId`): 56 RECORD=34 all at −1; 100 RECORD=41 of
+  which 56 (the Comments) are −1, 42 omit the key (⇒ 0) and 2 carry 1.
+
+The scoped claim fully supports the shipped code (which was already correct —
+only Designator/Comment field objects are created with −1; ordinary root
+parameters are numbered siblings per memo §6): `new_blank_ad26` and
+`with_designator` creation write owner_part_id −1 (memo §2 ctor sentinel,
+SchDataGraphicalObject.cs:34-39; corpus-dominant on root text with recorded
+wild tails at ≥1, memo §1) AND index_in_sheet −1 for the Designator/Comment
+field objects specifically (memo §6 rule 1), wired through
+`check_written_owner_part_id(RootText, …)` in the same change (A2 review
+finding 4 obligation). No repo fixture or test asserted 0 as native truth —
+the old 0 was our creation artifact. Test:
+`blank_library_root_text_uses_field_object_sentinels_and_reopens_exactly`
+(field asserts, serialized `|OWNERPARTID=-1|`/`|INDEXINSHEET=-1|` keys,
+save/reopen fixed point, `parameters()` owner group `PartIndependent`,
+creation-path sentinels).
+
+### Creation defaults and reference validation
+
+New records: typed wire defaults (`from_params` on an empty collection — the
+indexed-coordinate kinds Polyline/Polygon/Bezier additionally require the
+`LocationCount` key seeded at construction, a creation defect found and fixed
+in the post-B review with coverage for all 13 kinds in
+`creation_covers_all_thirteen_representable_kinds`), fresh
+`generate_unique_id()` where the kind carries one (Pie has none), parameters →
+owner_part_id −1 + display mode 0, graphics → validated `owner_part_id`
+(`1..=effective`) and `owner_part_display_mode` (`0 ≤ m <
+display_mode_count`, default 0 on New; preserved on Replace when `None`).
+Fonts: authored ids via `check_font_id_exists`; unspecified fonts on New
+resolve the native default (Times New Roman 10) via
+`find_or_create_default_font` run against a PROBE COPY of the captured table —
+if resolution would append an entry, that is a library-level namespace change
+that `replace_components`' ReferenceContext equality check must not absorb
+silently, so it hard-errors naming the increment-D dependency (the D
+namespace-transition ops will recompute the context). RECORDED LIMITATION:
+`SchParameterInit` mirrors `SchParameterView` and exposes no font field, so in
+a library whose captured table lacks the native default entry, parameter
+creation is impossible until increment D lands; the parameter-path hard error
+names exactly that (it no longer suggests authoring a font_id that parameters
+cannot express). All three gate fixtures carry Times New Roman 10 as font 1,
+so the corpus structural pass exercises the find path. Embedded image records
+(New/Replace) validate `file_name` against captured storage assets
+(`check_embedded_image_reference`, §8c rule 2); external-path images exempt.
+style_id: no init exposes one; `check_style_id_write` is wired into the
+New/Replace paths as a guard (§8b), and Replace preserves the original value
+(with unique_id, index_in_sheet subject to §6, and all other non-addressed
+fields) verbatim.
+
+### Test evidence (fixture-free, default suite)
+
+`crates/altium-format/src/schlib/snapshot/children.rs` tests (10):
+insert+reorder+replace with exact projection equality, untouched-record
+verbatim preservation, save/reopen typed equality, weight delta +2, and no-op
+batch identity; touched-owner renumbering with untouched-owner (parent line
+child) and field-object preservation; deletion authorization / duplicate slots
+/ range errors / retained-dependent orphan rejection with weight delta −1;
+cross-kind and unrepresentable Replace rejection plus from_view round-trip
+recolor; creation validation matrix (owner part 0/out-of-range/−1, display
+mode bound, dangling font, missing-default-font D-dependency error, image
+references, "comment"-named new parameter gets −1/fresh UniqueId); dual-stream
+shifts (Data parameter insert shifts an Additional-to-Data parent owner 3→4,
+descendant Additional-to-Additional links survive, both streams save/reopen
+with typed equality); Additional-stream creation and cross-stream migration
+rejection on a collection spanning both streams; stream-order extras
+placement (after last member vs Data-stream end); two sequential batches
+(insert then authorized removal) restoring the original projections.
+The ownership-worklog items "child Component insert" and "Data→Additional
+links" remain covered by the existing `ownership.rs` tests (the public B
+surface cannot express either).
+
+### Corpus example (structural pass)
+
+`crates/altium-sync/examples/check_schlib_snapshots.rs` gains a structural
+pass per file (scalar pass unchanged), reworked in the post-B review to cover
+the plan's full "parameter/graphic insert/remove/reorder" list and to make the
+recolor check non-vacuous. For EVERY component:
+
+1. Insert parameter `STEP2B_{i}` (text set, hidden) + a new part-1 rectangle,
+   reverse the parameters, recolor the first replaceable graphic (via
+   `SchGraphicInit::from_view`); native save/reopen; typed snapshot equality;
+   per-component projection equality (parameter tuples, graphic kind
+   sequences, probe rectangle owner group/display mode/UniqueId). The recolor
+   is verified AT ITS EXACT INDEX: the reopened view's `from_view` init must
+   equal the submitted recolored init field-for-field (the appended probe
+   rectangle can no longer satisfy the check).
+2. GRAPHIC REORDER: swap the probe rectangle (last member) with the last
+   original graphic member — they occupy adjacent stream slots, so the swap is
+   safe on any ownership graph — save/reopen, typed equality plus the swapped
+   kind-sequence projection per component.
+3. Authorized removal of BOTH probes (the `STEP2B_{i}` parameter and the probe
+   rectangle, located and shape-verified at its post-swap index); save/reopen,
+   typed equality, probe-parameter absence, and the graphics kind sequence
+   restored to the original input's per component.
+
+JSON fields: `structural_replaced_colors`, `structural_insert_reorder_equal`,
+`structural_projection_equal`, `structural_graphic_reorder_equal`,
+`structural_removal_equal`; any false counts as a failure → nonzero exit.
+Gate run: all three files true on all checks (56/32/135 components, all
+recolored), exit 0.
+
+### Verification (all default suites, fixture-free; post-fix-pass numbers)
+
+- `cargo test -p altium-format --lib` — 451 passed, 0 failed (448 at the
+  initial B report; +3 fix-pass tests, see the findings resolution below).
+- `cargo test -p altium-sync` — 18 passed, 0 failed (6 pre-existing
+  `collection.rs` dead-code warnings, unchanged).
+- `cargo test -p altium-spec-lang` — 362 passed, 0 failed.
+- `cargo test -p altium-format-spec` — 168 passed, 0 failed.
+- `cargo check -p altium-cli` — clean.
+- `cargo fmt --check` — clean on altium-format and altium-sync.
+- Corpus gate with structural checks (incl. graphic reorder/removal) — all
+  true, exit 0 (see above).
+
+## Increment B — review findings resolution (2026-09-16)
+
+Independent review returned 13 findings (three groups of duplicates).
+Dispositions, each verified against the code/sources/fixture bytes first:
+
+1. **Worklog INDEXINSHEET=-1 evidence false as written (major; reported three
+   times) — CONFIRMED, FIXED (evidence-record defect; code was correct).**
+   Re-dumped every component Data stream of the three gate fixtures: only
+   Designators and root "Comment" parameters carry INDEXINSHEET=-1; ordinary
+   root parameters carry 0-based sibling ordinals (ICs 32 of 89 R41 at −1,
+   others at 0..10; STM32F4 135 of 3,858, others ≥51; Connectors 56 of 100,
+   42 key-absent ⇒ 0, 2 at 1); the 74,510/1,603,004 census figures are the
+   memo §1 OWNERPARTID distribution only. Rewrote the reconciliation section
+   above with the scoped claim and per-fixture counts; also fixed the same
+   overclaim in the `blank_library_root_text…` test comment and tightened the
+   `new_blank_ad26` comment in `schlib.rs` (OWNERPARTID −1 is corpus-dominant
+   with recorded wild tails, not universal). STATUS.md's narrower phrasing was
+   already accurate.
+2. **`occupies_object_list_slot` narrower than the cited AD26 dispatch; root
+   "Description" numbered (major) + "narrowing not recorded" (minor) —
+   CONFIRMED as an evidence-record defect; code behavior RETAINED as a
+   documented deviation.** Verified in the decompiled sources:
+   `SchDataParameter.UpdateOwner` is name-first; `SchDataComponent` is not an
+   `ISchDataDescriptionOwner`; unattached specials are dropped by AD26 on
+   resave (objectList-only save walk). Verified in fixture bytes: wild root
+   "Description" parameters are NUMBERED siblings (Custom.SchLib
+   INDEXINSHEET=3, kmilo17pet-PIC16_Part1 INDEXINSHEET=4). Decision: keep the
+   owner-conditional classification — replicating the name-only dispatch would
+   mean mirroring numbering for records AD26 does not even re-emit, and our
+   cardinal rule forbids the drop; numbering preserved records as ordinary
+   siblings matches the wild-file (editor-attached) precedent. The "verified
+   … mirrors the native attach mechanics" wording was corrected, the deviation
+   and the root-"Description" caveat are recorded in the IndexInSheet section
+   above and in the module docs, and a memo §6 correction is queued for F in
+   the errata section of `next-child-contracts-2026-09-16.md`.
+3. **Corpus structural pass omitted graphic remove/reorder (minor) —
+   CONFIRMED, FIXED.** The pass now runs a per-component graphic reorder
+   round-trip (adjacent-slot swap of the probe rectangle with the last
+   original member) and removes the probe rectangle (shape-verified at its
+   post-swap index) in the authorized-removal batch, restoring and asserting
+   the original kind sequences. New gate field
+   `structural_graphic_reorder_equal`; all three files pass.
+4. **Recolor verification vacuous (appended probe satisfied the `any`)
+   (minor) — CONFIRMED, FIXED.** The check now compares the reopened view at
+   the exact replaced index against the submitted recolored init
+   field-for-field. Also extended fixture-free Replace coverage beyond
+   Rectangle: `replace_round_trips_polyline_and_label_views` (vertex-list and
+   text kinds).
+5. **NEW DEFECT FOUND WHILE FIXING 4 (not reported by any reviewer):
+   `SchGraphicEdit::New` hard-errored for Polyline/Polygon/Bezier** —
+   `from_params` on an empty collection requires the `LocationCount` key
+   (`MissingParam`). Fixed by seeding the count key at construction;
+   `creation_covers_all_thirteen_representable_kinds` now creates every
+   representable kind, asserts exact projection round-trip, and save/reopens
+   with typed equality (proving no other kind has a missing-required-param
+   creation failure).
+6. **Replace with `None` optionals silently reset stored display mode/font
+   (minor; reported twice) — CONFIRMED, FIXED.** `None` now means
+   "unaddressed": creation defaults on New, preserve-the-original on Replace
+   (no validation runs for a value we do not write — wild stored values stay
+   capture-forbidden). Documented on the module, the init fields, and tested
+   (`replace_with_unaddressed_optionals_preserves_display_mode_and_font`).
+7. **Parameter creation impossible without the default font + misleading
+   error advice (minor) — CONFIRMED, FIXED/RECORDED.** The advice string is
+   now caller-specific: the parameter path names the real limitation
+   (`SchParameterInit` has no font field; creation impossible in such
+   libraries until increment D) instead of suggesting an unauthorable
+   font_id. `SchParameterInit` deliberately does NOT grow a font field — it
+   mirrors `SchParameterView`, which exposes none. Limitation recorded in the
+   creation section above. The pre-existing api-layer `default_base()`
+   sentinels (`api/sch_common.rs:540`: owner_part_id 0 / index_in_sheet 0,
+   used by `api/schlib_write.rs` creation) are confirmed present, outside B's
+   snapshot scope — QUEUED as an explicit alignment-or-deprecation decision
+   for the user/increment F (not just an open question).
+8. **Memo §8a rule 3 "fonts are not part of ReferenceContext" contradicted by
+   the code; discrepancy not queued (minor) — CONFIRMED, RECORDED.**
+   `ReferenceContext` does carry fonts (`schlib/snapshot.rs:25-32`) and
+   `replace_components` enforces context equality (`snapshot.rs:179`); B's
+   fail-closed find-only resolution stands. The memo/code contradiction and
+   the D obligation (own the declared font-table append or move fonts out of
+   the context) are queued in the errata section of
+   `next-child-contracts-2026-09-16.md`.
+9. **Keep/Replace index space deviates from the plan's per-owner-part wording
+   (minor) — CONFIRMED, RECORDED; needs orchestrator/user acceptance.** The
+   full-projection index space stands (deliverable-2 gate is defined over the
+   full views); a BINDING OBLIGATION on increment E (filtered→full mapping +
+   multi-part test) is now recorded in the API-shape section above.
+10. **`String::from_utf8_lossy` in a test assertion (minor) — CONFIRMED,
+    FIXED** with strict `std::str::from_utf8(...).expect(...)`.
+
+Memo errata queued for increment F (recorded in
+`next-child-contracts-2026-09-16.md`): §6 ImplementationList wrapper
+serializes INDEXINSHEET absent ⇒ 0, not −1 (ctor `SetIndexInSheetForSave(0)`;
+gate-fixture bytes show `|RECORD=44` with no keys at all); §6 field-object
+classification scoping (name-first import dispatch, owner-interface guards,
+AD26's silent drop of unattached specials); §8a ReferenceContext parenthetical.

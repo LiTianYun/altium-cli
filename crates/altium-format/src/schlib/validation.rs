@@ -47,9 +47,6 @@ pub(crate) fn check_font_id_exists(fonts: &[SchFont], font_id: i32) -> Result<()
 /// styles; name compared case-insensitively) or appends it, returning its id
 /// (resolutions §8a rule 3). Font-table appends are an ordinary format-level
 /// mutation; the table must be the destination file's table.
-// Consumed by the step-2 B-increment creation engine; until that lands it is
-// exercised by unit tests only.
-#[allow(dead_code)]
 pub(crate) fn find_or_create_default_font(fonts: &mut Vec<SchFont>) -> Result<i32> {
     if let Some(font) = fonts.iter().find(|font| {
         font.name.eq_ignore_ascii_case(DEFAULT_FONT_NAME)
@@ -96,9 +93,6 @@ pub(crate) fn find_or_create_default_font(fonts: &mut Vec<SchFont>) -> Result<i3
 
 /// The meaning class a written `owner_part_id` is checked against
 /// (resolutions §1/§2).
-// Consumed by the step-2 B/C-increment creation engines; until those land it
-// is exercised by unit tests only.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WrittenOwnerPartClass {
     /// Binary/text pins: 0 (the natively defined shared-pin wildcard) or a
@@ -115,9 +109,6 @@ pub(crate) enum WrittenOwnerPartClass {
 /// Range/meaning check for an `owner_part_id` value our APIs write
 /// (resolutions §1 value domain, §2 creation rules). `native_part_count` is
 /// the component's native count (effective + 1) and must itself be ≥ 2.
-// Consumed by the step-2 B/C-increment creation engines; until those land it
-// is exercised by unit tests only.
-#[allow(dead_code)]
 pub(crate) fn check_written_owner_part_id(
     class: WrittenOwnerPartClass,
     owner_part_id: i32,
@@ -157,9 +148,6 @@ pub(crate) fn check_written_owner_part_id(
 /// `display_mode` (resolutions §4 rule 3): `0 ≤ mode < display_mode_count`.
 /// `field` names the checked field in the error. The hard error (instead of
 /// AD26's checked-setter silent ignore) is our deliberate deviation.
-// Consumed by the step-2 B/C-increment creation engines; until those land it
-// is exercised by unit tests only.
-#[allow(dead_code)]
 pub(crate) fn check_written_display_mode(
     field: &str,
     mode: i32,
@@ -204,9 +192,6 @@ pub(crate) fn check_custom_display_mode_name_index(
 /// case-insensitively (mirroring the native pairing order). External-path
 /// images (`embed_image == false`) reference the filesystem, not `/Storage`.
 /// Check-only: asset lifecycle ops belong to increment D.
-// Consumed by the step-2 B/D-increment image engines; until those land it is
-// exercised by unit tests only.
-#[allow(dead_code)]
 pub(crate) fn check_embedded_image_reference<'a>(
     asset_names: impl IntoIterator<Item = &'a str> + Clone,
     file_name: &str,
@@ -240,9 +225,6 @@ pub(crate) fn check_embedded_image_reference<'a>(
 /// new child, or any change to an existing child's id — is a hard error until
 /// the Delphi style-table implementation is reverse engineered. `original` is
 /// `None` for a newly created child.
-// Consumed by the step-2 B-increment graphics engine; until that lands it is
-// exercised by unit tests only.
-#[allow(dead_code)]
 pub(crate) fn check_style_id_write(original: Option<i32>, written: i32) -> Result<()> {
     let unchanged = match original {
         Some(original) => original == written,
