@@ -23,9 +23,11 @@ use altium_spec_lang::{
         SchLibIntent,
     },
 };
+use altium_sync::apply::apply_saved_plan;
 use altium_sync::plan::{
     ManifestRole, PlanArtifact, PlanArtifactContents, PlanScope, SavedPlan, load_schlib_hashed,
 };
+use altium_sync::report::{ReportCollection, ReportOp, render_plan_report, report};
 use altium_sync::schlib::{ComponentPropertiesIntent, SchLibPatch};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -80,6 +82,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || result["plan_payload_noop_equal"] != true
             || result["plan_roundtrip_equal"] != true
             || result["plan_deterministic"] != true
+            || result["plan_full_circle_applied"] != true
+            || result["plan_full_circle_replan_empty"] != true
+            || result["plan_report_entries_exact"] != true
+            || result["plan_target_drift_rejected"] != true
         {
             failures += 1;
         }
@@ -246,6 +252,10 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
         "plan_payload_noop_equal": plan.payload_noop_equal,
         "plan_roundtrip_equal": plan.roundtrip_equal,
         "plan_deterministic": plan.deterministic,
+        "plan_full_circle_applied": plan.full_circle_applied,
+        "plan_full_circle_replan_empty": plan.full_circle_replan_empty,
+        "plan_report_entries_exact": plan.report_entries_exact,
+        "plan_target_drift_rejected": plan.target_drift_rejected,
     }))
 }
 
@@ -1030,6 +1040,15 @@ struct PlanOutcome {
     payload_noop_equal: bool,
     roundtrip_equal: bool,
     deterministic: bool,
+    full_circle_applied: bool,
+    full_circle_replan_empty: bool,
+    report_entries_exact: bool,
+    /// The target FILE drifted (one byte appended) after planning and the
+    /// manifest content-hash precondition rejected the apply. This is an
+    /// input-drift check, not a plan-file tamper: plan-payload tampering
+    /// (valid-but-different before-state, contract-breaking fields) is
+    /// covered by the fixture-free apply unit tests.
+    target_drift_rejected: bool,
 }
 
 fn plan_pass(
@@ -1105,10 +1124,123 @@ fn plan_pass(
     // must be byte-identical (the determinism gate's strongest form).
     let deterministic = second.to_json_bytes()? == bytes && plan.to_json_bytes()? == bytes;
 
+    // Full-circle saved-plan stage (step-3 increment B): plan a
+    // programmatic intent against a COPY of the real library, serialize the
+    // plan to disk, re-read + strict-decode it, execute it through
+    // apply_saved_plan (manifest verification, address resolution,
+    // before-equality, execution, save, reopen typed equality), then verify
+    // replan-empty and exact report entry counts; finally append one byte
+    // to the target file (input DRIFT, not plan tampering) and assert the
+    // manifest content-hash rejection.
+    let circle_target = temp.join("plan-circle.SchLib");
+    std::fs::copy(path, &circle_target)?;
+    let circle_loaded = load_schlib_hashed(&circle_target)?;
+    let circle_input = circle_loaded.library.snapshot()?;
+    let circle_fields: Vec<(usize, FieldIntent<Option<String>>)> = (0..circle_input
+        .component_count())
+        .map(|index| {
+            (
+                index,
+                FieldIntent::Set(Spanned::new(
+                    Some(format!("step3 full circle {index}")),
+                    Span::new(0, 0),
+                )),
+            )
+        })
+        .collect();
+    let circle_patch = SchLibPatch::descriptions(&circle_input, circle_fields.clone())?;
+    let expected = circle_patch.resulting_snapshot()?;
+    let circle_out = temp.join("plan-circle-out.SchLib");
+    let circle_plan_path = temp.join("plan-circle.json");
+    let circle_plan = SavedPlan::compile_from_schlib_patch(
+        &circle_patch,
+        PlanScope::default(),
+        vec![
+            PlanArtifact {
+                role: ManifestRole::TargetDocument,
+                declared_path: circle_target.clone(),
+                contents: PlanArtifactContents::Bytes(circle_loaded.bytes.clone()),
+            },
+            PlanArtifact {
+                role: ManifestRole::Destination,
+                declared_path: circle_out.clone(),
+                contents: PlanArtifactContents::ExpectedAbsent,
+            },
+        ],
+        Some(&circle_plan_path),
+        Vec::new(),
+    )?;
+    std::fs::write(&circle_plan_path, circle_plan.to_json_bytes()?)?;
+    let decoded = SavedPlan::from_json_bytes(&std::fs::read(&circle_plan_path)?)?;
+    let applied = apply_saved_plan(&decoded)?;
+    let written = SchLib::open(&circle_out)?.snapshot()?;
+    let full_circle_applied = applied.replaced == circle_input.component_count()
+        && applied.created == 0
+        && applied.deleted == 0
+        && written == expected;
+    let full_circle_replan_empty = SchLibPatch::descriptions(&written, circle_fields)?.is_empty();
+
+    // Exact report derivation: one component-level replace entry per
+    // component, each carrying the description before/after pair.
+    let derived = report(&decoded)?;
+    let report_entries_exact = derived.entries.len() == circle_input.component_count()
+        && derived.entries.iter().all(|entry| {
+            entry.op == ReportOp::Replace
+                && entry.address.collection == ReportCollection::Components
+                && entry
+                    .fields
+                    .iter()
+                    .any(|field| field.name == "description" && field.after.is_some())
+        })
+        && derived.allocated_ids.is_empty()
+        && !render_plan_report(&derived).is_empty();
+
+    // Tamper one byte of the target file: a fresh plan against the intact
+    // copy must be rejected by the manifest hash precondition.
+    let tamper_out = temp.join("plan-tamper-out.SchLib");
+    let tamper_plan = SavedPlan::compile_from_schlib_patch(
+        &SchLibPatch::descriptions(
+            &circle_input,
+            [(
+                0,
+                FieldIntent::Set(Spanned::new(
+                    Some("step3 tamper probe".to_owned()),
+                    Span::new(0, 0),
+                )),
+            )],
+        )?,
+        PlanScope::default(),
+        vec![
+            PlanArtifact {
+                role: ManifestRole::TargetDocument,
+                declared_path: circle_target.clone(),
+                contents: PlanArtifactContents::Bytes(circle_loaded.bytes.clone()),
+            },
+            PlanArtifact {
+                role: ManifestRole::Destination,
+                declared_path: tamper_out,
+                contents: PlanArtifactContents::ExpectedAbsent,
+            },
+        ],
+        None,
+        Vec::new(),
+    )?;
+    let mut tampered_bytes = circle_loaded.bytes.clone();
+    tampered_bytes.push(0);
+    std::fs::write(&circle_target, &tampered_bytes)?;
+    let target_drift_rejected = match apply_saved_plan(&tamper_plan) {
+        Err(error) => error.to_string().contains("content hash mismatch"),
+        Ok(_) => false,
+    };
+
     Ok(PlanOutcome {
         payload_noop_equal,
         roundtrip_equal,
         deterministic,
+        full_circle_applied,
+        full_circle_replan_empty,
+        report_entries_exact,
+        target_drift_rejected,
     })
 }
 

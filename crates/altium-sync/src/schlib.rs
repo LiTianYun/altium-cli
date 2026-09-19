@@ -38,7 +38,8 @@
 //! exactly the cached result after verifying the whole-input `StaleInput`
 //! precondition and the captured image-asset inputs.
 mod elaborate;
-mod positional;
+pub(crate) use elaborate::parameter_key_fold;
+pub(crate) mod positional;
 
 use std::path::{Path, PathBuf};
 
@@ -772,6 +773,33 @@ impl SchLibPatch {
     /// The cached reviewed result (borrowed; see [`Self::resulting_snapshot`]).
     pub(crate) fn result_snapshot(&self) -> &SchLibSnapshot {
         &self.result
+    }
+    /// Whether the final component sequence has the canonical saved-plan
+    /// shape: every kept input slot in ascending input order, followed by
+    /// all creations. The saved-plan schema records deletions (by input
+    /// slot) and creations (in final order) but no keep permutation, so a
+    /// plan can faithfully represent exactly the patches with this shape;
+    /// lowering hard-errors on any other sequence (`plan.rs`).
+    pub(crate) fn component_sequence_is_canonical(&self) -> bool {
+        match &self.pending.component_slots {
+            None => true,
+            Some(slots) => {
+                let mut last_keep: Option<usize> = None;
+                let mut seen_new = false;
+                for slot in slots {
+                    match slot {
+                        SchLibPatchSlot::Keep(index) => {
+                            if seen_new || last_keep.is_some_and(|previous| *index <= previous) {
+                                return false;
+                            }
+                            last_keep = Some(*index);
+                        }
+                        SchLibPatchSlot::New(_) => seen_new = true,
+                    }
+                }
+                true
+            }
+        }
     }
     /// Final-sequence positions of the components this patch creates, in
     /// final order (the after-state of each lives in the cached result).

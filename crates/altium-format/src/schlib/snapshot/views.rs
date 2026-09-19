@@ -36,7 +36,7 @@ use altium_format_types::{
 /// - `OutOfRange(raw)` — any other loaded value (`≥ native count` or `< −1`).
 ///   Such children exist in the wild, must keep loading, and are
 ///   intent-unaddressable preserved content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum SchOwnerGroup {
     PartIndependent,
     SharedPins,
@@ -61,7 +61,7 @@ impl SchOwnerGroup {
 /// Derived part swap-group state (resolutions §5 rule 1). Never stored: the
 /// group is the unanimous `SwapIdPart` prefix of the part's non-owner-0 pins
 /// across all display modes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum SchPartSwapGroup {
     /// No eligible pins, or a unanimous empty prefix (natively "no group").
     None,
@@ -74,7 +74,7 @@ pub enum SchPartSwapGroup {
 }
 
 /// One effective part slot (1-based numbering).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SchPartView {
     pub number: i32,
     pub swap_group: SchPartSwapGroup,
@@ -82,7 +82,7 @@ pub struct SchPartView {
 
 /// One pin in child encounter order. Pins align positionally; `designator` is
 /// the authored matching aid, not an identity key.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SchPinView<'a> {
     pub owner_group: SchOwnerGroup,
     pub owner_part_display_mode: i32,
@@ -107,7 +107,7 @@ pub struct SchPinView<'a> {
 
 /// One ROOT-owned component parameter (owner resolves to the component root).
 /// `name` is the parent-scoped alignment key.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SchParameterView<'a> {
     pub owner_group: SchOwnerGroup,
     pub owner_part_display_mode: i32,
@@ -117,7 +117,7 @@ pub struct SchParameterView<'a> {
 }
 
 /// One graphic-like child in child encounter order (positional alignment).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SchGraphicView<'a> {
     pub owner_group: SchOwnerGroup,
     pub owner_part_display_mode: i32,
@@ -131,7 +131,7 @@ pub struct SchGraphicView<'a> {
 /// are preserved-only content: they appear in the ordered collection so that
 /// positional addressing and managed-scope checks can see them, but no intent
 /// can author or replace them.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum SchGraphicDetail<'a> {
     Line {
         from: CoordPoint,
@@ -300,7 +300,7 @@ impl SchGraphicDetail<'_> {
 /// The footprint collection projection: PCBLIB-model implementations only,
 /// with an explicit count of implementation records preserved outside the
 /// collection (non-PCBLIB models such as SIM; resolutions/plan A2 §2).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SchFootprintMapsView<'a> {
     pub footprints: Vec<SchFootprintMapView<'a>>,
     /// Implementation records whose model type is not PCBLIB. They are
@@ -310,7 +310,7 @@ pub struct SchFootprintMapsView<'a> {
 }
 
 /// One PCBLIB implementation. `model_name` is the parent-scoped alignment key.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SchFootprintMapView<'a> {
     pub owner_group: SchOwnerGroup,
     pub owner_part_display_mode: i32,
@@ -322,7 +322,7 @@ pub struct SchFootprintMapView<'a> {
 }
 
 /// One MapDefiner entry under a footprint's ImplementationMap.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SchPinPadMapView<'a> {
     /// Pin designator interface string (`DesIntf`).
     pub pin: &'a str,

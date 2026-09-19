@@ -33,20 +33,26 @@
 //!   preserved content: no owner path reaches them, and their presence in a
 //!   collection is invisible to the filtered index space.
 //!
-//! **Consumption status (step 2 → step 3)**: this vocabulary is landed and
-//! unit-tested but NOT yet consumed by intent elaboration — saved plans
-//! (NEXT.md step 3) are its intended consumer. Elaboration's scope targeting
-//! lives independently in `crate::schlib::positional`
-//! (`component_scope_pins_target` / `component_scope_graphics_target` /
-//! `group_member`), which matches by RAW owner id — deliberately treating an
-//! `OutOfRange(n)` group as a member of target `n` so a pre-growth projection
-//! selects the members the post-growth projection will — while resolution
-//! here filters by exact `SchOwnerGroup` equality and rejects parts beyond
-//! the effective count, so the two coincide on every resolvable address.
-//! When step 3 wires addresses into saved plans, either make one of the two
-//! mappings delegate to the other or add a cross-implementation equivalence
-//! test over the owner/effective-count matrix (including the OutOfRange
-//! pre-growth convention).
+//! **Consumption status (step 3, increment B)**: saved-plan apply consumes
+//! this vocabulary — decoded component patch addresses resolve through
+//! [`ComponentIndex::resolve`] (`crate::apply`), discharging the F-finding-4
+//! obligation recorded in `docs/worklogs/next-children-2026-09-16.md`.
+//! Elaboration's scope targeting still lives independently in
+//! `crate::schlib::positional` (`component_scope_pins_target` /
+//! `component_scope_graphics_target` / `group_member`), which matches by RAW
+//! owner id — deliberately treating an `OutOfRange(n)` group as a member of
+//! target `n` so a pre-growth projection selects the members the post-growth
+//! projection will — while resolution here filters by exact `SchOwnerGroup`
+//! equality and rejects parts beyond the effective count. Delegating either
+//! mapping to the other would change shipped step-2 semantics (positional's
+//! raw-id matching must keep selecting pre-growth `OutOfRange` members;
+//! address resolution must keep rejecting parts beyond effective), so the
+//! two remain separate implementations pinned together by the
+//! cross-module equivalence test
+//! `owner_group_mappings_agree_with_positional_raw_id_matching` below: on
+//! every address this module can resolve, membership under positional's
+//! raw-id predicate equals exact-group equality PLUS exactly the
+//! `OutOfRange(target)` pre-growth allowance — no other divergence exists.
 
 use altium_format::api::{SchLibComponentSnapshot, SchLibSnapshot, SchOwnerGroup};
 use altium_spec_lang::ast::CollectionKind;
@@ -196,8 +202,9 @@ impl ResolvedSchLibChildAddress {
 
 /// Maps a pin owner path to the owner group whose filtered projection the
 /// index addresses (resolutions §1; see module docs). `effective` must be the
-/// component's effective part count (≥ 1).
-fn pin_owner_group(
+/// component's effective part count (≥ 1). `pub(crate)` for the
+/// cross-module equivalence test against `crate::schlib::positional`.
+pub(crate) fn pin_owner_group(
     component: &str,
     owner: SchLibChildOwner,
     effective: i32,
@@ -219,7 +226,9 @@ fn pin_owner_group(
 
 /// Maps a graphics owner path to its owner group. Component-scope graphics
 /// exist natively only in single-part components (resolutions §2).
-fn graphic_owner_group(
+/// `pub(crate)` for the cross-module equivalence test against
+/// `crate::schlib::positional`.
+pub(crate) fn graphic_owner_group(
     component: &str,
     owner: SchLibChildOwner,
     effective: i32,
@@ -601,5 +610,109 @@ mod tests {
             graphic_owner_group("C", SchLibChildOwner::Part(part(1)), 2).unwrap(),
             SchOwnerGroup::Part(1)
         );
+    }
+
+    /// F-finding-4 discharge (step-3 increment B): the two independent
+    /// owner-group mappings — this module's exact-`SchOwnerGroup` resolution
+    /// and `positional.rs`'s raw-owner-id matching — are pinned together
+    /// over the full owner/effective-count matrix. On every owner path this
+    /// module can resolve, positional membership equals exact-group
+    /// equality PLUS exactly the `OutOfRange(target)` pre-growth allowance
+    /// (a group whose raw id names a not-yet-grown part slot), and the
+    /// component-scope target computations agree on both the mapped raw id
+    /// and the error cases.
+    #[test]
+    fn owner_group_mappings_agree_with_positional_raw_id_matching() {
+        use crate::schlib::positional::{
+            component_scope_graphics_target, component_scope_pins_target, group_member,
+        };
+
+        let raw_id_of = |group: SchOwnerGroup| -> i32 {
+            match group {
+                SchOwnerGroup::SharedPins => 0,
+                SchOwnerGroup::Part(n) => n,
+                SchOwnerGroup::PartIndependent => -1,
+                SchOwnerGroup::OutOfRange(n) => n,
+            }
+        };
+
+        for effective in 1..=4i32 {
+            // Component-scope targets: positional's raw target for a
+            // non-created, count-stable component equals the raw id of the
+            // group this module resolves the same owner path to.
+            let pins_target =
+                component_scope_pins_target("C", effective, effective, false).unwrap();
+            let pins_group =
+                pin_owner_group("C", SchLibChildOwner::ComponentScope, effective).unwrap();
+            assert_eq!(pins_target, raw_id_of(pins_group), "effective {effective}");
+
+            let graphics_target = component_scope_graphics_target("C", effective, effective, false);
+            let graphics_group =
+                graphic_owner_group("C", SchLibChildOwner::ComponentScope, effective);
+            match (graphics_target, graphics_group) {
+                (Ok(target), Ok(group)) => {
+                    assert_eq!(target, raw_id_of(group), "effective {effective}")
+                }
+                (Err(_), Err(SchLibAddressError::NoSharedGraphicsOwner { .. })) => {
+                    assert!(effective > 1, "both reject only multi-part component scope");
+                }
+                (target, group) => panic!(
+                    "divergent component-scope graphics mapping at effective \
+                     {effective}: positional {target:?} vs address {group:?}"
+                ),
+            }
+
+            // Every resolvable owner path vs every projectable group class:
+            // membership under positional's raw-id predicate must equal
+            // exact-group equality, except the OutOfRange pre-growth
+            // allowance, which is the ONLY permitted divergence.
+            let owners: Vec<SchLibChildOwner> = std::iter::once(SchLibChildOwner::ComponentScope)
+                .chain((1..=effective).map(|n| SchLibChildOwner::Part(part(n))))
+                .collect();
+            let groups: Vec<SchOwnerGroup> =
+                [SchOwnerGroup::PartIndependent, SchOwnerGroup::SharedPins]
+                    .into_iter()
+                    .chain((1..=effective + 2).map(SchOwnerGroup::Part))
+                    .chain([-3, 0, 1, effective, effective + 1, 99].map(SchOwnerGroup::OutOfRange))
+                    .collect();
+            for owner in &owners {
+                let resolved = pin_owner_group("C", *owner, effective).unwrap();
+                let target = raw_id_of(resolved);
+                for group in &groups {
+                    let positional = group_member(*group, target);
+                    let exact = *group == resolved;
+                    let pre_growth_allowance =
+                        matches!(group, SchOwnerGroup::OutOfRange(n) if *n == target);
+                    assert_eq!(
+                        positional,
+                        exact || pre_growth_allowance,
+                        "owner {owner:?}, group {group:?}, effective {effective}: \
+                         positional raw-id matching and exact-group equality may \
+                         diverge only on the OutOfRange pre-growth convention"
+                    );
+                }
+            }
+
+            // Beyond-effective parts: unreachable through this module (hard
+            // error), so positional's raw-id matching there is pre-growth
+            // behavior by construction, never an addressable divergence.
+            assert!(matches!(
+                pin_owner_group("C", SchLibChildOwner::Part(part(effective + 1)), effective),
+                Err(SchLibAddressError::PartOutOfRange { .. })
+            ));
+        }
+
+        // Created components (no destination children to retarget): the
+        // positional target maps by the resulting count, matching this
+        // module's mapping at that resulting effective count.
+        for resulting in 1..=3i32 {
+            let created_target = component_scope_pins_target("C", 1, resulting, true).unwrap();
+            let group = pin_owner_group("C", SchLibChildOwner::ComponentScope, resulting).unwrap();
+            assert_eq!(
+                created_target,
+                raw_id_of(group),
+                "created, resulting {resulting}"
+            );
+        }
     }
 }

@@ -96,9 +96,11 @@ image-asset sources; F gate review + docs promotion.
   rejects undeclared context drift. Deletion always requires explicit
   authorization and unauthorized deletion errors list the doomed members.
 - Sync-side elaboration (`altium-sync`): the snapshot-bound address
-  vocabulary (`src/address.rs` — landed and unit-tested, but step-3-facing:
-  elaboration does not consume it yet; its module docs record the divergence
-  risk against `positional.rs`'s own scope targeting), the class-aware
+  vocabulary (`src/address.rs` — consumed by the step-3 saved-plan apply
+  since increment B; a cross-module equivalence test pins its owner-group
+  mapping against `positional.rs`'s raw-id scope targeting, with the
+  `OutOfRange` pre-growth allowance the sole asserted divergence), the
+  class-aware
   collection planner
   (`src/collection.rs`: keyed = components/parts/parameters/aliases/
   footprints, positional = pins/graphics/maps; partial = in-slot updates plus
@@ -145,7 +147,7 @@ save/reopen typed equality and empty replans, exit 0. Open questions queued
 for the user are collected in the step-2 closure section of
 [the step-2 worklog](docs/worklogs/next-children-2026-09-16.md).
 
-### NEXT.md step 3 — saved plans (in progress; increment A complete, 2026-09-18)
+### NEXT.md step 3 — saved plans (in progress; increments A + B complete, 2026-09-18)
 
 Increment A of the step-3 saved-plan design
 ([docs/worklogs/next-plans-2026-09-18.md](docs/worklogs/next-plans-2026-09-18.md);
@@ -209,14 +211,76 @@ non-finite `SchAngle` rejected at the parse boundary, typed
 `PlanScopeSubject`/`PlanCollectionKind` in the plan scope) are resolved; see
 the findings-resolution section of the worklog.
 
-Validation at this state: 490 altium-format `--lib` (482 step-2 + 8 new), 61
-altium-sync (54 + 7 new), 362 altium-spec-lang, 168 altium-format-spec tests
-pass; CLI checks; altium-sync builds with zero warnings; the three-library
-corpus gate passes with the new saved-plan pass (per-component payload
-round-trip no-op, plan strict-decode equality, byte-determinism across two
-plannings). Increments B (checked in-memory apply, exact report, address
-unification), C (dump-direction source patches), and D (closure/evidence)
-remain.
+Increment B adds the compile-direction checked pipeline end to end
+(worklog increment-B section for the complete record):
+
+- **Planner entry** (`altium-sync/src/planner.rs`): `plan_compile_schlib`
+  produces a `SavedPlan` from real files — spec source + transitive imports
+  via `capture_imports`/`compile_captured_schlib` (hash and compile the
+  same retained text), the target via `load_schlib_hashed`, authored image
+  bundles via `CapturedImageAsset` — with the declared output mode
+  (`InPlace` = one `InPlaceTarget` artifact; `Alternate(path)` =
+  `TargetDocument` + expected-absent `Destination`), the §S8
+  changed-during-planning recheck immediately before emission, the recorded
+  scope summary, and the memo-§3 exit codes (0 no-change / 2 changes /
+  1 error-or-blocking, incl. `plan_exit_code`).
+- **Checked apply** (`altium-sync/src/apply.rs`): `apply_saved_plan` takes
+  ONLY the plan; verification order per memo §2 — manifest re-resolution
+  (`PathResolutionChanged` on retargeted symlinks) + §S11 re-check + every
+  hash/absence precondition (sources hashed, never re-parsed) → open the
+  target from the hashed bytes → resolve every address against the
+  immutable snapshot through `address.rs` → decoded-before typed equality
+  (`StaleComponentState` naming the component) → execute the D1 two-step
+  reconstructed from the plan (one library `SchLibEdit` with
+  `FromState`-seeded creations and reconstructed alias ops, then one
+  content `SchLibEdit` of `ReplaceWithState`s) → after-state/membership/
+  invariant verification → plain save to the frozen destination → reopen →
+  typed equality. No recompilation, no minting, no path parameters.
+  Staging/journal/recovery are explicitly step 4 (boundary documented in
+  the module docs). Lowering now rejects (`UnrepresentablePatch`) patches
+  whose kept-component order is not the canonical input order — the v1
+  schema records no keep permutation, so reorders fail at planning instead
+  of silently reordering at apply — and additionally DRY-RUNS the apply
+  reconstruction at planning, requiring it to reproduce the reviewed
+  result exactly: every emitted plan is proven executable (a `FromState`
+  of a cloned wild component is rejected at planning with the strict
+  install's own message, per the increment-A obligation).
+- **Exact report** (`altium-sync/src/report.rs`): `report(&SavedPlan)` is a
+  pure function of the plan; entries expand from before/after payloads
+  through the same typed views the planner used (via the new
+  `ComponentStatePayload::component_view()` report projection in
+  `altium-format`), keyed pairing by key + occurrence under the planner's
+  own equivalence (parameters by the native case-insensitive
+  `parameter_key_fold`, so a case-only respelling reports as one Replace
+  with a `name` field diff; aliases/footprints exact), positional by index,
+  parts-shrink deleted children surfaced, deletes always expanded,
+  `allocated_ids` read from created after-states, both old/new indices
+  retained, no heuristics. The report FAILS FAST (`InvalidPlan`) instead of
+  assuming: an alias-add on a created component is verified against the
+  embedded after-state before being folded into the Create expansion, and a
+  creation's paired content replacement is verified payload-identical
+  before being elided. `render_plan_report` is the plain-text renderer
+  (CLI wiring is step 5).
+- **Address unification (F-finding-4 discharged)**: `address.rs` is
+  consumed by apply; `positional.rs` and `address.rs` remain separate
+  implementations (delegation either way would change shipped step-2
+  semantics) pinned by the cross-module equivalence test over the
+  owner/effective-count/group matrix with the `OutOfRange` pre-growth
+  allowance asserted as the only divergence.
+
+Validation at this state: 491 altium-format `--lib`, 76 altium-sync, 362
+altium-spec-lang, 168 altium-format-spec tests pass; CLI checks;
+altium-sync builds with zero warnings; the three-library corpus gate is
+partially observed after the review fixes — Connectors (56) and ICs (32)
+pass every check; the STM32F4 (135) line must be re-run to completion
+before merge (see the worklog verification section) — with the saved-plan
+pass plus the increment-B full-circle stage (plan a
+programmatic intent against a copy of each real library, serialize to disk,
+strict-decode, `apply_saved_plan`, save/reopen equality, replan-empty,
+exact report entry counts, and one byte of target-file drift rejected by
+the manifest content hash — `plan_target_drift_rejected`; plan-payload
+tampering is covered by the fixture-free apply unit tests). Increments C
+(dump-direction source patches) and D (closure/evidence) remain.
 
 Full image codecs were removed from the gate by the user's 2026-09-05 scope change.
 Graphic field policies now cover all 13 kinds against the existing typed Rust

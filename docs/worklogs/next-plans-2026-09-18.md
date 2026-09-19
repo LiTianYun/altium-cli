@@ -278,3 +278,373 @@ each verified against the code before acting:
   fast; the planner must either reject such clones at planning with the
   same message or thread the source slot's wild allowance — decide
   in-increment, never by weakening install validation silently.
+
+## Increment B — checked apply, planner entry, exact report, address unification (complete, 2026-09-18)
+
+Design authority: memo §2 (apply-side verification order), §3 (exact-report
+model + exit codes), §4B; the increment-A "Increment-B obligations" above
+(all discharged below); F-finding-4
+(`docs/worklogs/next-children-2026-09-16.md`).
+
+### Planner entry (`crates/altium-sync/src/planner.rs`, new)
+
+`plan_compile_schlib(spec_path, target_path, output, plan_path) ->
+SchLibCompilePlanning { plan, changes, exit_code }` with
+`SchLibPlanOutput::{InPlace, Alternate(PathBuf)}` (§S9/§S10 — the declared
+mode is recorded, nothing inferred). Reads each input ONCE via the §S7
+seam: `capture_imports` retained source text (hashed and compiled from the
+same buffers via `compile_captured_schlib`), `load_schlib_hashed` for the
+target, `CapturedImageAsset` for every authored bundle (deduplicated by the
+pure requested-path arithmetic BEFORE any read). Elaboration through
+`from_intent_with_assets`; blocking diagnostics are `Err` (exit 1). The
+§S8 recheck runs immediately before emission:
+`CapturedSourceGraph::verify_unchanged()` (exact content comparison — this
+SUBSUMES the memo's "extended to also compare the now-computed hashes";
+no weaker hash-only check was added), per-asset `verify_unchanged()`, and a
+re-read + re-hash of the target; drift is
+`PlanError::ChangedDuringPlanning`. Exit codes per memo §3:
+`PLAN_EXIT_NO_CHANGES = 0`, `PLAN_EXIT_BLOCKED = 1`,
+`PLAN_EXIT_CHANGES = 2`, plus `plan_exit_code(&Result<..>)`. The recorded
+`PlanScope` summary carries the library components scope plus every
+DECLARED per-component collection scope (part-block pin/graphic scopes fold
+into the component's kinds; exact duplicates recorded once).
+
+### Checked apply (`crates/altium-sync/src/apply.rs`, new)
+
+`apply_saved_plan(&SavedPlan) -> Result<AppliedPlan, PlanError>` — takes
+ONLY the plan (frozen §S9 paths; no path parameters). Verification order
+exactly per memo §2: version/direction gate → manifest re-resolution
+(recomputed canonicalization; a changed resolution is the explicit
+`PathResolutionChanged` error, so a retargeted symlink fails even on
+byte-identical content) + §S11 re-check + EVERY hash/absence precondition
+(sources/imports/bundles read and hashed, never re-parsed — §S13) → decode
+embedded image payloads (hash-guarded) → open the target FROM THE HASHED
+BYTES (`SchLib::from_bytes`) → snapshot → resolve every patch address
+against that immutable snapshot (through `crate::address`'s
+`ComponentIndex::resolve` — the F-finding-4 consumption) → per-patch
+decoded-before typed equality (`StaleComponentState`, naming the
+component) → execute → verify produced components equal decoded
+after-states + membership + library invariants → save to the frozen
+destination → reopen → typed-equality check.
+
+Execution reconstructs the D1 two-step from the plan, each phase ONE
+`SchLibEdit`:
+
+1. Library edit: fonts, image ops, membership (kept input slots ascending,
+   deletions omitted under `allow_component_removal`, creations appended as
+   `New(FromState(seed))`), alias ops. The creation seed is the paired
+   replacement's `before` payload — the planner's INTERMEDIATE state — so
+   the original two-step is replayed exactly; a creation with no content
+   replacement seeds its final `after` directly. **Alias-edit
+   reconstruction (the increment-A note, discharged):** `AliasAdd` ops
+   targeting a created component are subsumed by the `FromState` install
+   (the payload's index carries the alias) and are dropped after verifying
+   the alias is present in the payload (absent ⇒ `InvalidPlan`); alias ops
+   on kept components stay in the edit, so phase 2's `ReplaceWithState`
+   alias-equality check (`intermediate slot aliases == after aliases`)
+   holds exactly as at planning. `AliasRemove` ops always stay (they may
+   release a removed component's aliases).
+2. Content: `ReplaceWithState(final_index, after)` per replacement against
+   the intermediate. Replacements paired with creations verify/install
+   uniformly (their before equals what phase 1 produced by construction —
+   any tamper breaks the equality).
+
+**Lowering-time dry run (and the FromState wild-clone obligation,
+discharged as option 1 — reject at planning):** the execution core is the
+shared `pub(crate) fn execute_compile_patches(plan, input)` in `apply.rs`;
+`compile_from_schlib_patch` runs it against the patch's input snapshot
+immediately after constructing the plan and requires the produced snapshot
+to equal the reviewed result (typed equality). Every emitted plan is
+therefore proven executable at planning: a `Create` lowered from a CLONE
+of a wild component fails the dry run's strict `FromState` install with
+the install's own message (never emitted, never a weakened validation —
+a structural guarantee; the direct-test gap is recorded in the findings
+resolution below), and any reconstruction gap (membership, alias
+subsumption, two-step order) surfaces as `UnrepresentablePatch` at
+planning instead of an apply failure. Planning cost roughly doubles (one
+in-memory execution per lowering); accepted for the guarantee.
+
+Since the plan records deletions (input slots) and creations (final order)
+but NO keep permutation, only the canonical final sequence — kept slots in
+input order, creations appended — is representable:
+`SavedPlan::compile_from_schlib_patch` now hard-errors
+(`UnrepresentablePatch`) on any patch whose slot vector deviates (a keyed
+complete components scope CAN legally reorder; such patches must be
+restructured or applied in memory — recorded as a v1 schema limitation,
+enforced at PLANNING, never silently reordered at apply). Apply validates
+every replacement address against the reconstruction it derives from the
+plan (mismatch ⇒ `InvalidPlan`).
+
+Step-4 boundary (documented in the module docs): NEXT.md "Checked apply
+and recovery" steps 1–3 run in memory here; the write is a plain
+`SchLib::save` + reopen typed-equality check ONLY — staging beside the
+destination, the durable journal, commit-by-rename, and recovery are
+step 4 and are absent.
+
+### Exact report (`crates/altium-sync/src/report.rs`, new)
+
+`report(&SavedPlan) -> Result<PlanReport, PlanError>` — a pure function of
+the plan (memo §3), never stored, never an execution input. Child detail is
+computed from the before/after payloads through THE SAME typed views the
+planner used, via the new format-side
+`ComponentStatePayload::component_view()` (below): keyed collections pair
+by key + occurrence ordinal under the planner's own equivalence —
+parameters by the native ordinal case-insensitive fold
+(`parameter_key_fold`, the equivalence elaboration pairs with, so a
+case-only respelling reports as ONE Replace whose `name` field diff shows
+the respelling, never delete + create; review finding B-1), aliases by
+exact value, footprints by exact model name, parts by number —,
+positional by index (pins, graphics, and
+pin-pad maps under their paired footprint owner), `parts_shrink` deleted
+children surface as per-record delete entries plus the `current_part_id`
+adjustment field; deletes ALWAYS expand (component scalar before-values
+plus every child as its own delete entry; never counts-only); library ops
+(fonts, image assets by hash/length — bodies never render —, alias
+add/remove) each appear as entries; `allocated_ids` lists every non-empty
+`unique_id` of each created after-state (the same field-name convention
+`mask_unique_ids` normalizes). NO heuristics — exact indexed diff only;
+both old/new indices retained wherever the plan embeds the state to
+recover them (library-level alias ops carry none — see deviations,
+finding B-7). Entry elision is VERIFIED, never assumed (finding B-9):
+an alias-add subsumed by a created component's Create expansion is
+checked against the embedded after-state, and a creation's paired
+content replacement is checked payload-identical before being elided —
+violations are `PlanError::InvalidPlan`, mirroring apply's cross-checks.
+Field values are typed serde serializations of the projection views (the
+views gained `Serialize` derives), superseding the Debug-string
+`scalar_changes()` surface for reporting (that API is retained).
+`render_plan_report` is the plain-text renderer for tests/example use; no
+CLI wiring (step 5). Known
+non-embedded values: an `ImageAssetRemove`/`ImageAssetReplace` prior body
+is not in the plan (the store is whole-file-hash protected), so those
+entries carry the exact store slot, not a before body.
+
+### Format-side additions (`altium-format`)
+
+- `ComponentStatePayload::component_view() -> SchLibComponentSnapshot`
+  (`schlib/snapshot/state.rs`): report/inspection projection bound to an
+  EMPTY captured reference namespace — the same child/scalar typed views,
+  captured-namespace projections empty, and installation impossible (any
+  install path rejects the context drift; tested). Part of the ratified
+  versioned payload contract.
+- `Serialize` derives (serialize-only, no `Deserialize`) on the public view
+  types (`SchOwnerGroup`, `SchPartSwapGroup`, `SchPartView`, `SchPinView`,
+  `SchParameterView`, `SchGraphicView`, `SchGraphicDetail`,
+  `SchFootprintMapsView`, `SchFootprintMapView`, `SchPinPadMapView`) to
+  serve the report's typed field rendering.
+
+### Address unification (F-finding-4 discharge)
+
+`crate::address` is now CONSUMED: apply resolves every decoded component
+patch address through `ComponentIndex::resolve` (deletes against the input
+snapshot, replacements against the intermediate). Direction decision for
+the owner-group mappings: NEITHER delegates — delegation in either
+direction would change shipped step-2 semantics (positional's raw-owner-id
+matching must keep selecting pre-growth `OutOfRange(n)` members;
+address resolution must keep rejecting parts beyond effective). Instead
+the anticipated visibility restructuring landed (`positional` is
+`pub(crate)`; `group_member`/`component_scope_pins_target`/
+`component_scope_graphics_target` and address.rs's
+`pin_owner_group`/`graphic_owner_group` are `pub(crate)`), and the
+cross-module equivalence test
+`address::tests::owner_group_mappings_agree_with_positional_raw_id_matching`
+pins the two implementations over the owner × effective-count × group
+matrix (component scope and every part owner; effective 1..=4; groups
+incl. `PartIndependent`, `SharedPins`, in/over-range `Part(n)`, and
+`OutOfRange` ids): membership under positional's raw-id predicate equals
+exact-`SchOwnerGroup` equality PLUS exactly the `OutOfRange(target)`
+pre-growth allowance — asserted as the ONLY divergence — with the
+component-scope target computations checked equal (incl. created
+components and the multi-part graphics rejection on both sides), and
+beyond-effective parts shown unreachable through address resolution. The
+address.rs module docs record the reconciliation.
+
+### Tests (fixture-free) and corpus evidence
+
+- `apply.rs`: end-to-end no-op / create / update / delete plan→apply with
+  save/reopen equality and replan-empty; in-place apply; alias+content on
+  one component (the two-step reconstruction); stale-input matrix — spec
+  source edited, transitive import edited, target byte-changed,
+  expected-absent output occupied, image bundle changed, unix symlink
+  retarget (byte-identical twin ⇒ `PathResolutionChanged`), plan-file
+  payload tamper caught by before-equality (valid-but-different state) or
+  by strict decode (contract-breaking tamper); wrong-direction rejection;
+  reordering-patch lowering rejection.
+- `planner.rs`: real spec files (root + import) planned against a real
+  library in both output modes, manifest role/precondition assertions,
+  recorded scope summary, apply + replan-with-exit-0, and the 0/2/1
+  exit-code mapping incl. `plan_exit_code` on `Err`.
+- `report.rs`: delete expansion (component + children, old indices, before
+  values), field-level before/after pairs (description,
+  `effective_part_count` from the parts shrink), created-component
+  expansion with recovered final index, `allocated_ids` from created
+  after-states, summary/entry-count agreement, renderer content, report
+  purity (derive twice ⇒ identical), and the case-respelled-parameter
+  pairing regression
+  (`case_respelled_parameter_reports_as_replace_not_delete_create`).
+- `altium-format` `state.rs`: `component_view` projection equality against
+  live snapshots over the collection zoo + install-rejection.
+- `check_schlib_snapshots.rs` full-circle stage per corpus file:
+  programmatic intent → plan against a COPY of the real library →
+  serialize plan to disk → re-read + strict decode → `apply_saved_plan` →
+  save/reopen equality + replan-empty + exact report entry counts; then
+  one byte appended to the TARGET file asserting the manifest content-hash
+  rejection — an input-drift check, not a plan-file tamper (plan-payload
+  tampering is covered by the fixture-free apply unit tests), so the key
+  is named accordingly (review finding B-6). New enforced JSON fields:
+  `plan_full_circle_applied`, `plan_full_circle_replan_empty`,
+  `plan_report_entries_exact`, `plan_target_drift_rejected`.
+
+### Deviations / notes within the memo's latitude
+
+- Memo §2's "install after-states + library ops as one `SchLibEdit`
+  batch" is implemented as the D1 two-step (one library-edit `SchLibEdit`,
+  then one content `SchLibEdit` of `ReplaceWithState`s): a single batch is
+  IMPOSSIBLE whenever a plan both replaces a component's content and edits
+  its aliases, because `ReplaceWithState` requires the payload's alias set
+  to equal the pre-alias-op slot's (the increment-A reconstruction note is
+  the more specific, later authority and prescribes exactly this order).
+- The canonical-sequence restriction (`UnrepresentablePatch`) narrows what
+  can be LOWERED (not what `apply_in_memory` executes); it is the honest
+  fail-fast consequence of the increment-A schema recording no keep
+  permutation, surfaced at planning.
+- `AppliedPlan.destination` is the recomputed canonical path (identical to
+  the recorded one by the resolution check).
+- The report's `ReportCollection` display vocabulary extends the plan's
+  eight collection kinds with `Fonts`/`ImageAssets` so library-namespace
+  ops have labeled entries; this is report-local display data, not plan
+  schema.
+- Report-model micro-deviations from memo §3, deliberate compile-slice
+  simplifications (review finding B-3): (a) the `PlanReport` header carries
+  domain/direction/schema versions but not the memo's "plan hashes
+  summary" — artifact hash values render as the precondition kind
+  (`"hash"`/`"absent"`) only; (b) summary rows are keyed
+  `(collection, op)`, not the memo's `(artifact, collection_kind, op)`;
+  (c) `ChangeAddress` has no `artifact` member. All three collapse
+  benignly for compile plans, which write exactly one artifact. Increment
+  C's dump-direction reports (per-source-file entries) MUST revisit these
+  and add the per-artifact dimension.
+- Library-level alias entries (`AliasAdd`/`AliasRemove` on kept
+  components) carry `old_index`/`new_index` = `None` (review finding B-7):
+  the v1 plan schema embeds no component state for alias-only ops, so the
+  slot's alias position is unrecoverable from the plan. For a component
+  that is BOTH alias-edited and content-replaced, the Replace expansion's
+  keyed alias diff is empty by construction — the embedded before payload
+  is the post-alias-op INTERMEDIATE state, so before == after aliases —
+  and the alias change is visible exactly once, through the index-less
+  library-op entry. Every executable change still appears in expanded
+  output; only the index annotation is missing on these entries.
+
+### Increment-B independent review — findings resolution (2026-09-18)
+
+Eleven findings from the independent completeness review (three of them the
+same corpus-observation issue), each verified against the code before
+acting:
+
+1. **[fixed — major, B-1] Report paired parameters by exact name; the
+   planner pairs case-insensitively.** Confirmed: elaboration pairs
+   parameters through the native ordinal case-insensitive
+   `parameter_key_fold` (elaborate.rs, per `GetParameterByName`
+   OrdinalIgnoreCase) and rewrites the stored name to the authored
+   spelling, so a case-only respelling plans as ONE Replace — but
+   `report()` paired by exact name and presented it as delete + create.
+   Fixed: `parameter_key_fold` is now `pub(crate)` (re-exported from
+   `schlib`), the report's Parameters collection pairs by
+   `(fold(name), occurrence)` with exact names kept inside the field
+   values so the respelling surfaces as a `name` before/after diff.
+   Aliases and footprints keep exact pairing (matching the planner).
+   Regression test
+   `case_respelled_parameter_reports_as_replace_not_delete_create`.
+2. **[fixed — minor, B-9] `report()` silently elided ops on unverified
+   subsumption assumptions.** Confirmed: the alias-add-on-created skip did
+   not verify the created after-state carries the alias (apply cross-checks
+   this; report did not), and the created-component Replace skip did not
+   verify the paired payloads are identical. Both now fail fast with
+   `PlanError::InvalidPlan` (mirroring apply's checks) before eliding —
+   a hand-crafted plan violating either assumption can no longer make an
+   executable op disappear from the report.
+3. **[fixed — minor, B-10] Dead conditional in the image-asset field
+   builder.** Confirmed: both branches of the `side` closure returned
+   `(None, Some(value))`. Collapsed to a single construction with the
+   explanatory comment (the plan does not embed a replaced asset's prior
+   body; the store is whole-file-hash protected).
+4. **[fixed — minor, B-6] `plan_tamper_rejected` tested target-file
+   drift, not plan tampering.** Confirmed: the corpus stage appends one
+   byte to the TARGET copy and asserts the manifest content-hash
+   rejection. Renamed to `plan_target_drift_rejected` (example field,
+   enforcement list, docs); plan-payload tampering remains covered by the
+   fixture-free apply unit test
+   `stale_target_expected_absent_and_payload_tamper_are_rejected`.
+5. **[recorded — minor, B-3] Unrecorded report-model micro-deviations
+   from memo §3.** Confirmed (no artifact member on `ChangeAddress`,
+   `(collection, op)` summary keys, no plan-hashes header summary); now
+   recorded in the deviations list above as deliberate compile-slice
+   simplifications with an explicit increment-C revisit obligation.
+6. **[recorded — minor, B-7] Index-less library-level alias entries.**
+   Confirmed; recorded in the deviations list above (including the
+   intermediate-payload reason the component-level alias diff is empty
+   for replace+alias plans).
+7. **[recorded — minor, B-2] Wild-clone `FromState` planning rejection is
+   structural, not directly tested.** Confirmed: no test lowers a clone of
+   a genuinely wild component. The rejection is guaranteed structurally by
+   the lowering-time dry run (`compile_from_schlib_patch` executes
+   `execute_compile_patches` against the input snapshot; a wild clone's
+   after-payload fails the strict `FromState` install inside the dry run,
+   and the error propagates as the planning error), but no direct test
+   exercises it because wild states are NOT constructible through the
+   public `altium-sync` API (D1 validation forbids building them; see the
+   elaborate.rs test note on wild loaded state) and fixture-gated suites
+   are out of bounds for this pass. Recorded as a known test gap: the
+   first fixture-run pass that identifies a genuinely wild corpus
+   component should add the direct rejection test.
+8. **[resolved — major, B-corpus (three findings)] The final corpus gate
+   was recorded as passing without being observed at the final code
+   state.** Confirmed: the implementing session's last corpus re-run (after
+   adding the lowering-time dry run) completed only
+   lucashudson-Connectors + ICs before the session ended, yet this
+   worklog and STATUS.md recorded an unqualified 56/32/135 pass —
+   violating the "report verification honestly" rule. The claim itself
+   was true for that state: the independent review re-ran the verbatim
+   gate to completion there (exit 0, all keys true for 56/32/135). This
+   fix pass re-ran the gate after its own edits but was itself forced to
+   report before the STM32F4 line completed — the verification section
+   below records the partial observation honestly and the gate must be
+   re-run to completion before merge. The provenance is recorded here so
+   the verification section's claims stay auditable.
+9. **[no change — minor, B-11] Implementer report said "+ 2 tests" in
+   `state.rs`; the diff adds one test function covering both behaviors.**
+   The repo documents (this worklog, STATUS.md) already state it
+   correctly ("490 + component_view"); the miscount existed only in the
+   session report.
+
+### Verification (2026-09-18, all verbatim, re-run after the review-fix edits)
+
+- `cargo test -p altium-format --lib` — 491 passed (490 + component_view).
+- `cargo test -p altium-sync` — 76 passed (61 increment-A + 15: 10 apply,
+  2 planner, 2 report, 1 address equivalence).
+- `cargo test -p altium-spec-lang` — 362 passed (unchanged).
+- `cargo test -p altium-format-spec` — 168 passed (unchanged).
+- `cargo check -p altium-cli` — clean.
+- `cargo fmt --check -p altium-format -p altium-sync` — clean.
+- `cargo check -p altium-sync` — zero warnings.
+- Corpus gate: `cargo run -p altium-sync --example check_schlib_snapshots
+  -- data/schlib/lucashudson-Connectors.SchLib data/schlib/ICs.SchLib
+  data/schlib/arthurbenemann-STM32F4.SchLib` — PARTIALLY observed at this
+  final state: lucashudson-Connectors (56) and ICs (32) completed with
+  every check true incl. `plan_full_circle_applied`,
+  `plan_full_circle_replan_empty`, `plan_report_entries_exact`,
+  `plan_target_drift_rejected`; the arthurbenemann-STM32F4 (135) line was
+  still executing when this fix session was forced to report and has NOT
+  been observed at this state. (The independent review observed the full
+  56/32/135 pass at exit 0 on the pre-fix increment-B state; this pass's
+  edits touch only report pairing/fail-fast checks, the corpus key
+  rename, and one test.) The verbatim gate MUST be re-run to completion
+  and this line updated before merge.
+
+### Handoffs
+
+- Step 4 wraps `apply_saved_plan`'s save with staging/journal/commit (the
+  boundary is documented in `apply.rs`); step 5 wires
+  `plan_compile_schlib`'s 0/2/1 exit codes and `render_plan_report`.
+- Increment C builds the dump-direction planner on the same container and
+  the now-consumed address vocabulary.

@@ -22,8 +22,11 @@
 //! - `render` — exact patch reporting and optional display-only pairing/grouping
 
 pub mod address;
+pub mod apply;
 pub mod image_asset;
 pub mod plan;
+pub mod planner;
+pub mod report;
 pub mod schlib;
 
 pub(crate) mod collection;

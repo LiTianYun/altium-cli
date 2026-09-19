@@ -89,6 +89,37 @@ impl ComponentStatePayload {
         self.index.aliases.iter().map(String::as_str)
     }
 
+    /// Report/inspection projection of the payload: a read-only component
+    /// view exposing the SAME typed projections the planner used
+    /// (`parameters()`, `pins()`, `graphics()`, `parts()`,
+    /// `footprint_maps()`, `aliases()`, and the scalar field projections),
+    /// bound to an EMPTY captured reference namespace. Part of the ratified
+    /// versioned payload contract (step-3 increment B): saved-plan reports
+    /// derive exact before/after detail from decoded payloads through these
+    /// views instead of re-opening any document.
+    ///
+    /// The captured-namespace projections (`captured_fonts`,
+    /// `captured_image_asset_names`, `captured_display_styles_present`) are
+    /// empty on this view — they describe a library, and this view has none.
+    /// The view can never install: every install path compares captured
+    /// reference contexts (or, for decoded payloads, goes through the
+    /// dedicated `ReplaceWithState`/`FromState` edit forms), so passing this
+    /// view to `replace_component` is rejected as context drift.
+    pub fn component_view(&self) -> SchLibComponentSnapshot {
+        SchLibComponentSnapshot {
+            component: self.component.clone(),
+            index: self.index.clone(),
+            reference_context: std::sync::Arc::new(super::ReferenceContext {
+                library_id: String::new(),
+                minor_version: 0,
+                fonts: Vec::new(),
+                display_settings: Default::default(),
+                aliases: Vec::new(),
+                image_assets: Vec::new(),
+            }),
+        }
+    }
+
     pub(in crate::schlib) fn into_parts(self) -> (SchLibComponent, SchLibComponentIndex) {
         (self.component, self.index)
     }
@@ -403,6 +434,49 @@ mod tests {
             restored, input,
             "FromState must reinstall the complete captured state without minting"
         );
+    }
+
+    #[test]
+    fn component_view_projects_like_a_live_snapshot_but_cannot_install() {
+        let input = zoo_snapshot();
+        for index in 0..input.component_count() {
+            let live = input.component(index).unwrap();
+            let payload = live.encode_state();
+            let json = serde_json::to_string(&payload).unwrap();
+            let decoded: ComponentStatePayload = serde_json::from_str(&json).unwrap();
+            let view = decoded.component_view();
+            // The same typed projections the planner uses agree with the
+            // live snapshot's, field for field.
+            assert_eq!(view.lib_reference(), live.lib_reference());
+            assert_eq!(view.description(), live.description());
+            assert_eq!(view.designator().unwrap(), live.designator().unwrap());
+            assert_eq!(view.component_kind(), live.component_kind());
+            assert_eq!(view.show_hidden_pins(), live.show_hidden_pins());
+            assert_eq!(
+                view.effective_part_count().unwrap(),
+                live.effective_part_count().unwrap()
+            );
+            assert_eq!(view.parts().unwrap(), live.parts().unwrap());
+            assert_eq!(view.pins(), live.pins());
+            assert_eq!(view.parameters().unwrap(), live.parameters().unwrap());
+            assert_eq!(view.graphics(), live.graphics());
+            assert_eq!(
+                view.footprint_maps().unwrap(),
+                live.footprint_maps().unwrap()
+            );
+            assert_eq!(
+                view.aliases().collect::<Vec<_>>(),
+                live.aliases().collect::<Vec<_>>()
+            );
+            // The captured-namespace projections are empty on this view.
+            assert_eq!(view.captured_fonts().len(), 0);
+            assert_eq!(view.captured_image_asset_names().len(), 0);
+            assert!(!view.captured_display_styles_present());
+        }
+        // The view can never install: context drift is rejected.
+        let view = input.component(0).unwrap().encode_state().component_view();
+        let error = input.replace_component(0, view).unwrap_err().to_string();
+        assert!(error.contains("namespace differs"), "{error}");
     }
 
     #[test]

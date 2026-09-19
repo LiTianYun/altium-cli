@@ -95,6 +95,53 @@ pub enum PlanError {
     },
     #[error("{context}: {detail}")]
     ImagePayload { context: String, detail: String },
+    #[error("{context}: {source}")]
+    Spec {
+        context: String,
+        #[source]
+        source: altium_spec_lang::SpecError,
+    },
+    #[error("{context}: {source}")]
+    ImageAsset {
+        context: String,
+        #[source]
+        source: crate::image_asset::ImageAssetError,
+    },
+    #[error("input artifact '{artifact}' changed during planning: {detail}; replan")]
+    ChangedDuringPlanning { artifact: String, detail: String },
+    #[error(
+        "the saved-plan schema cannot represent this patch: {detail}; \
+         restructure the intent (or split the change) so kept components \
+         stay in input order with creations appended"
+    )]
+    UnrepresentablePatch { detail: String },
+    #[error(
+        "manifest {role} entry '{declared}' now resolves to '{actual}' instead of the \
+         recorded '{expected}'; the path resolution changed since planning — replan"
+    )]
+    PathResolutionChanged {
+        role: String,
+        declared: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("precondition failed for {context}: {detail}; replan")]
+    PreconditionFailed { context: String, detail: String },
+    #[error(
+        "stale input: component '{component}': {detail}; the target's typed state no \
+         longer matches the plan's recorded before-state — replan"
+    )]
+    StaleComponentState { component: String, detail: String },
+    #[error("invalid saved plan: {detail}")]
+    InvalidPlan { detail: String },
+    #[error("apply verification failed: {context}: {detail}")]
+    ApplyVerification { context: String, detail: String },
+    #[error("{context}: {source}")]
+    Address {
+        context: String,
+        #[source]
+        source: crate::address::SchLibAddressError,
+    },
 }
 
 // ── Manifest ─────────────────────────────────────────────────────────────
@@ -148,7 +195,7 @@ pub struct PlanHash {
 }
 
 impl PlanHash {
-    fn of_bytes(bytes: &[u8]) -> Self {
+    pub(crate) fn of_bytes(bytes: &[u8]) -> Self {
         Self {
             algorithm: PLAN_HASH_ALGORITHM.to_owned(),
             hex: blake3::hash(bytes).to_hex().to_string(),
@@ -156,7 +203,7 @@ impl PlanHash {
         }
     }
 
-    fn verify_bytes(&self, bytes: &[u8], context: &str) -> Result<(), PlanError> {
+    pub(crate) fn verify_bytes(&self, bytes: &[u8], context: &str) -> Result<(), PlanError> {
         if self.algorithm != PLAN_HASH_ALGORITHM {
             return Err(PlanError::ImagePayload {
                 context: context.to_owned(),
@@ -230,7 +277,7 @@ pub struct PlanArtifact {
 /// that exist in any form (a dangling symlink is an occupying entry and
 /// fails resolution with context), canonicalized parent + file name for
 /// absent ones.
-fn canonicalize_plan_path(path: &Path) -> Result<PathBuf, PlanError> {
+pub(crate) fn canonicalize_plan_path(path: &Path) -> Result<PathBuf, PlanError> {
     let io = |context: String, source: std::io::Error| PlanError::Io { context, source };
     match std::fs::symlink_metadata(path) {
         Ok(_) => std::fs::canonicalize(path).map_err(|source| {
@@ -267,7 +314,7 @@ fn canonicalize_plan_path(path: &Path) -> Result<PathBuf, PlanError> {
     }
 }
 
-fn path_to_string(path: &Path, context: &str) -> Result<String, PlanError> {
+pub(crate) fn path_to_string(path: &Path, context: &str) -> Result<String, PlanError> {
     path.to_str()
         .map(str::to_owned)
         .ok_or_else(|| PlanError::Manifest {
@@ -342,7 +389,7 @@ fn build_manifest(
 
 /// The §S11 rejection set over already-canonicalized entries. Re-run
 /// verbatim on decode (and again at apply, where resolution is recomputed).
-fn check_manifest_collisions(
+pub(crate) fn check_manifest_collisions(
     entries: &[ManifestEntry],
     plan_canonical_path: Option<&str>,
 ) -> Result<(), PlanError> {
@@ -714,6 +761,18 @@ impl SavedPlan {
         plan_path: Option<&Path>,
         diagnostics: Vec<PlanDiagnostic>,
     ) -> Result<Self, PlanError> {
+        // The plan records deletions by input slot and creations in final
+        // order, but no keep permutation: only the canonical sequence (kept
+        // input slots ascending, creations appended) is representable, and
+        // apply reconstructs exactly that shape. Anything else must fail
+        // here, at planning, never silently reorder at apply.
+        if !patch.component_sequence_is_canonical() {
+            return Err(PlanError::UnrepresentablePatch {
+                detail: "the patch reorders kept components (or interleaves creations \
+                         between kept slots)"
+                    .to_owned(),
+            });
+        }
         let manifest = build_manifest(artifacts, plan_path)?;
 
         // Library-namespace ops in D1 application order.
@@ -831,7 +890,7 @@ impl SavedPlan {
             });
         }
 
-        Ok(Self {
+        let plan = Self {
             schema_version: PLAN_SCHEMA_VERSION,
             state_format_version: SCHLIB_STATE_FORMAT_VERSION,
             domain: PlanDomain::Schlib,
@@ -843,7 +902,25 @@ impl SavedPlan {
                 components,
             },
             diagnostics,
-        })
+        };
+
+        // Lowering-time DRY RUN of the apply reconstruction: every emitted
+        // plan must be executable and reproduce the reviewed result exactly.
+        // This is the planning-time rejection the increment-A review
+        // required for states apply's strict install forms would refuse
+        // (e.g. a `FromState` of a cloned WILD component — its dangling
+        // references fail here with the install's own message), and it
+        // pins the reconstruction (membership, alias-op subsumption,
+        // two-step order) to the reviewed result for every plan.
+        let executed = crate::apply::execute_compile_patches(&plan, patch.input_snapshot())?;
+        if &executed.result != patch.result_snapshot() {
+            return Err(PlanError::UnrepresentablePatch {
+                detail: "the plan's reconstructed execution does not reproduce the reviewed \
+                         result"
+                    .to_owned(),
+            });
+        }
+        Ok(plan)
     }
 
     /// Deterministic compact JSON emission: a pure function of the plan

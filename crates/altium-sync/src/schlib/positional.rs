@@ -154,7 +154,11 @@ fn managed<T>(collection: &Collection<T>) -> bool {
 /// Matching is by RAW owner id so a pre-growth projection (where a future
 /// part slot still classifies `OutOfRange`) selects the same members the
 /// post-growth projection will.
-fn group_member(group: SchOwnerGroup, target: i32) -> bool {
+///
+/// `pub(crate)` for the cross-module equivalence test in `crate::address`
+/// (step-3 discharge of the F-finding-4 obligation): the two owner-group
+/// mappings stay independent implementations, pinned together by that test.
+pub(crate) fn group_member(group: SchOwnerGroup, target: i32) -> bool {
     match group {
         SchOwnerGroup::SharedPins => target == 0,
         SchOwnerGroup::Part(n) | SchOwnerGroup::OutOfRange(n) => n == target,
@@ -306,7 +310,8 @@ pub(super) fn resolve_parts_structure(
 
 // ── Scope targeting ─────────────────────────────────────────────────────────
 
-fn component_scope_pins_target(
+/// `pub(crate)` for the cross-module equivalence test in `crate::address`.
+pub(crate) fn component_scope_pins_target(
     owner: &str,
     destination_effective: i32,
     resulting_effective: i32,
@@ -334,7 +339,8 @@ fn component_scope_pins_target(
     Ok(if resulting_multi { 0 } else { 1 })
 }
 
-fn component_scope_graphics_target(
+/// `pub(crate)` for the cross-module equivalence test in `crate::address`.
+pub(crate) fn component_scope_graphics_target(
     owner: &str,
     destination_effective: i32,
     resulting_effective: i32,

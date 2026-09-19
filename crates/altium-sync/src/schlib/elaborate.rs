@@ -191,7 +191,11 @@ fn validate_scope(
 /// SchDataContainer.cs:633-647), approximated by per-character simple
 /// uppercase (characters whose uppercasing expands to multiple characters
 /// stay themselves, matching the ordinal per-code-unit fold).
-fn parameter_key_fold(name: &str) -> String {
+///
+/// `pub(crate)` because the plan report (`crate::report`) must pair
+/// parameters by the SAME equivalence the planner used — exact-name pairing
+/// would present a case-only respelling as delete + create.
+pub(crate) fn parameter_key_fold(name: &str) -> String {
     name.chars()
         .map(|c| {
             let mut upper = c.to_uppercase();
