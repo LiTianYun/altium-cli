@@ -4,6 +4,7 @@ use crate::InvalidEnumValue;
 
 /// Component classification, shared between schematic and PCB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ComponentKind {
@@ -52,6 +53,7 @@ impl fmt::Display for ComponentKind {
 
 /// Rotation in 90-degree increments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum RotationBy90 {
@@ -97,6 +99,7 @@ impl fmt::Display for RotationBy90 {
 
 /// Text auto-position (0-9), shared between schematic and PCB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum TextAutoPosition {
@@ -154,6 +157,7 @@ impl fmt::Display for TextAutoPosition {
 
 /// Measurement unit preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum Unit {

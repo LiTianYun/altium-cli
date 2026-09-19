@@ -763,6 +763,30 @@ impl SchLibPatch {
         Ok(self.result.clone())
     }
 
+    // ── Saved-plan lowering surface (crate-internal) ─────────────────────
+
+    /// The complete typed input snapshot the patch was planned against.
+    pub(crate) fn input_snapshot(&self) -> &SchLibSnapshot {
+        &self.input
+    }
+    /// The cached reviewed result (borrowed; see [`Self::resulting_snapshot`]).
+    pub(crate) fn result_snapshot(&self) -> &SchLibSnapshot {
+        &self.result
+    }
+    /// Final-sequence positions of the components this patch creates, in
+    /// final order (the after-state of each lives in the cached result).
+    pub(crate) fn created_component_positions(&self) -> Vec<usize> {
+        self.pending
+            .component_slots
+            .iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(position, slot)| {
+                matches!(slot, SchLibPatchSlot::New(_)).then_some(position)
+            })
+            .collect()
+    }
+
     /// Execute the reviewed result only after verifying complete typed
     /// before-state and every captured image-asset input. The result was
     /// validated at construction; it is materialized before the swap.

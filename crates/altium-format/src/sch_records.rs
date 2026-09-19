@@ -168,7 +168,8 @@ pub(crate) fn encode_swap_id_part_and_part_pin(part: &str, part_pin: &str) -> St
 
 /// Base fields shared by every schematic record: ownership, part/display mode, locking.
 /// Field order matches Altium's ExportDataObject + ExportGraphicalObject serialization order.
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchPrimitiveBase {
     #[param(key = OWNER_INDEX, default = 0i32)]
     pub owner_index: i32,
@@ -193,7 +194,8 @@ pub(crate) struct SchPrimitiveBase {
 }
 
 /// Extends `SchPrimitiveBase` with location and color fields for graphical objects.
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchGraphicalBase {
     #[param(flatten)]
     pub primitive: SchPrimitiveBase,
@@ -210,7 +212,8 @@ pub(crate) struct SchGraphicalBase {
 /// Text positioning override data for a pin's name or designator label.
 ///
 /// Populated from the `PinTextData` sidecar stream (Milestone 9).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PinTextPositioning {
     pub position_mode_custom: bool,
     pub rotation_anchor_component: bool,
@@ -251,7 +254,8 @@ fn decode_pin_conglomerate(byte: u8) -> Result<PinConglomerateFields> {
 ///
 /// Pins use a variable-length binary format with length-prefixed ASCII string
 /// fields. Sidecar fields are zero-initialized here and populated in Milestone 9.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchPin {
     // Decoded from binary
     pub owner_index: i32,
@@ -649,7 +653,8 @@ pub(crate) fn parse_text_pin(params: &mut ParameterCollection) -> Result<SchPin>
 ///
 /// Parsed from the first block of each component's `/<key>/Data` stream.
 /// Fields follow the invariant order defined in `FileFormatV5.cs`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchComponent {
     pub lib_reference: String,
     pub component_description: String,
@@ -853,7 +858,8 @@ pub(crate) fn parse_component_record(
 ///
 /// Field order matches Altium's `ExportLine` (FileFormatV5.cs:1805-1821):
 /// ExportGraphicalObject, Location, Corner, LineWidth, LineStyle, Color, LineStyleExt, UniqueID
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchLine {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -878,7 +884,8 @@ pub(crate) struct SchLine {
 /// Field order matches Altium's `ExportRectangle` (FileFormatV5.cs:1620-1637):
 /// ExportGraphicalObject, Location, Corner, LineStyleExt, LineWidth, Color, AreaColor,
 /// IsSolid, Transparent, UniqueID
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchRectangle {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -907,7 +914,8 @@ pub(crate) struct SchRectangle {
 /// Field order matches Altium's `ExportRoundRectangle` (FileFormatV5.cs:1680-1697):
 /// ExportGraphicalObject, Location, Corner, CornerXRadius, CornerYRadius, LineWidth,
 /// Color, AreaColor, IsSolid, UniqueID
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchRoundRectangle {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -935,7 +943,8 @@ pub(crate) struct SchRoundRectangle {
 ///
 /// Field order matches Altium's `ExportArc` (FileFormatV5.cs:177-191):
 /// ExportGraphicalObject, Location, Radius, LineWidth, StartAngle, EndAngle, Color, UniqueID
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchArc {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -960,7 +969,8 @@ pub(crate) struct SchArc {
 /// Field order matches Altium's `ExportEllipticalArc` (FileFormatV5.cs:225-240):
 /// ExportGraphicalObject, Location, Radius, SecondaryRadius, LineWidth, StartAngle,
 /// EndAngle, Color, UniqueID
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchEllipticalArc {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -987,7 +997,8 @@ pub(crate) struct SchEllipticalArc {
 /// Field order matches Altium's `ExportEllipse` (FileFormatV5.cs:329-345):
 /// ExportGraphicalObject, Location, Radius, SecondaryRadius, LineWidth, Color, AreaColor,
 /// IsSolid, Transparent, UniqueID
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchEllipse {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1016,7 +1027,8 @@ pub(crate) struct SchEllipse {
 /// Field order matches Altium's `ExportPie` (FileFormatV5.cs:277-292):
 /// ExportGraphicalObject, Location, Radius, LineWidth, StartAngle, EndAngle,
 /// Color, AreaColor, IsSolid
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchPie {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1043,7 +1055,8 @@ pub(crate) struct SchPie {
 /// Field order matches Altium's `ExportPolyline` (FileFormatV5.cs:1175-1191):
 /// ExportGraphicalObject, LineWidth, LineStyle, StartLineShape, EndLineShape,
 /// LineShapeSize, Color, Vertices, LineStyleExt, UniqueID
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchPolyline {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1071,7 +1084,8 @@ pub(crate) struct SchPolyline {
 ///
 /// Field order matches Altium's `ExportPolygon` (FileFormatV5.cs:1133-1146):
 /// ExportGraphicalObject, LineWidth, Color, AreaColor, IsSolid, Transparent, Vertices, UniqueID
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchPolygon {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1095,7 +1109,8 @@ pub(crate) struct SchPolygon {
 ///
 /// Field order matches Altium's `ExportBezier` (FileFormatV5.cs:1225-1235):
 /// ExportGraphicalObject, LineWidth, Color, Vertices, UniqueID
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchBezier {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1114,7 +1129,8 @@ pub(crate) struct SchBezier {
 /// Field order matches Altium's `ExportImage` (FileFormatV5.cs:1740-1758):
 /// ExportGraphicalObject, Location, Corner, Orientation, LineWidth, Color,
 /// IsSolid, KeepAspect, EmbedImage, FileName, UniqueID
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchImage {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1145,7 +1161,8 @@ pub(crate) struct SchImage {
 /// A text label (RECORD=4).
 ///
 /// Field order matches Altium's `ExportLabel` (FileFormatV5.cs:868-886).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchLabel {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1173,7 +1190,8 @@ pub(crate) struct SchLabel {
 ///
 /// Field order matches Altium's `ExportSymbol` (FileFormatV5.cs):
 /// ExportGraphicalObject, Symbol, Location, ScaleFactor, Orientation, LineWidth, Color, Mirror
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchSymbol {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1196,7 +1214,8 @@ pub(crate) struct SchSymbol {
 /// A designator annotation (RECORD=34).
 ///
 /// Field order matches Altium's `ExportParameter` (FileFormatV5.cs:1339-1371).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchDesignator {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1250,7 +1269,8 @@ pub(crate) struct SchDesignator {
 /// determines the parameter's role (e.g., `"Comment"`, `"Value"`).
 ///
 /// Field order matches Altium's `ExportParameter` (FileFormatV5.cs:1339-1371).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchParameter {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1304,7 +1324,8 @@ pub(crate) struct SchParameter {
 /// ExportGraphicalObject, Location, Corner, LineWidth, Color, AreaColor, TextColor,
 /// FontID, IsSolid, ShowBorder, Alignment, WordWrap, ClipToRect, Text, TextMargin,
 /// Transparent, UniqueID
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchTextFrame {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1345,14 +1366,16 @@ pub(crate) struct SchTextFrame {
 // ── Implementation/model records ─────────────────────────────────────────────
 
 /// Container for component implementation (footprint) entries (RECORD=44).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchImplementationList {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
 }
 
 /// A single datafile link within a SchImplementation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ModelDatafileLink {
     pub location: String,
     pub entity_name: String,
@@ -1367,7 +1390,8 @@ pub(crate) struct ModelDatafileLink {
 /// ModelDatafile{i}, ModelDatafileEntity{i}, ModelDatafileKind{i},
 /// IsCurrent, DatalinksLocked, DatabaseDatalinksLocked, IntegratedModel,
 /// DatabaseModel, UniqueID
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchImplementation {
     pub base: SchPrimitiveBase,
     pub description: String,
@@ -1472,7 +1496,8 @@ impl SchImplementation {
 }
 
 /// Container for pin-to-pad mapping entries (RECORD=46).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchImplementationMap {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1485,7 +1510,8 @@ pub(crate) struct SchImplementationMap {
 /// The `des_intf` field holds the designator interface string (the pin name
 /// that this mapping applies to). The indexed `DesImp{i}` values are stored
 /// as a `Vec<String>`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchMapDefiner {
     pub base: SchPrimitiveBase,
     pub des_intf: String,
@@ -1523,7 +1549,8 @@ impl SchMapDefiner {
 }
 
 /// A parameter list container (RECORD=48).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchParameterList {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1532,7 +1559,8 @@ pub(crate) struct SchParameterList {
 /// A schematic sheet record (RECORD=31).
 ///
 /// Carries the sheet font table and document display settings.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchSheet {
     pub base: SchPrimitiveBase,
     pub fonts: Vec<SchFont>,
@@ -1657,7 +1685,8 @@ impl SchSheet {
 }
 
 /// Schematic template record (RECORD=39).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchTemplate {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1666,7 +1695,8 @@ pub(crate) struct SchTemplate {
 }
 
 /// Electrical wire record (RECORD=27).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchWire {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1689,7 +1719,8 @@ pub(crate) struct SchWire {
 }
 
 /// Bus record (RECORD=26).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchBus {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1710,7 +1741,8 @@ pub(crate) struct SchBus {
 }
 
 /// Net label record (RECORD=25).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchNetLabel {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1733,7 +1765,8 @@ pub(crate) struct SchNetLabel {
 }
 
 /// Power object record (RECORD=17).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchPowerObject {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1760,7 +1793,8 @@ pub(crate) struct SchPowerObject {
 }
 
 /// Port record (RECORD=18).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchPort {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1801,7 +1835,8 @@ pub(crate) struct SchPort {
 }
 
 /// No-connect marker record (RECORD=22).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchNoConnect {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1826,7 +1861,8 @@ pub(crate) struct SchNoConnect {
 }
 
 /// Sheet name text record (RECORD=32).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchSheetName {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1859,7 +1895,8 @@ pub(crate) struct SchSheetName {
 }
 
 /// Sheet filename text record (RECORD=33).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchSheetFileName {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1892,7 +1929,8 @@ pub(crate) struct SchSheetFileName {
 }
 
 /// Junction record (RECORD=29).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchJunction {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1909,7 +1947,8 @@ pub(crate) struct SchJunction {
 }
 
 /// Sheet symbol record (RECORD=15).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchSheetSymbol {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -1956,7 +1995,8 @@ pub(crate) struct SchSheetSymbol {
 /// Manual parsing required because `distance_from_top` uses a non-standard
 /// fractional encoding (1_000_000 divisor with `_Frac`/`_Frac1` variants)
 /// that the derive macro's `#[param(coord)]` cannot handle.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchSheetEntry {
     pub base: SchPrimitiveBase,
     pub location: CoordPoint,
@@ -2064,7 +2104,8 @@ impl SchSheetEntry {
 }
 
 /// Bus entry record (RECORD=37).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchBusEntry {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -2081,7 +2122,8 @@ pub(crate) struct SchBusEntry {
 }
 
 /// Parameter set record (RECORD=43).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchParameterSet {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -2102,7 +2144,8 @@ pub(crate) struct SchParameterSet {
 /// Note record (RECORD=209).
 ///
 /// Field order matches Altium's `ExportNote` (FileFormatV5.cs:2372-2397).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchNote {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -2143,7 +2186,8 @@ pub(crate) struct SchNote {
 }
 
 /// Probe record (RECORD=210).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchProbe {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -2160,7 +2204,8 @@ pub(crate) struct SchProbe {
 }
 
 /// Compile mask record (RECORD=211).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchCompileMask {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -2181,7 +2226,8 @@ pub(crate) struct SchCompileMask {
 }
 
 /// Harness connector record (RECORD=215).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchHarnessConnector {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -2206,7 +2252,8 @@ pub(crate) struct SchHarnessConnector {
 }
 
 /// Blanket/dashed rectangle record (RECORD=225).
-#[derive(FromParams, ToParams, Debug, Clone, PartialEq)]
+#[derive(FromParams, ToParams, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchBlanket {
     #[param(flatten)]
     pub base: SchPrimitiveBase,
@@ -2237,7 +2284,8 @@ pub(crate) struct SchBlanket {
 /// All implemented schematic record variants.
 ///
 /// Variants are added incrementally as record types are implemented.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) enum SchRecord {
     Sheet(SchSheet),
     Template(SchTemplate),
@@ -2353,6 +2401,78 @@ impl SchRecord {
             Self::HighLevelCodeEntry(v) => Some(&v.unique_id),
             Self::HighLevelCodeName(v) => Some(&v.unique_id),
             Self::HighLevelCodeFileName(v) => Some(&v.unique_id),
+        }
+    }
+
+    /// Appends every font-table id this record references to `out`
+    /// (mutation-boundary validation support). The match is exhaustive on
+    /// purpose: adding a record variant forces a decision here, so a new
+    /// font-bearing record can never silently escape reference validation.
+    pub(crate) fn collect_font_references(&self, out: &mut Vec<i32>) {
+        match self {
+            // Variants WITHOUT font references. `Sheet` carries the font
+            // TABLE (definitions), not a reference.
+            Self::Sheet(_)
+            | Self::Template(_)
+            | Self::Wire(_)
+            | Self::Bus(_)
+            | Self::NoConnect(_)
+            | Self::Junction(_)
+            | Self::SheetSymbol(_)
+            | Self::BusEntry(_)
+            | Self::ParameterSet(_)
+            | Self::Probe(_)
+            | Self::CompileMask(_)
+            | Self::Blanket(_)
+            | Self::Component(_)
+            | Self::Symbol(_)
+            | Self::Line(_)
+            | Self::Rectangle(_)
+            | Self::RoundRectangle(_)
+            | Self::Arc(_)
+            | Self::EllipticalArc(_)
+            | Self::Ellipse(_)
+            | Self::Pie(_)
+            | Self::Polyline(_)
+            | Self::Polygon(_)
+            | Self::Bezier(_)
+            | Self::Image(_)
+            | Self::ImplementationList(_)
+            | Self::Implementation(_)
+            | Self::ImplementationMap(_)
+            | Self::MapDefiner(_)
+            | Self::ParameterList(_)
+            | Self::HarnessConnector(_)
+            | Self::SignalHarness(_)
+            | Self::HighLevelCodeSymbol(_) => {}
+
+            Self::NetLabel(v) => out.push(v.font_id),
+            Self::PowerObject(v) => out.push(v.font_id),
+            Self::Port(v) => out.push(v.font_id),
+            Self::SheetName(v) | Self::HarnessConnectorType(v) | Self::HighLevelCodeName(v) => {
+                out.push(v.font_id)
+            }
+            Self::SheetFileName(v) | Self::HighLevelCodeFileName(v) => out.push(v.font_id),
+            Self::SheetEntry(v) | Self::HarnessEntry(v) | Self::HighLevelCodeEntry(v) => {
+                out.push(v.text_font_id)
+            }
+            Self::Note(v) => out.push(v.font_id),
+            Self::Label(v) | Self::Hyperlink(v) => out.push(v.font_id),
+            Self::Designator(v) => out.push(v.font_id),
+            Self::Parameter(v) => out.push(v.font_id),
+            Self::TextFrame(v) => out.push(v.font_id),
+            Self::Pin(pin) => {
+                for positioning in [&pin.name_text_data, &pin.designator_text_data]
+                    .into_iter()
+                    .flatten()
+                {
+                    if positioning.font_mode_custom
+                        && let Some(id) = positioning.custom_font_id
+                    {
+                        out.push(i32::from(id));
+                    }
+                }
+            }
         }
     }
 
@@ -2534,7 +2654,8 @@ impl SchRecord {
 
 /// A single component entry in a SchLib file, holding its component record and
 /// all child records (pins, graphical primitives, text annotations, etc.).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchLibComponent {
     pub component: SchComponent,
     pub records: Vec<SchRecord>,

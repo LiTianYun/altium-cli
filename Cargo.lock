@@ -160,6 +160,7 @@ dependencies = [
  "altium-format",
  "altium-format-types",
  "altium-spec-lang",
+ "base64",
  "blake3",
  "indexmap",
  "proptest",

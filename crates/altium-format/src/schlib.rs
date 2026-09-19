@@ -2,13 +2,14 @@ mod ownership;
 mod snapshot;
 pub(crate) mod validation;
 pub use snapshot::{
-    SchAliasOp, SchChildBatch, SchCurrentPartIdAdjustment, SchFontAppend, SchFontEntryView,
-    SchFootprintEdit, SchFootprintInit, SchFootprintMapView, SchFootprintMapsView,
-    SchGraphicDetail, SchGraphicEdit, SchGraphicInit, SchGraphicShape, SchGraphicView,
-    SchImageAssetEdit, SchLibComponentEdit, SchLibComponentSnapshot, SchLibEdit, SchLibSnapshot,
-    SchNewComponent, SchOwnerGroup, SchParameterEdit, SchParameterInit, SchParameterView,
-    SchPartSwapGroup, SchPartView, SchPartsShrink, SchPinEdit, SchPinInit, SchPinPadMapInit,
-    SchPinPadMapView, SchPinView, SchRemovedPartChild,
+    ComponentStatePayload, SCHLIB_STATE_FORMAT_VERSION, SchAliasOp, SchChildBatch,
+    SchCurrentPartIdAdjustment, SchFontAppend, SchFontEntryView, SchFootprintEdit,
+    SchFootprintInit, SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail, SchGraphicEdit,
+    SchGraphicInit, SchGraphicShape, SchGraphicView, SchImageAssetEdit, SchLibComponentEdit,
+    SchLibComponentSnapshot, SchLibEdit, SchLibSnapshot, SchNewComponent, SchOwnerGroup,
+    SchParameterEdit, SchParameterInit, SchParameterView, SchPartSwapGroup, SchPartView,
+    SchPartsShrink, SchPinEdit, SchPinInit, SchPinPadMapInit, SchPinPadMapView, SchPinView,
+    SchRemovedPartChild,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -184,7 +185,8 @@ pub(crate) struct SchLibHeader {
     pub components: Vec<SchLibComponentIndex>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SchLibComponentIndex {
     pub lib_ref: String,
     pub description: String,

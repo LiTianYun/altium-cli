@@ -10,6 +10,7 @@ use crate::InvalidEnumValue;
 /// Maps RECORD=N integer values to their corresponding record types.
 /// No catch-all/unknown variant -- an unrecognized RECORD value is a parse error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(i32)]
 pub enum SchRecordType {
@@ -366,6 +367,8 @@ impl std::fmt::Display for SchRecordType {
 
 /// Font definition from SchSheet RECORD=31.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct SchFont {
     pub id: i32,      // 1-based index
     pub name: String, // e.g., "Times New Roman"
@@ -379,6 +382,8 @@ pub struct SchFont {
 
 /// Indexed display style entry from SchLib FileHeader style table.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct SchDisplayStyle {
     pub id: i32, // 1-based index
     pub gradient_depth: Option<i32>,
@@ -406,6 +411,8 @@ pub struct SchDisplayStyle {
 /// Coord fields combine the integer part and `_Frac` companion into a single
 /// value: `raw = integer * 100_000 + frac`.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct SchDisplaySettings {
     // Grid settings
     pub snap_grid_on: Option<bool>,
@@ -457,6 +464,7 @@ pub struct SchDisplaySettings {
 
 /// Pin electrical type (0-7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum PinElectricalType {
@@ -503,6 +511,7 @@ pub type PinSymbol = IeeeSymbol;
 
 /// IEEE pin symbol types (0-36).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum IeeeSymbol {
@@ -604,6 +613,7 @@ impl std::fmt::Display for IeeeSymbol {
 
 /// VHDL formal type / std_logic state (0-8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum StdLogicState {
@@ -649,6 +659,7 @@ impl std::fmt::Display for StdLogicState {
 
 /// Pen/border width (0-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum PenWidth {
@@ -684,6 +695,7 @@ impl std::fmt::Display for PenWidth {
 
 /// Line style (0-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum LineStyle {
@@ -719,6 +731,7 @@ impl std::fmt::Display for LineStyle {
 
 /// Line endpoint shape (0-6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum LineShape {
@@ -764,6 +777,7 @@ impl std::fmt::Display for LineShape {
 /// Used by TextFrame and Note records (ALIGNMENT parameter).
 /// NOT the same as `TextJustification` (9 values, 0-8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum HorizontalAlign {
@@ -797,6 +811,7 @@ impl std::fmt::Display for HorizontalAlign {
 
 /// Text justification (0-8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum TextJustification {
@@ -842,6 +857,7 @@ impl std::fmt::Display for TextJustification {
 
 /// Power object visual style (0-10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum PowerObjectStyle {
@@ -885,6 +901,7 @@ impl TryFrom<u8> for PowerObjectStyle {
 
 /// Port arrow direction style (0-7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum PortArrowStyle {
@@ -922,6 +939,7 @@ impl TryFrom<u8> for PortArrowStyle {
 
 /// Port I/O direction (0-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum PortIoType {
@@ -951,6 +969,7 @@ impl TryFrom<u8> for PortIoType {
 
 /// Sheet size standard (0-17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum SheetStyle {
@@ -1008,6 +1027,7 @@ impl TryFrom<u8> for SheetStyle {
 
 /// Sheet orientation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum SheetOrientation {
@@ -1033,6 +1053,7 @@ impl TryFrom<u8> for SheetOrientation {
 
 /// Sheet border style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum SheetBorderStyle {
@@ -1061,6 +1082,7 @@ impl TryFrom<u8> for SheetBorderStyle {
 /// **Wire type:** u8
 /// **Used by:** Text (RECORD=17), TextFrame (RECORD=28)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum TextHorzAnchor {
@@ -1093,6 +1115,7 @@ impl TryFrom<u8> for TextHorzAnchor {
 /// **Wire type:** u8
 /// **Used by:** Text (RECORD=17), TextFrame (RECORD=28)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum TextVertAnchor {
@@ -1125,6 +1148,7 @@ impl TryFrom<u8> for TextVertAnchor {
 /// **Wire type:** u8
 /// **Used by:** Parameter (RECORD=41)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ParameterReadOnlyState {
@@ -1163,6 +1187,7 @@ impl std::fmt::Display for ParameterReadOnlyState {
 /// **Wire type:** u8
 /// **Used by:** Parameter (RECORD=41)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ParameterType {
@@ -1201,6 +1226,7 @@ impl std::fmt::Display for ParameterType {
 /// **Wire type:** u8
 /// **Used by:** ParameterSet (RECORD=43)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ParameterSetStyle {
@@ -1229,6 +1255,7 @@ impl TryFrom<u8> for ParameterSetStyle {
 /// **Wire type:** u8
 /// **Used by:** NoERC (RECORD=22)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum NoErcSymbol {
@@ -1263,6 +1290,7 @@ impl TryFrom<u8> for NoErcSymbol {
 /// **Wire type:** u8
 /// **Used by:** SheetEntry (RECORD=16), HarnessConnector (RECORD=215)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum LeftRightSide {
@@ -1295,6 +1323,7 @@ impl TryFrom<u8> for LeftRightSide {
 /// **Wire type:** u8
 /// **Used by:** SheetSymbol (RECORD=15)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum SheetSymbolType {
@@ -1325,6 +1354,7 @@ impl TryFrom<u8> for SheetSymbolType {
 /// **Wire type:** u8
 /// **Used by:** Sheet (RECORD=31)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum VisibleGridStyle {
@@ -1353,6 +1383,7 @@ impl TryFrom<u8> for VisibleGridStyle {
 /// **Wire type:** u8
 /// **Used by:** Sheet (RECORD=31)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum SheetReferenceZoneStyle {
@@ -1381,6 +1412,7 @@ impl TryFrom<u8> for SheetReferenceZoneStyle {
 /// **Wire type:** u8
 /// **Used by:** HarnessConnector (RECORD=215)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ConnectorKind {
@@ -1411,6 +1443,7 @@ impl TryFrom<u8> for ConnectorKind {
 /// **Wire type:** u8
 /// **Used by:** HarnessConnector (RECORD=215)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum ConnectorState {
@@ -1441,6 +1474,7 @@ impl TryFrom<u8> for ConnectorState {
 /// **Wire type:** u8
 /// **Used by:** HarnessCovering (RECORD=128)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum HarnessBrush {
@@ -1473,6 +1507,7 @@ impl TryFrom<u8> for HarnessBrush {
 /// **Wire type:** u8
 /// **Used by:** HarnessDocument
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum HarnessLengthUnit {
@@ -1507,6 +1542,7 @@ impl TryFrom<u8> for HarnessLengthUnit {
 /// **Wire type:** u8
 /// **Used by:** HarnessBundleSubLineData
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum HarnessWireLengthType {
@@ -1537,6 +1573,7 @@ impl TryFrom<u8> for HarnessWireLengthType {
 /// **Wire type:** u8
 /// **Used by:** AssociatedObjects (RECORD=131)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum HarnessCavityPartType {
@@ -1569,6 +1606,7 @@ impl TryFrom<u8> for HarnessCavityPartType {
 /// **Wire type:** u8
 /// **Used by:** HarnessLayoutConnectionPoint (RECORD=110)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum HarnessConnectionPointStyle {
@@ -1599,6 +1637,7 @@ impl TryFrom<u8> for HarnessConnectionPointStyle {
 /// **Wire type:** u8
 /// **Used by:** HarnessShield (RECORD=117)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum HarnessShieldStyle {
@@ -1627,6 +1666,7 @@ impl TryFrom<u8> for HarnessShieldStyle {
 /// **Wire type:** u8
 /// **Used by:** HarnessSplice (RECORD=108)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum HarnessSpliceStyle {

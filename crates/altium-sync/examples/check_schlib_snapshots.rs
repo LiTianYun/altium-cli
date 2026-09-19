@@ -23,6 +23,9 @@ use altium_spec_lang::{
         SchLibIntent,
     },
 };
+use altium_sync::plan::{
+    ManifestRole, PlanArtifact, PlanArtifactContents, PlanScope, SavedPlan, load_schlib_hashed,
+};
 use altium_sync::schlib::{ComponentPropertiesIntent, SchLibPatch};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -74,6 +77,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || result["intent_part_growth_equal"] != true
             || result["intent_part_growth_replan_empty"] != true
             || result["intent_part_removal_equal"] != true
+            || result["plan_payload_noop_equal"] != true
+            || result["plan_roundtrip_equal"] != true
+            || result["plan_deterministic"] != true
         {
             failures += 1;
         }
@@ -170,6 +176,13 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
     // save/reopen typed equality, and replan-empty.
     let intent_e2 = intent_e2_pass(SchLib::open(path)?, temp.path())?;
 
+    // Saved-plan pass (step-3 increment A): the §S7 hash-and-parse-same-
+    // bytes load, the payload round-trip law over every component
+    // (decode(encode(c)) installed via ReplaceWithState is a typed no-op),
+    // and saved-plan lowering with strict-decode equality plus byte
+    // determinism across two independent plannings.
+    let plan = plan_pass(path, temp.path())?;
+
     // Footprint structural pass (increment D2): per component, replace the
     // first footprint's description, add a probe footprint (with one pin-pad
     // map from an existing pin when possible), then remove it and restore the
@@ -230,6 +243,9 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
         "intent_part_growth_equal": intent_e2.part_growth_equal,
         "intent_part_growth_replan_empty": intent_e2.part_growth_replan_empty,
         "intent_part_removal_equal": intent_e2.part_removal_equal,
+        "plan_payload_noop_equal": plan.payload_noop_equal,
+        "plan_roundtrip_equal": plan.roundtrip_equal,
+        "plan_deterministic": plan.deterministic,
     }))
 }
 
@@ -1007,6 +1023,92 @@ fn footprint_structural_pass(
         projection_equal,
         non_pcblib_invariant,
         replaced_descriptions,
+    })
+}
+
+struct PlanOutcome {
+    payload_noop_equal: bool,
+    roundtrip_equal: bool,
+    deterministic: bool,
+}
+
+fn plan_pass(
+    path: &std::path::Path,
+    temp: &std::path::Path,
+) -> Result<PlanOutcome, Box<dyn std::error::Error>> {
+    // §S7: read once, hash and parse the same buffer.
+    let loaded = load_schlib_hashed(path)?;
+    let input = loaded.library.snapshot()?;
+
+    // Round-trip law: every component's encoded state decodes and installs
+    // as a typed no-op through ReplaceWithState (one batch edit).
+    let slots = (0..input.component_count())
+        .map(|index| {
+            let payload = input.component(index)?.encode_state();
+            let decoded = serde_json::from_str(&serde_json::to_string(&payload)?)?;
+            Ok(SchLibComponentEdit::ReplaceWithState(index, decoded))
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    let reinstalled = input.with_library_edit(SchLibEdit {
+        components: Some(slots),
+        ..Default::default()
+    })?;
+    let payload_noop_equal = reinstalled == input;
+
+    // Lowering + strict decode + determinism over a real content patch.
+    let build_patch = || {
+        SchLibPatch::descriptions(
+            &input,
+            (0..input.component_count()).map(|index| {
+                (
+                    index,
+                    FieldIntent::Set(Spanned::new(
+                        Some(format!("step3 plan probe {index}")),
+                        Span::new(0, 0),
+                    )),
+                )
+            }),
+        )
+    };
+    let artifacts = || {
+        vec![
+            PlanArtifact {
+                role: ManifestRole::TargetDocument,
+                declared_path: path.to_owned(),
+                contents: PlanArtifactContents::Bytes(loaded.bytes.clone()),
+            },
+            PlanArtifact {
+                role: ManifestRole::Destination,
+                declared_path: temp.join("plan-out.SchLib"),
+                contents: PlanArtifactContents::ExpectedAbsent,
+            },
+        ]
+    };
+    let plan_path = temp.join("plan.json");
+    let plan = SavedPlan::compile_from_schlib_patch(
+        &build_patch()?,
+        PlanScope::default(),
+        artifacts(),
+        Some(&plan_path),
+        Vec::new(),
+    )?;
+    let bytes = plan.to_json_bytes()?;
+    let roundtrip_equal = SavedPlan::from_json_bytes(&bytes)? == plan;
+    let second = SavedPlan::compile_from_schlib_patch(
+        &build_patch()?,
+        PlanScope::default(),
+        artifacts(),
+        Some(&plan_path),
+        Vec::new(),
+    )?;
+    // No components are created, so two plannings over identical inputs
+    // must be byte-identical (the determinism gate's strongest form).
+    let deterministic = second.to_json_bytes()? == bytes && plan.to_json_bytes()? == bytes;
+
+    Ok(PlanOutcome {
+        payload_noop_equal,
+        roundtrip_equal,
+        deterministic,
     })
 }
 

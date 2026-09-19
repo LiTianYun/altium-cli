@@ -145,6 +145,79 @@ save/reopen typed equality and empty replans, exit 0. Open questions queued
 for the user are collected in the step-2 closure section of
 [the step-2 worklog](docs/worklogs/next-children-2026-09-16.md).
 
+### NEXT.md step 3 — saved plans (in progress; increment A complete, 2026-09-18)
+
+Increment A of the step-3 saved-plan design
+([docs/worklogs/next-plans-2026-09-18.md](docs/worklogs/next-plans-2026-09-18.md);
+design memo ratified with Q1 = versioned public payload, Q2 = BLAKE3) is
+complete:
+
+- **Versioned component-state payload** (`altium-format`):
+  `ComponentStatePayload` + `SCHLIB_STATE_FORMAT_VERSION = 1` — a deliberate
+  public serialization contract carrying the COMPLETE typed component state
+  (root record, both Data/Additional record sequences with owner addresses,
+  all sidecar-backed typed pin fields, index entry incl. aliases; no raw
+  blobs — image bodies live in the library store, not in component state).
+  Serde impls stay inside `altium-format` (`deny_unknown_fields` on the
+  payload and every nested record type; the serde derives on the internal
+  record model and on `altium-format-types` sch/common/coord/color types
+  exist solely to serve this contract). Decode of any other version fails
+  with a regenerate message. Decoded-state install forms
+  `SchLibComponentEdit::ReplaceWithState` and `SchNewComponent::FromState`
+  flow through `with_library_edit` with NO fresh minting, through the shared
+  final-namespace/ownership validation and `ReferenceContext` recompute, and
+  through a state-install validation pass (`validate_state_install`) that
+  re-establishes authoring-time reference/consistency checks on decoded
+  payloads (font and embedded-image references, index/root description and
+  `AliasList` agreement, `FromState` alias legality) — with a per-slot
+  wild-inheritance carve-out so wild content loaded libraries carry keeps
+  round-tripping while FRESH dangling references from tampered payloads are
+  rejected. `ReplaceWith`'s process-local `ReferenceContext` drift check has
+  no state-form equivalent; the saved-plan manifest hash plus before/after
+  typed equality at apply (increment B) subsume it.
+  Round-trip law (tested over a programmatic collection zoo — all eight
+  collection classes incl. parameters — and the corpus):
+  `decode(encode(c))` installed via `ReplaceWithState` is a typed no-op.
+- **Saved-plan container** (`altium-sync/src/plan.rs`): `SavedPlan`
+  (`PLAN_SCHEMA_VERSION = 1`, `state_format_version`, domain, direction,
+  scope summary, manifest, patches, diagnostics), `ManifestEntry` roles
+  (SpecSource/SpecImport/ImageAssetBundle/TargetDocument/Destination/
+  InPlaceTarget) with BLAKE3 `Hash{algorithm,hex,byte_len}` or `Absent`
+  preconditions (absence via `symlink_metadata`), one shared
+  canonicalization function, and every §S11 rejection (cross-artifact
+  aliases, duplicate destinations/entries, plan-path collision, symlink
+  resolution) at plan construction AND re-run on strict decode.
+  Deterministic compact JSON emission (byte-identical re-emission; identical
+  modulo freshly allocated creation `UniqueId`s across plannings, via the
+  `mask_unique_ids` display/test normalizer). Embedded image payloads are
+  base64 bodies hash-guarded by the capture-time BLAKE3 hash; a decode-time
+  mismatch is a hard error.
+- **Lowering**: `SavedPlan::compile_from_schlib_patch` lowers a reviewed
+  `SchLibPatch` to Create/Replace/Delete component patches with complete
+  embedded before/after payloads (creation ids frozen from the cached
+  reviewed result), `parts_shrink` reports carried on replacements, and
+  library-namespace ops in D1 application order. Manifest capture takes the
+  caller-provided artifact byte set (`PlanArtifact`), the documented §S7
+  seam increment B binds real files through.
+- **§S7 helper**: `load_schlib_hashed` reads a SchLib file once and hashes +
+  parses the same buffer (via `SchLib::from_bytes`).
+
+The increment-A independent review's findings (1 major — the state-install
+reference-validation gap above — plus minors: index desync checks, zoo
+parameters coverage, `BoundingBox` invariant-bypassing serde removed,
+non-finite `SchAngle` rejected at the parse boundary, typed
+`PlanScopeSubject`/`PlanCollectionKind` in the plan scope) are resolved; see
+the findings-resolution section of the worklog.
+
+Validation at this state: 490 altium-format `--lib` (482 step-2 + 8 new), 61
+altium-sync (54 + 7 new), 362 altium-spec-lang, 168 altium-format-spec tests
+pass; CLI checks; altium-sync builds with zero warnings; the three-library
+corpus gate passes with the new saved-plan pass (per-component payload
+round-trip no-op, plan strict-decode equality, byte-determinism across two
+plannings). Increments B (checked in-memory apply, exact report, address
+unification), C (dump-direction source patches), and D (closure/evidence)
+remain.
+
 Full image codecs were removed from the gate by the user's 2026-09-05 scope change.
 Graphic field policies now cover all 13 kinds against the existing typed Rust
 API/creation defaults, including optional arc endpoints and named PenWidth values.

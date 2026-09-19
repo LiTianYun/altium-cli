@@ -5,6 +5,7 @@ mod children;
 mod fields;
 mod library;
 mod parts;
+mod state;
 mod views;
 
 pub use children::{
@@ -15,6 +16,7 @@ pub use library::{
     SchAliasOp, SchFontAppend, SchImageAssetEdit, SchLibComponentEdit, SchLibEdit, SchNewComponent,
 };
 pub use parts::{SchCurrentPartIdAdjustment, SchPartsShrink, SchRemovedPartChild};
+pub use state::{ComponentStatePayload, SCHLIB_STATE_FORMAT_VERSION};
 pub use views::{
     SchFontEntryView, SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail, SchGraphicView,
     SchOwnerGroup, SchParameterView, SchPartSwapGroup, SchPartView, SchPinPadMapView, SchPinView,

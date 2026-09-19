@@ -2,6 +2,7 @@ use std::fmt;
 
 /// Win32 COLORREF: 0x00BBGGRR format stored as i32.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Color(i32);
 
 impl Color {

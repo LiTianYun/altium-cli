@@ -8,6 +8,7 @@ use std::ops::{Add, AddAssign, Div, Mul, Neg, Sub, SubAssign};
 /// 1 inch = 10,000,000 units
 /// Range: approximately +/- 214,748 mils = +/- 5,454 mm
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Coord(i32);
 
 impl Coord {
@@ -186,6 +187,8 @@ fn format_float_trimmed(v: f64) -> String {
 
 /// 2D point with X and Y coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct CoordPoint {
     pub x: Coord,
     pub y: Coord,
@@ -212,6 +215,11 @@ impl fmt::Display for CoordPoint {
 
 /// Axis-aligned bounding box defined by min and max corners.
 /// Invariant: min.x <= max.x && min.y <= max.y (enforced at construction).
+///
+/// Deliberately NOT serde-derived: no serialized payload contains a
+/// `BoundingBox`, and a derived `Deserialize` would construct the struct
+/// directly, bypassing the constructor invariant. A future payload that
+/// needs one must implement a validating `Deserialize` instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BoundingBox {
     min: CoordPoint,

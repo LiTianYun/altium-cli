@@ -24,7 +24,7 @@ include = [
 ]
 
 [dependencies]
-altium-format-types = { version = "0.2.0", path = "../altium-format-types" }
+altium-format-types = { version = "0.2.0", path = "../altium-format-types", features = ["serde"] }
 altium-format-derive = { version = "0.2.0", path = "../altium-format-derive" }
 bitflags = "2.10.0"
 byteorder = "1.5.0"

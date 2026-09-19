@@ -23,6 +23,7 @@
 
 pub mod address;
 pub mod image_asset;
+pub mod plan;
 pub mod schlib;
 
 pub(crate) mod collection;

@@ -15,7 +15,8 @@ workspace = true
 
 [dependencies]
 altium-format = { version = "0.2.0", path = "../altium-format" }
-altium-format-types = { version = "0.2.0", path = "../altium-format-types" }
+altium-format-types = { version = "0.2.0", path = "../altium-format-types", features = ["serde"] }
+base64 = "0.22.1"
 altium-spec-lang = { version = "0.2.0", path = "../altium-spec-lang" }
 indexmap = { version = "2", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }

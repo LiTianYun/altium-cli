@@ -178,6 +178,14 @@ pub enum SchLibComponentEdit {
     /// The input slot `i` replaced by an edited aggregate captured in the
     /// INPUT's reference context (renaming and alias changes rejected).
     ReplaceWith(usize, SchLibComponentSnapshot),
+    /// The input slot `i` replaced by a decoded versioned state payload
+    /// (step-3 saved-plan install form). No fresh identifiers are minted:
+    /// the payload's complete typed state — including every `UniqueId` — is
+    /// installed verbatim, then validated through the identical
+    /// ownership/namespace/reference path as [`Self::ReplaceWith`] (renaming
+    /// and alias changes are rejected the same way; the result context is
+    /// recomputed from the final library state as always).
+    ReplaceWithState(usize, super::ComponentStatePayload),
     /// A newly created component (context-independent factory).
     New(SchNewComponent),
 }
@@ -193,6 +201,13 @@ pub enum SchNewComponent {
     },
     /// The minimal blank AD26 component shape under the given name.
     Blank { lib_reference: String },
+    /// A component installed verbatim from a decoded versioned state payload
+    /// (step-3 saved-plan install form). Nothing is minted: the payload's
+    /// `UniqueId`s were allocated at planning and are native output data.
+    /// The payload's index entry (including its alias list) joins the final
+    /// namespace and is validated by the same uniqueness/redirection/
+    /// ownership checks as every other slot.
+    FromState(super::ComponentStatePayload),
 }
 
 /// One alias set change. `component` is a `lib_ref`: for `Add` it must name a
@@ -778,6 +793,220 @@ impl SchLibSnapshot {
         })
     }
 
+    /// Validates a decoded-state install (`ReplaceWithState`/`FromState`)
+    /// against the working library state (fonts and image assets already
+    /// resolved by steps 1–2). Decoded payloads are the one edit form whose
+    /// record content does not originate in this process, so no captured
+    /// `ReferenceContext` exists to compare (the anti-relocation drift check
+    /// `ReplaceWith` runs); the internal-consistency and reference checks the
+    /// other forms get from authoring-time validation are re-established
+    /// here instead:
+    ///
+    /// - the index entry's description and the root record's description must
+    ///   agree, and the root record's `AliasList` must be the native
+    ///   comma-join of the index aliases — EXCEPT when the payload carries
+    ///   the input slot's wild pair verbatim (loaded files tolerate the
+    ///   desync, and wild state must keep round-tripping);
+    /// - every record font reference must resolve against the final
+    ///   (post-append) font table, except wild dangling ids the input
+    ///   component at the same slot already carried (capture-forbidden
+    ///   boundary: dangling font ids in loaded files round-trip verbatim);
+    /// - every embedded-image reference must resolve against the final or
+    ///   input asset store (survival of input-resolvable pairing targets is
+    ///   enforced by the shared §8c guard afterwards), except wild dangling
+    ///   names the input component already carried.
+    ///
+    /// `input_index` is `Some` for `ReplaceWithState` (the slot whose wild
+    /// content the payload may inherit); `FromState` has no input
+    /// counterpart, so every check is strict, including the alias-name
+    /// legality `SchAliasOp` enforces for every other alias source. This
+    /// closes the fresh-dangling-reference vector of tampered or relocated
+    /// payloads without rejecting any state a loaded library can carry; a
+    /// reference that resolves to a DIFFERENT font/asset in another library
+    /// is indistinguishable here and is guarded by the saved-plan manifest
+    /// hash plus before/after typed equality at apply (step-3 increment B).
+    fn validate_state_install(
+        &self,
+        payload: &super::ComponentStatePayload,
+        input_index: Option<usize>,
+        working: &crate::schlib::SchLib,
+    ) -> Result<()> {
+        let lib_ref = payload.lib_reference();
+        let component = payload.component();
+        let index_entry = payload.index();
+        let input = input_index.map(|slot| {
+            (
+                &self.library.components[slot],
+                &self.library.header.components[slot],
+            )
+        });
+
+        // Index/root description pair.
+        let description_synced =
+            component.component.component_description == index_entry.description;
+        let description_inherited = input.is_some_and(|(input_component, input_header)| {
+            input_component.component.component_description
+                == component.component.component_description
+                && input_header.description == index_entry.description
+        });
+        if !description_synced && !description_inherited {
+            return Err(invalid(
+                "COMPDESCR",
+                format!(
+                    "decoded state for component '{lib_ref}': the index description {:?} \
+                     disagrees with the root record's description {:?} and does not \
+                     preserve the input pair verbatim",
+                    index_entry.description, component.component.component_description
+                ),
+            ));
+        }
+
+        // Root-record AliasList vs index aliases.
+        let alias_list_synced = component.component.alias_list == index_entry.aliases.join(",");
+        let alias_list_inherited = input.is_some_and(|(input_component, _)| {
+            input_component.component.alias_list == component.component.alias_list
+        });
+        if !alias_list_synced && !alias_list_inherited {
+            return Err(invalid(
+                "ALIASLIST",
+                format!(
+                    "decoded state for component '{lib_ref}': the root record AliasList {:?} \
+                     is not the comma-join of the index aliases {:?} and does not preserve \
+                     the input value verbatim",
+                    component.component.alias_list, index_entry.aliases
+                ),
+            ));
+        }
+
+        // FromState alias legality: every other alias source flows through
+        // SchAliasOp::Add (which enforces these); ReplaceWithState aliases
+        // are required equal to the input slot's.
+        if input.is_none() {
+            for alias in &index_entry.aliases {
+                if alias.is_empty() {
+                    return Err(invalid(
+                        "alias",
+                        format!(
+                            "decoded state for component '{lib_ref}': alias names must \
+                             not be empty"
+                        ),
+                    ));
+                }
+                if alias.contains(',') {
+                    return Err(invalid(
+                        "alias",
+                        format!(
+                            "decoded state for component '{lib_ref}': alias '{alias}' \
+                             contains a comma, which the native AliasList comma-join \
+                             cannot represent"
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // Font references against the final (post-append) table, with the
+        // input slot's own references as the wild-preservation carve-out.
+        let mut referenced_fonts: Vec<i32> = Vec::new();
+        for record in component
+            .records
+            .iter()
+            .chain(&component.additional_records)
+        {
+            record.collect_font_references(&mut referenced_fonts);
+        }
+        referenced_fonts.sort_unstable();
+        referenced_fonts.dedup();
+        let mut inherited_fonts: Vec<i32> = Vec::new();
+        if let Some((input_component, _)) = input {
+            for record in input_component
+                .records
+                .iter()
+                .chain(&input_component.additional_records)
+            {
+                record.collect_font_references(&mut inherited_fonts);
+            }
+        }
+        for font_id in referenced_fonts {
+            if working.header.fonts.iter().any(|font| font.id == font_id)
+                || inherited_fonts.contains(&font_id)
+            {
+                continue;
+            }
+            return Err(invalid(
+                "FontId",
+                format!(
+                    "decoded state for component '{lib_ref}' references font id {font_id}, \
+                     which is neither in the final font table ({} entries) nor a wild id \
+                     the input component already carried; append the font in the same \
+                     edit or regenerate the plan against this library",
+                    working.header.fonts.len()
+                ),
+            ));
+        }
+
+        // Embedded-image references against the final and input stores, with
+        // the input slot's own references as the wild-preservation carve-out.
+        let final_assets: Vec<&str> = working
+            .embedded_images
+            .iter()
+            .map(|image| image.file_name.as_str())
+            .collect();
+        let input_assets: Vec<&str> = self
+            .library
+            .embedded_images
+            .iter()
+            .map(|image| image.file_name.as_str())
+            .collect();
+        let inherited_references: Vec<&str> = input
+            .map(|(input_component, _)| {
+                input_component
+                    .records
+                    .iter()
+                    .chain(&input_component.additional_records)
+                    .filter_map(|record| match record {
+                        SchRecord::Image(image) if image.embed_image => {
+                            Some(image.file_name.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for record in component
+            .records
+            .iter()
+            .chain(&component.additional_records)
+        {
+            let SchRecord::Image(image) = record else {
+                continue;
+            };
+            if !image.embed_image {
+                continue;
+            }
+            if resolve_image_asset_reference(final_assets.iter().copied(), &image.file_name)
+                .is_some()
+                || resolve_image_asset_reference(input_assets.iter().copied(), &image.file_name)
+                    .is_some()
+                || inherited_references.contains(&image.file_name.as_str())
+            {
+                continue;
+            }
+            return Err(invalid(
+                "FileName",
+                format!(
+                    "decoded state for component '{lib_ref}' embeds an image referencing \
+                     storage asset '{}', which resolves against neither the final nor the \
+                     input asset store and is not a wild reference the input component \
+                     already carried; import the asset in the same edit or regenerate the \
+                     plan against this library",
+                    image.file_name
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn resolve_component_edit(
         &self,
         component_edit: SchLibComponentEdit,
@@ -848,6 +1077,60 @@ impl SchLibSnapshot {
                 Ok(FinalSlot {
                     component: replacement.component,
                     index: replacement.index,
+                    alias_touched: false,
+                })
+            }
+            SchLibComponentEdit::ReplaceWithState(index, payload) => {
+                claim_slot(index)?;
+                let existing = &self.library.header.components[index];
+                if existing.lib_ref != payload.index().lib_ref {
+                    return Err(invalid(
+                        "component reference",
+                        format!(
+                            "replacing component[{index}] '{}' with decoded state '{}': \
+                             renaming is unsupported (install the state as a new \
+                             component and remove the original instead)",
+                            existing.lib_ref,
+                            payload.index().lib_ref
+                        ),
+                    ));
+                }
+                if existing.aliases != payload.index().aliases {
+                    return Err(invalid(
+                        "alias",
+                        format!(
+                            "replacing component[{index}] '{}': the decoded state changes \
+                             the alias list; alias changes go through SchAliasOp",
+                            existing.lib_ref
+                        ),
+                    ));
+                }
+                self.validate_state_install(&payload, Some(index), working)?;
+                let (component, index_entry) = payload.into_parts();
+                Ok(FinalSlot {
+                    component,
+                    index: index_entry,
+                    alias_touched: false,
+                })
+            }
+            SchLibComponentEdit::New(SchNewComponent::FromState(payload)) => {
+                if payload.lib_reference().is_empty() {
+                    return Err(invalid(
+                        "lib_reference",
+                        "new component name must not be empty",
+                    ));
+                }
+                // Installed with no minting; validate_state_install
+                // re-establishes the authoring-time reference and
+                // consistency checks (strictly, with no input slot to
+                // inherit wild content from), then the shared
+                // final-namespace, ownership, and reference validation
+                // covers this slot exactly like every other new component.
+                self.validate_state_install(&payload, None, working)?;
+                let (component, index) = payload.into_parts();
+                Ok(FinalSlot {
+                    component,
+                    index,
                     alias_touched: false,
                 })
             }

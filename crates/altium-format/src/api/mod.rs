@@ -36,14 +36,14 @@ mod schlib_types;
 pub(crate) mod schlib_write;
 
 pub use crate::schlib::{
-    SchAliasOp, SchChildBatch, SchCurrentPartIdAdjustment, SchFontAppend, SchFontEntryView,
-    SchFootprintEdit, SchFootprintInit, SchFootprintMapView, SchFootprintMapsView,
-    SchGraphicDetail, SchGraphicEdit, SchGraphicInit, SchGraphicShape, SchGraphicView,
-    SchImageAssetEdit, SchLegacyCountNormalization, SchLibComponentEdit, SchLibComponentSnapshot,
-    SchLibEdit, SchLibSnapshot, SchNewComponent, SchNormalizedCountField, SchOwnerGroup,
-    SchParameterEdit, SchParameterInit, SchParameterView, SchPartSwapGroup, SchPartView,
-    SchPartsShrink, SchPinEdit, SchPinInit, SchPinPadMapInit, SchPinPadMapView, SchPinView,
-    SchRemovedPartChild,
+    ComponentStatePayload, SCHLIB_STATE_FORMAT_VERSION, SchAliasOp, SchChildBatch,
+    SchCurrentPartIdAdjustment, SchFontAppend, SchFontEntryView, SchFootprintEdit,
+    SchFootprintInit, SchFootprintMapView, SchFootprintMapsView, SchGraphicDetail, SchGraphicEdit,
+    SchGraphicInit, SchGraphicShape, SchGraphicView, SchImageAssetEdit,
+    SchLegacyCountNormalization, SchLibComponentEdit, SchLibComponentSnapshot, SchLibEdit,
+    SchLibSnapshot, SchNewComponent, SchNormalizedCountField, SchOwnerGroup, SchParameterEdit,
+    SchParameterInit, SchParameterView, SchPartSwapGroup, SchPartView, SchPartsShrink, SchPinEdit,
+    SchPinInit, SchPinPadMapInit, SchPinPadMapView, SchPinView, SchRemovedPartChild,
 };
 
 // ── SchLib types ─────────────────────────────────────────────────────────────

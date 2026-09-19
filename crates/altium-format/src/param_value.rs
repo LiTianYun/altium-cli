@@ -569,7 +569,7 @@ impl ToParamValue for ClearanceMatrix {
 
 // Angle value that serializes with exactly 3 decimal places (matching Altium's N3 format).
 // C#: StrUtils.DoubleToString(value, "N3") always produces "180.000", "45.000", etc.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SchAngle(pub f64);
 
 impl ToParamValue for SchAngle {
@@ -586,6 +586,17 @@ impl FromParamValue for SchAngle {
                 detail: format!("invalid angle: {e}"),
             }
         })?;
+        // Rust's f64 parser accepts "NaN"/"inf"/"infinity", which Altium
+        // never writes. Rejecting them here keeps every stored angle finite:
+        // a NaN would break typed equality (PartialEq) everywhere, and
+        // serde_json silently serializes non-finite floats as null,
+        // producing an undecodable state payload instead of an error.
+        if !v.is_finite() {
+            return Err(AltiumFormatError::InvalidParamValue {
+                key: key.to_owned(),
+                detail: format!("invalid angle: non-finite value {value:?}"),
+            });
+        }
         Ok(SchAngle(v))
     }
 }
@@ -664,5 +675,24 @@ impl ToParamValue for SheetSymbolType {
             SheetSymbolType::DesignItem => "Design Item".to_owned(),
             _ => (*self as u8).to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sch_angle_rejects_non_finite_values_at_the_parse_boundary() {
+        for value in ["NaN", "nan", "inf", "-inf", "infinity", "Infinity"] {
+            let error = SchAngle::from_param_value("STARTANGLE", value)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("non-finite"), "{value}: {error}");
+        }
+        assert_eq!(
+            SchAngle::from_param_value("STARTANGLE", "180.000").unwrap(),
+            SchAngle(180.0)
+        );
     }
 }
