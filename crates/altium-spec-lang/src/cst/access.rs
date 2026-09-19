@@ -67,8 +67,12 @@ impl fmt::Display for SourceId {
     }
 }
 
-/// Grammar-level kind of an editable declaration or item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Grammar-level kind of an editable declaration or item. Serialized by name
+/// inside persisted structured edits (`cst::planned`); an unknown name fails
+/// decode, which is the correct version-skew behavior.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum BlockKind {
     Import,
     LetBinding,
@@ -264,6 +268,22 @@ impl SpecTree {
             node = node.children().nth(*segment as usize)?;
         }
         Some(node)
+    }
+
+    /// Rebinds a persisted child-node index path to a live [`SourceId`] of
+    /// THIS tree, verifying that every segment resolves to a node. This is
+    /// the decode-side constructor for saved structured edits: the caller has
+    /// already verified the source text's content hash, so the path is
+    /// deterministic; a path that walks off the tree is a stale or tampered
+    /// plan and returns `None`.
+    pub fn source_id_at(&self, path: &[u32]) -> Option<SourceId> {
+        let mut node = &self.root;
+        let mut id = self.root_id();
+        for segment in path {
+            node = node.children().nth(*segment as usize)?;
+            id = id.child(*segment as usize);
+        }
+        Some(id)
     }
 
     pub(crate) fn parent_block_id(&self, id: &SourceId) -> Option<SourceId> {

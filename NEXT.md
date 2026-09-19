@@ -1,9 +1,10 @@
 # Snapshot-bound plan/apply
 
-Updated: 2026-09-17. Accepted implementation direction. Steps 1–2 (language
-front end + SchLib snapshots and indexed patches) are implemented; saved
-plans, transactions, and the CLI surface are not. See [STATUS.md](STATUS.md)
-for current behavior.
+Updated: 2026-09-18. Accepted implementation direction. Steps 1–3 (language
+front end; SchLib snapshots and indexed patches; saved plans and both
+directional planners as library-level APIs) are implemented; transactions
+and the CLI surface are not. See [STATUS.md](STATUS.md) for current
+behavior.
 
 ## Decisions
 
@@ -349,9 +350,8 @@ plans and stages every affected artifact before any destination is committed.
 ## Implementation steps and gates
 
 Complete an independent agent completeness review after every numbered step;
-resolve findings before proceeding. Steps 1 and 2 are complete; steps 3
-through 9 remain outstanding. Next: step 3 (saved plans and both directional
-planners).
+resolve findings before proceeding. Steps 1 through 3 are complete; steps 4
+through 9 remain outstanding. Next: step 4 (checked transaction executor).
 
 1. **Language boundary and full SchLib intent — complete.** Move/decouple CST, diagnostics,
    parser, and formatter into `altium-spec-lang`; port imports and SchLib intent
@@ -395,10 +395,36 @@ planners).
    edits, owner-0 single-part pins, multi-pad definer addressing,
    `is_current` authoring) stay hard errors or preserved-only until their
    evidence or address forms land.
-3. **Saved plans and both directional planners.** Implement schema/version,
-   manifests, source/document lowering, and exact reporting. Gate: deterministic
-   semantic plans, complete preconditions, no-op/create/update/delete examples,
-   preserved source comments/expressions/CRLF/annotations, no heuristic execution.
+3. **Saved plans and both directional planners — complete (2026-09-18).**
+   Schema/version: `PLAN_SCHEMA_VERSION`/`SCHLIB_STATE_FORMAT_VERSION`/
+   `SPEC_EDIT_FORMAT_VERSION`, exact-match decode with regenerate messages
+   (`crates/altium-sync/src/plan.rs`, `altium-format` state payload,
+   `altium-spec-lang/src/cst/planned.rs`). Manifests: BLAKE3/absence
+   preconditions with read-once capture, planning-drift recheck, frozen
+   outputs, explicit in-place declaration, and alias/duplicate/plan-path
+   collision rejection re-run at decode and apply. Document lowering:
+   `compile_from_schlib_patch` + `plan_compile_schlib` + `apply_saved_plan`
+   (typed Create/Replace/Delete with complete embedded before/after state,
+   lowering-time execution dry run). Source lowering:
+   `plan_dump_schlib` + `apply_saved_dump_plan` (hash-bound persisted
+   structured edits via `PlannedSpecEdit` locators, `SourceCreate` with
+   embedded validated text + typed expected state, staged image bundles,
+   planning-time convergence proof: the resulting source elaborates to an
+   empty patch). Exact reporting: `report.rs` per-artifact entries in both
+   directions, deletes always expanded, no heuristics. Gate evidence per
+   clause (determinism, complete preconditions, no-op/create/update/delete,
+   comments/expressions/CRLF/annotations preservation, no heuristic
+   execution): the step-3 closure section of
+   [docs/worklogs/next-plans-2026-09-18.md](docs/worklogs/next-plans-2026-09-18.md),
+   backed by fixture-free suites and the three-library corpus gate
+   (56/32/135, exit 0, incl. the dump convergence/preservation stage).
+   The comments/CRLF/annotations half of clause 4 is met; authored
+   EXPRESSION preservation is NOT — the legacy merge compares property value
+   text and literalizes every expression it touches, even one evaluating to
+   the unchanged value. Recorded residuals live in the same closure section
+   (v1 keep-order restriction, index-less alias ops, dump-source
+   completeness guards, expression literalization and deletion of spec
+   content outside the fresh dump).
 4. **Checked transaction executor.** Implement staging, reopen validation, durable
    commit, and recovery. Gate: source/import/target/routing changes and newly
    occupied outputs reject stale plans; path aliases/overlapping patches error;

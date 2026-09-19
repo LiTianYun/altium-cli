@@ -60,8 +60,8 @@ use std::path::{Path, PathBuf};
 use crate::address::ComponentIndex;
 use crate::plan::{
     ManifestEntry, ManifestRole, PLAN_SCHEMA_VERSION, PlanComponentPatch, PlanDirection, PlanError,
-    PlanHash, PlanLibraryOp, PlanPatches, PlanPrecondition, SavedPlan, canonicalize_plan_path,
-    check_manifest_collisions, path_to_string,
+    PlanHash, PlanLibraryOp, PlanPatches, PlanPrecondition, PlanSourcePatch, SavedPlan,
+    canonicalize_plan_path, check_manifest_collisions, path_to_string,
 };
 use altium_format::SchLib;
 use altium_format::api::{
@@ -318,7 +318,12 @@ pub(crate) fn execute_compile_patches(
     let PlanPatches::Compile {
         library_ops,
         components,
-    } = &plan.patches;
+    } = &plan.patches
+    else {
+        return Err(invalid(
+            "execute_compile_patches requires compile-direction patches",
+        ));
+    };
 
     // Decode every embedded image payload (hash-verified bodies).
     let mut image_bodies: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
@@ -672,6 +677,406 @@ pub(crate) fn execute_compile_patches(
     })
 }
 
+// ── Dump-direction apply ─────────────────────────────────────────────────
+
+/// Outcome of one checked dump apply: the source file actually written plus
+/// the executed patch counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedDumpPlan {
+    /// The written (or byte-identically confirmed) source file.
+    pub destination: PathBuf,
+    /// Whether the source file was newly created (`SourceCreate`).
+    pub created: bool,
+    /// Structured edits replayed against the existing source.
+    pub edits_applied: usize,
+    /// Staged bundles actually written (bundles whose destination already
+    /// held identical bytes are skipped).
+    pub bundles_written: usize,
+}
+
+/// One verified dump-manifest read.
+struct VerifiedDumpManifest {
+    /// canonical path → (role, hash-verified bytes for Hash preconditions).
+    entries: BTreeMap<String, (ManifestRole, Option<Vec<u8>>)>,
+    /// The declared (as-authored) path per canonical path, for error text
+    /// and import-relative resolution.
+    declared: BTreeMap<String, PathBuf>,
+}
+
+/// Re-resolves every manifest path, re-runs the §S11 collision checks, and
+/// verifies every hash/absence precondition of a DUMP plan. The target
+/// `.SchLib` is read and hashed but NEVER parsed, and never written: dump
+/// apply does not touch the library.
+fn verify_dump_manifest(manifest: &[ManifestEntry]) -> Result<VerifiedDumpManifest, PlanError> {
+    let mut entries = BTreeMap::new();
+    let mut declared_paths = BTreeMap::new();
+    let mut target_documents = 0usize;
+    let mut in_place = 0usize;
+    for entry in manifest {
+        let declared = Path::new(&entry.declared_path);
+        let context = format!(
+            "manifest {} entry '{}'",
+            role_name(entry.role),
+            entry.declared_path
+        );
+        let actual = canonicalize_plan_path(declared)?;
+        let actual_string = path_to_string(&actual, &context)?;
+        if actual_string != entry.canonical_path {
+            return Err(PlanError::PathResolutionChanged {
+                role: role_name(entry.role).to_owned(),
+                declared: entry.declared_path.clone(),
+                expected: entry.canonical_path.clone(),
+                actual: actual_string,
+            });
+        }
+        match entry.role {
+            ManifestRole::TargetDocument => target_documents += 1,
+            ManifestRole::InPlaceTarget => in_place += 1,
+            ManifestRole::SpecSource => {
+                return Err(invalid(
+                    "a dump manifest records its spec as InPlaceTarget or Destination, \
+                     never SpecSource",
+                ));
+            }
+            _ => {}
+        }
+        let bytes = match &entry.precondition {
+            PlanPrecondition::Hash(hash) => {
+                let bytes = std::fs::read(declared).map_err(|source| PlanError::Io {
+                    context: context.clone(),
+                    source,
+                })?;
+                let actual_hash = PlanHash::of_bytes(&bytes);
+                if actual_hash != *hash {
+                    return Err(PlanError::PreconditionFailed {
+                        context,
+                        detail: format!(
+                            "content hash mismatch: recorded {} ({} bytes), actual {} ({} \
+                             bytes)",
+                            hash.hex, hash.byte_len, actual_hash.hex, actual_hash.byte_len
+                        ),
+                    });
+                }
+                Some(bytes)
+            }
+            PlanPrecondition::Absent => {
+                match std::fs::symlink_metadata(declared) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Ok(_) => {
+                        return Err(PlanError::PreconditionFailed {
+                            context,
+                            detail: "output path was recorded as absent, but something now \
+                                     occupies it"
+                                .to_owned(),
+                        });
+                    }
+                    Err(source) => return Err(PlanError::Io { context, source }),
+                }
+                if entry.role != ManifestRole::Destination {
+                    return Err(invalid(format!(
+                        "absence precondition on non-Destination manifest entry '{}'",
+                        entry.declared_path
+                    )));
+                }
+                None
+            }
+        };
+        entries.insert(entry.canonical_path.clone(), (entry.role, bytes));
+        declared_paths.insert(entry.canonical_path.clone(), declared.to_path_buf());
+    }
+    check_manifest_collisions(manifest, None)?;
+    if target_documents != 1 {
+        return Err(invalid(format!(
+            "a dump manifest must record exactly one TargetDocument library; found \
+             {target_documents}"
+        )));
+    }
+    if in_place > 1 {
+        return Err(invalid(format!(
+            "a dump manifest records at most one InPlaceTarget source; found {in_place}"
+        )));
+    }
+    Ok(VerifiedDumpManifest {
+        entries,
+        declared: declared_paths,
+    })
+}
+
+/// Executes a decoded dump-direction plan: verify the manifest (library
+/// hash, source hash/absence, import hashes, bundle preconditions) → decode
+/// the persisted edits and re-validate every locator against the
+/// hash-verified source text → replay the structured edits (or take the
+/// embedded new-source text) and check the byte-exact `result_hash` →
+/// recompile the RESULTING text (with its hash-verified imports) and verify
+/// it summarizes to the plan's typed expected state (a deterministic check —
+/// no reconciler, and the library is never parsed or elaborated against) →
+/// write the source and staged bundles to their frozen destinations and
+/// confirm each write byte-exactly.
+///
+/// # Step-4 boundary
+///
+/// The writes are plain `std::fs::write` calls followed by a read-back hash
+/// check. Staging beside the destinations, the durable journal,
+/// commit-by-rename over the whole output set, and interrupted-transaction
+/// recovery are step 4 and are NOT provided here: a failure between the
+/// source write and the last bundle write leaves a partially written output
+/// set (each written file individually verified) with no journal to recover
+/// from, and the expected-state verification runs before any write precisely
+/// so that semantic failures reject the plan while the filesystem is still
+/// untouched.
+pub fn apply_saved_dump_plan(plan: &SavedPlan) -> Result<AppliedDumpPlan, PlanError> {
+    // 1. Structural gate: exact versions and direction, before any read.
+    if plan.schema_version != PLAN_SCHEMA_VERSION {
+        return Err(PlanError::UnsupportedSchemaVersion {
+            found: plan.schema_version,
+            supported: PLAN_SCHEMA_VERSION,
+        });
+    }
+    if plan.state_format_version != SCHLIB_STATE_FORMAT_VERSION {
+        return Err(PlanError::UnsupportedStateFormatVersion {
+            found: plan.state_format_version,
+            supported: SCHLIB_STATE_FORMAT_VERSION,
+        });
+    }
+    if plan.direction != PlanDirection::Dump {
+        return Err(invalid(
+            "apply_saved_dump_plan executes dump-direction plans; this plan's direction is \
+             not Dump",
+        ));
+    }
+    let PlanPatches::Dump {
+        edit_format_version,
+        source,
+        bundles,
+        expected_state,
+    } = &plan.patches
+    else {
+        return Err(invalid("dump-direction plan carries no dump patches"));
+    };
+    if *edit_format_version != altium_spec_lang::SPEC_EDIT_FORMAT_VERSION {
+        return Err(PlanError::UnsupportedEditFormatVersion {
+            found: *edit_format_version,
+            supported: altium_spec_lang::SPEC_EDIT_FORMAT_VERSION,
+        });
+    }
+
+    // 2. Manifest re-resolution, §S11 re-check, every precondition.
+    let verified = verify_dump_manifest(&plan.manifest)?;
+    let entry_of =
+        |canonical: &str, role: ManifestRole, what: &str| match verified.entries.get(canonical) {
+            Some((actual_role, bytes)) if *actual_role == role => Ok(bytes),
+            Some((actual_role, _)) => Err(invalid(format!(
+                "{what} '{canonical}' is recorded as {} in the manifest, expected {}",
+                role_name(*actual_role),
+                role_name(role)
+            ))),
+            None => Err(invalid(format!(
+                "{what} '{canonical}' is not a manifest entry"
+            ))),
+        };
+
+    // 3. Decode the source patch and produce the result text.
+    let (spec_canonical, result_text, created, edits_applied) = match source {
+        PlanSourcePatch::Create {
+            destination,
+            text,
+            result_hash,
+        } => {
+            let bytes = entry_of(
+                destination,
+                ManifestRole::Destination,
+                "source Create target",
+            )?;
+            if bytes.is_some() {
+                return Err(invalid(format!(
+                    "source Create target '{destination}' does not carry an expected-absence \
+                     precondition"
+                )));
+            }
+            result_hash.verify_bytes(
+                text.as_bytes(),
+                "verifying the embedded new-source text against its recorded result hash",
+            )?;
+            altium_spec_lang::SpecTree::parse(text.clone()).map_err(|error| {
+                invalid(format!("embedded new-source text does not parse: {error}"))
+            })?;
+            (destination.clone(), text.clone(), true, 0usize)
+        }
+        PlanSourcePatch::Edit {
+            source: source_path,
+            edits,
+            result_hash,
+        } => {
+            let bytes = entry_of(
+                source_path,
+                ManifestRole::InPlaceTarget,
+                "source Edit target",
+            )?
+            .as_ref()
+            .ok_or_else(|| invalid("InPlaceTarget entry carries no hash-verified bytes"))?;
+            let text =
+                String::from_utf8(bytes.clone()).map_err(|error| PlanError::ApplyVerification {
+                    context: format!("reading source '{source_path}'"),
+                    detail: format!("hash-verified source is not valid UTF-8: {error}"),
+                })?;
+            // Re-validate every locator against the hash-verified text and
+            // replay through the byte-preserving edit layer.
+            let tree = altium_spec_lang::SpecTree::parse(text).map_err(|error| {
+                invalid(format!("hash-verified source does not parse: {error}"))
+            })?;
+            let decoded = altium_spec_lang::decode_spec_edits(&tree, edits).map_err(|source| {
+                PlanError::PlannedEdit {
+                    context: format!("re-validating source edits against '{source_path}'"),
+                    source,
+                }
+            })?;
+            let edited = altium_spec_lang::apply_edits(&tree, &decoded).map_err(|source| {
+                PlanError::StructuredEdit {
+                    context: format!("applying source edits to '{source_path}'"),
+                    source,
+                }
+            })?;
+            result_hash.verify_bytes(
+                edited.source().as_bytes(),
+                "verifying the edit replay against the plan's recorded result hash",
+            )?;
+            (
+                source_path.clone(),
+                edited.source().to_owned(),
+                false,
+                edits.len(),
+            )
+        }
+    };
+    let spec_declared = verified
+        .declared
+        .get(&spec_canonical)
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from(&spec_canonical));
+
+    // 4. Deterministic expected-state verification BEFORE any write: the
+    //    resulting text (with its hash-verified imports) must compile to the
+    //    recorded typed state. The library is never parsed here.
+    let graph =
+        altium_spec_lang::import::capture_imports_with_root_text(&spec_declared, &result_text)
+            .map_err(|source| PlanError::Spec {
+                context: format!(
+                    "capturing the resulting source '{}' for expected-state verification",
+                    spec_declared.display()
+                ),
+                source,
+            })?;
+    // The capture re-reads imports from disk, so bind every captured import
+    // back to the bytes the manifest already hash-verified: an import swapped
+    // between verification and this read, or one that is not a manifest entry
+    // at all, must never reach the compiler (§S7 — hash and parse the same
+    // captured contents).
+    for (path, captured) in graph.sources() {
+        if path == graph.root_path() {
+            continue;
+        }
+        let context = format!(
+            "binding captured import '{}' of '{}' to the plan manifest",
+            path.display(),
+            spec_declared.display()
+        );
+        let canonical = path_to_string(&canonicalize_plan_path(path)?, &context)?;
+        match verified.entries.get(&canonical) {
+            Some((ManifestRole::SpecImport, Some(bytes)))
+                if bytes == captured.source().as_bytes() => {}
+            Some((ManifestRole::SpecImport, Some(_))) => {
+                return Err(PlanError::PreconditionFailed {
+                    context,
+                    detail: "the import changed between manifest verification and the \
+                             expected-state recompile"
+                        .to_owned(),
+                });
+            }
+            _ => {
+                return Err(PlanError::ApplyVerification {
+                    context,
+                    detail: "the resulting source imports a file the plan's manifest does not \
+                             record as a hash-verified import"
+                        .to_owned(),
+                });
+            }
+        }
+    }
+    let compiled = altium_spec_lang::intent::compile_captured_schlib(&graph).map_err(|source| {
+        PlanError::Spec {
+            context: format!(
+                "compiling the resulting source '{}' for expected-state verification",
+                spec_declared.display()
+            ),
+            source,
+        }
+    })?;
+    let actual_state = crate::plan::expected_source_state(&compiled.root);
+    if actual_state != *expected_state {
+        return Err(PlanError::ApplyVerification {
+            context: format!("resulting source '{}'", spec_declared.display()),
+            detail: "the resulting source compiles to a different typed state than the plan \
+                     recorded"
+                .to_owned(),
+        });
+    }
+
+    // 5. Verify every bundle patch against the manifest, then write source
+    //    and bundles to their frozen destinations.
+    let mut bundle_writes: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    for bundle in bundles {
+        let existing = entry_of(
+            &bundle.destination,
+            ManifestRole::Destination,
+            "bundle destination",
+        )?;
+        let payload = bundle.decoded_bytes()?;
+        match existing {
+            Some(existing_bytes) if existing_bytes == &payload => {
+                // Identical bytes already occupy the destination: no write.
+            }
+            _ => {
+                let declared = verified
+                    .declared
+                    .get(&bundle.destination)
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from(&bundle.destination));
+                bundle_writes.push((declared, payload));
+            }
+        }
+    }
+
+    let write_verified = |path: &Path, bytes: &[u8], what: &str| -> Result<(), PlanError> {
+        std::fs::write(path, bytes).map_err(|source| PlanError::Io {
+            context: format!("writing {what} '{}'", path.display()),
+            source,
+        })?;
+        let reread = std::fs::read(path).map_err(|source| PlanError::Io {
+            context: format!("re-reading written {what} '{}'", path.display()),
+            source,
+        })?;
+        if reread != bytes {
+            return Err(PlanError::ApplyVerification {
+                context: format!("written {what} '{}'", path.display()),
+                detail: "read-back bytes differ from the written content".to_owned(),
+            });
+        }
+        Ok(())
+    };
+    write_verified(&spec_declared, result_text.as_bytes(), "source")?;
+    let bundles_written = bundle_writes.len();
+    for (path, payload) in &bundle_writes {
+        write_verified(path, payload, "image bundle")?;
+    }
+
+    Ok(AppliedDumpPlan {
+        destination: PathBuf::from(&spec_canonical),
+        created,
+        edits_applied,
+        bundles_written,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -958,7 +1363,10 @@ mod tests {
         let PlanPatches::Compile {
             library_ops,
             components,
-        } = &plan.patches;
+        } = &plan.patches
+        else {
+            panic!("expected compile patches");
+        };
         assert_eq!(library_ops.len(), 1);
         assert_eq!(components.len(), 1);
         apply_saved_plan(&reload(&plan)).unwrap();
@@ -1153,12 +1561,20 @@ mod tests {
         let library_path = base_library(temp.path());
         let destination = temp.path().join("dir-out.SchLib");
         let (plan, _) = plan_of(&library_path, &destination, &full_intent());
+
+        // A forged direction/patches mismatch fails strict decode itself
+        // (increment C strengthened the decode gate).
         let mut value: serde_json::Value =
             serde_json::from_slice(&plan.to_json_bytes().unwrap()).unwrap();
         value["direction"] = serde_json::json!("dump");
-        let dump_plan = SavedPlan::from_json_bytes(value.to_string().as_bytes()).unwrap();
-        let error = apply_saved_plan(&dump_plan).unwrap_err().to_string();
-        assert!(error.contains("direction"), "{error}");
+        let error = SavedPlan::from_json_bytes(value.to_string().as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("non-Compile direction"), "{error}");
+
+        // The dump-apply entry point rejects a genuine compile plan.
+        let error = apply_saved_dump_plan(&plan).unwrap_err().to_string();
+        assert!(error.contains("not Dump"), "{error}");
     }
 
     #[test]

@@ -23,10 +23,12 @@ use altium_spec_lang::{
         SchLibIntent,
     },
 };
-use altium_sync::apply::apply_saved_plan;
+use altium_sync::apply::{apply_saved_dump_plan, apply_saved_plan};
 use altium_sync::plan::{
-    ManifestRole, PlanArtifact, PlanArtifactContents, PlanScope, SavedPlan, load_schlib_hashed,
+    ManifestRole, PlanArtifact, PlanArtifactContents, PlanPatches, PlanScope, PlanSourcePatch,
+    SavedPlan, load_schlib_hashed,
 };
+use altium_sync::planner::{PLAN_EXIT_CHANGES, PLAN_EXIT_NO_CHANGES, plan_dump_schlib};
 use altium_sync::report::{ReportCollection, ReportOp, render_plan_report, report};
 use altium_sync::schlib::{ComponentPropertiesIntent, SchLibPatch};
 
@@ -86,6 +88,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || result["plan_full_circle_replan_empty"] != true
             || result["plan_report_entries_exact"] != true
             || result["plan_target_drift_rejected"] != true
+            || result["dump_create_applied"] != true
+            || result["dump_create_converges"] != true
+            || result["dump_noop_exit0"] != true
+            || result["dump_edit_converges"] != true
+            || result["dump_comment_preserved"] != true
+            || result["dump_crlf_preserved"] != true
+            || result["dump_report_entries_exact"] != true
         {
             failures += 1;
         }
@@ -189,6 +198,14 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
     // determinism across two independent plannings.
     let plan = plan_pass(path, temp.path())?;
 
+    // Dump-direction saved-plan pass (step-3 increment C): SourceCreate on
+    // the first pass (plan -> serialize -> strict decode -> apply ->
+    // recompile-and-elaborate to an EMPTY patch), a no-op second plan
+    // (exit 0, zero edits), then a seeded comment + CRLF + one flipped
+    // property value merged back through hash-bound structured edits with
+    // byte-level comment/CRLF preservation and renewed convergence.
+    let dump = dump_pass(path, temp.path())?;
+
     // Footprint structural pass (increment D2): per component, replace the
     // first footprint's description, add a probe footprint (with one pin-pad
     // map from an existing pin when possible), then remove it and restore the
@@ -256,6 +273,15 @@ fn check(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error
         "plan_full_circle_replan_empty": plan.full_circle_replan_empty,
         "plan_report_entries_exact": plan.report_entries_exact,
         "plan_target_drift_rejected": plan.target_drift_rejected,
+        "dump_create_applied": dump.create_applied,
+        "dump_create_converges": dump.create_converges,
+        "dump_generation_skips": dump.generation_skips,
+        "dump_noop_exit0": dump.noop_exit0,
+        "dump_edit_converges": dump.edit_converges,
+        "dump_edits_applied": dump.edits_applied,
+        "dump_comment_preserved": dump.comment_preserved,
+        "dump_crlf_preserved": dump.crlf_preserved,
+        "dump_report_entries_exact": dump.report_entries_exact,
     }))
 }
 
@@ -1863,4 +1889,144 @@ fn intent_e2_pass(
         }
     }
     Ok(outcome)
+}
+
+// ── Dump-direction saved-plan pass (step-3 increment C) ─────────────────────
+
+struct DumpOutcome {
+    create_applied: bool,
+    create_converges: bool,
+    generation_skips: usize,
+    noop_exit0: bool,
+    edit_converges: bool,
+    edits_applied: usize,
+    comment_preserved: bool,
+    crlf_preserved: bool,
+    report_entries_exact: bool,
+}
+
+/// The directional convergence law over real files: the on-disk source
+/// compiles (captured imports) and elaborates against the on-disk library to
+/// an EMPTY patch.
+fn dump_converges(
+    spec_path: &std::path::Path,
+    library_path: &std::path::Path,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let graph = altium_spec_lang::import::capture_imports(spec_path)
+        .map_err(|error| format!("capturing '{}': {error}", spec_path.display()))?;
+    let compiled = altium_spec_lang::intent::compile_captured_schlib(&graph)
+        .map_err(|error| format!("compiling '{}': {error}", spec_path.display()))?;
+    let input = SchLib::open(library_path)?.snapshot()?;
+    let patch = SchLibPatch::from_intent(&input, &compiled.root)
+        .map_err(|error| format!("elaborating '{}': {error}", spec_path.display()))?;
+    Ok(patch.is_empty())
+}
+
+fn dump_pass(
+    path: &std::path::Path,
+    temp: &std::path::Path,
+) -> Result<DumpOutcome, Box<dyn std::error::Error>> {
+    let library_path = temp.join("dump-target.SchLib");
+    std::fs::copy(path, &library_path)?;
+    let spec_path = temp.join("dump-target.schlib-spec");
+
+    // Pass 1: SourceCreate — plan, serialize, strict-decode, apply.
+    let created = plan_dump_schlib(
+        &library_path,
+        &spec_path,
+        Some(&temp.join("dump-plan.json")),
+    )
+    .map_err(|error| format!("dump planning (create): {error}"))?;
+    let generation_skips = created.plan.diagnostics.len();
+    if created.exit_code != PLAN_EXIT_CHANGES
+        || !matches!(
+            created.plan.patches,
+            PlanPatches::Dump {
+                source: PlanSourcePatch::Create { .. },
+                ..
+            }
+        )
+    {
+        return Err("first dump plan must be a SourceCreate with changes".into());
+    }
+    let decoded = SavedPlan::from_json_bytes(&created.plan.to_json_bytes()?)?;
+    let library_bytes = std::fs::read(&library_path)?;
+    let applied =
+        apply_saved_dump_plan(&decoded).map_err(|error| format!("dump apply (create): {error}"))?;
+    let create_applied =
+        applied.created && spec_path.exists() && std::fs::read(&library_path)? == library_bytes;
+    let create_converges = dump_converges(&spec_path, &library_path)?;
+
+    // Pass 2: no-op — the created source already matches.
+    let noop = plan_dump_schlib(&library_path, &spec_path, None)
+        .map_err(|error| format!("dump planning (no-op): {error}"))?;
+    let noop_edits_empty = matches!(
+        &noop.plan.patches,
+        PlanPatches::Dump {
+            source: PlanSourcePatch::Edit { edits, .. },
+            ..
+        } if edits.is_empty()
+    );
+    let noop_exit0 = noop.exit_code == PLAN_EXIT_NO_CHANGES && noop_edits_empty;
+
+    // Pass 3: seed a comment, convert to CRLF, and flip one boolean
+    // property; the dump edit must correct the value while preserving the
+    // seeded comment and the CRLF style byte-for-byte.
+    let text = std::fs::read_to_string(&spec_path)?;
+    let (flip_from, flip_to) = if text.contains("show_hidden_pins: false") {
+        ("show_hidden_pins: false", "show_hidden_pins: true")
+    } else {
+        ("show_hidden_pins: true", "show_hidden_pins: false")
+    };
+    if !text.contains(flip_from) {
+        return Err("generated source carries no show_hidden_pins property".into());
+    }
+    let tampered = text
+        .replacen(flip_from, flip_to, 1)
+        .replacen("component ", "// seeded dump comment\ncomponent ", 1)
+        .replace('\n', "\r\n");
+    std::fs::write(&spec_path, &tampered)?;
+    let edit_plan = plan_dump_schlib(&library_path, &spec_path, None)
+        .map_err(|error| format!("dump planning (edit): {error}"))?;
+    if edit_plan.exit_code != PLAN_EXIT_CHANGES {
+        return Err("edit-bearing dump plan must classify as changes".into());
+    }
+    let edit_count = match &edit_plan.plan.patches {
+        PlanPatches::Dump {
+            source: PlanSourcePatch::Edit { edits, .. },
+            bundles,
+            ..
+        } => edits.len() + bundles.len(),
+        _ => return Err("edit pass must produce an Edit patch".into()),
+    };
+    // Exact report: one entry per persisted edit plus one per staged bundle
+    // needing a write, all addressed to the spec/bundle artifacts.
+    let derived = report(&edit_plan.plan)?;
+    let report_entries_exact = derived.entries.len() == edit_count
+        && derived
+            .entries
+            .iter()
+            .all(|entry| entry.address.artifact.is_some())
+        && !render_plan_report(&derived).is_empty();
+    let decoded = SavedPlan::from_json_bytes(&edit_plan.plan.to_json_bytes()?)?;
+    let applied =
+        apply_saved_dump_plan(&decoded).map_err(|error| format!("dump apply (edit): {error}"))?;
+    let edits_applied = applied.edits_applied;
+    let merged = std::fs::read_to_string(&spec_path)?;
+    let comment_preserved =
+        merged.contains("// seeded dump comment\r\n") && merged.contains(flip_from);
+    let crlf_preserved = !merged.replace("\r\n", "").contains('\n');
+    let edit_converges = dump_converges(&spec_path, &library_path)?;
+
+    Ok(DumpOutcome {
+        create_applied,
+        create_converges,
+        generation_skips,
+        noop_exit0,
+        edit_converges,
+        edits_applied,
+        comment_preserved,
+        crlf_preserved,
+        report_entries_exact,
+    })
 }

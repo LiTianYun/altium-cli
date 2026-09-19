@@ -35,11 +35,17 @@ use crate::plan::{
 };
 use altium_format::api::{ComponentStatePayload, SchLibComponentSnapshot};
 
+/// Longest edit-fragment summary rendered inline, in bytes. The cut is moved
+/// back to the nearest character boundary, never applied to a raw byte index.
+const SUMMARY_BYTE_BUDGET: usize = 120;
+
 /// Collection label of one change entry. Extends the plan schema's
 /// collection vocabulary with the library-level namespaces (fonts, image
 /// assets) so every executable change has a labeled home. Display-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReportCollection {
+    /// A dump-direction source file (created or structurally edited).
+    Source,
     Components,
     Parts,
     Pins,
@@ -55,6 +61,7 @@ pub enum ReportCollection {
 impl ReportCollection {
     pub fn name(self) -> &'static str {
         match self {
+            Self::Source => "source",
             Self::Components => "components",
             Self::Parts => "parts",
             Self::Pins => "pins",
@@ -102,6 +109,11 @@ pub struct FieldChange {
 /// the after projection.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChangeAddress {
+    /// The written artifact this change belongs to (declared path of the
+    /// manifest entry it will be written to). The increment-B compile slice
+    /// omitted this dimension (one write artifact); dump plans write several
+    /// files, so every entry now names its artifact (review finding B-3).
+    pub artifact: Option<String>,
     pub component: Option<String>,
     pub owner_path: Option<String>,
     pub collection: ReportCollection,
@@ -125,12 +137,17 @@ pub struct ReportArtifact {
     pub canonical_path: String,
     /// `"hash"` or `"absent"`.
     pub precondition: &'static str,
+    /// The recorded content hash (hex) for hash preconditions — the memo §3
+    /// "plan hashes summary" (review finding B-3).
+    pub hash: Option<String>,
     pub will_write: bool,
 }
 
-/// One summary row: counts per (collection, op).
+/// One summary row: counts per (artifact, collection, op) — the memo §3
+/// key, restored for the dump slice (review finding B-3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanReportSummaryRow {
+    pub artifact: Option<String>,
     pub collection: ReportCollection,
     pub op: ReportOp,
     pub count: usize,
@@ -405,6 +422,7 @@ fn keyed_entries<K: Clone + Eq + std::hash::Hash + Ord>(
         .map(|(index, key)| (key, index))
         .collect();
     let address = |old_index, new_index| ChangeAddress {
+        artifact: None,
         component: Some(component.to_owned()),
         owner_path: owner_path.map(str::to_owned),
         collection,
@@ -452,6 +470,7 @@ fn positional_entries(
     after_values: &[Value],
 ) {
     let address = |old_index, new_index| ChangeAddress {
+        artifact: None,
         component: Some(component.to_owned()),
         owner_path: owner_path.map(str::to_owned),
         collection,
@@ -506,6 +525,7 @@ fn one_sided_component_children(
             let (old_index, new_index) = index_pair(index);
             entries.push(ChangeEntry {
                 address: ChangeAddress {
+                    artifact: None,
                     component: Some(component.to_owned()),
                     owner_path,
                     collection,
@@ -665,6 +685,7 @@ fn component_child_entries(
             for (map_index, map) in before.footprints[before_position].2.iter().enumerate() {
                 entries.push(ChangeEntry {
                     address: ChangeAddress {
+                        artifact: None,
                         component: Some(component.to_owned()),
                         owner_path: Some(format!("footprint '{}'", key.0)),
                         collection: ReportCollection::Maps,
@@ -682,6 +703,7 @@ fn component_child_entries(
             for (map_index, map) in after.footprints[after_position].2.iter().enumerate() {
                 entries.push(ChangeEntry {
                     address: ChangeAddress {
+                        artifact: None,
                         component: Some(component.to_owned()),
                         owner_path: Some(format!("footprint '{}'", key.0)),
                         collection: ReportCollection::Maps,
@@ -706,6 +728,7 @@ fn parts_shrink_entries(
     for child in &shrink.deleted_children {
         entries.push(ChangeEntry {
             address: ChangeAddress {
+                artifact: None,
                 component: Some(component.to_owned()),
                 owner_path: Some(format!("part {}", child.owner_part_id)),
                 collection: ReportCollection::Parts,
@@ -779,6 +802,10 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
                 PlanPrecondition::Hash(_) => "hash",
                 PlanPrecondition::Absent => "absent",
             },
+            hash: match &entry.precondition {
+                PlanPrecondition::Hash(hash) => Some(hash.hex.clone()),
+                PlanPrecondition::Absent => None,
+            },
             will_write: matches!(
                 entry.role,
                 ManifestRole::Destination | ManifestRole::InPlaceTarget
@@ -786,11 +813,79 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
         })
         .collect();
 
-    let PlanPatches::Compile {
-        library_ops,
-        components,
-    } = &plan.patches;
+    let mut entries: Vec<ChangeEntry> = Vec::new();
+    let mut allocated_ids: Vec<AllocatedIds> = Vec::new();
+    match &plan.patches {
+        PlanPatches::Dump {
+            source,
+            bundles,
+            expected_state,
+            edit_format_version: _,
+        } => {
+            dump_entries(plan, source, bundles, expected_state, &mut entries)?;
+        }
+        PlanPatches::Compile {
+            library_ops,
+            components,
+        } => {
+            compile_entries(
+                plan,
+                library_ops,
+                components,
+                &mut entries,
+                &mut allocated_ids,
+            )?;
+        }
+    }
 
+    let mut summary_counts: BTreeMap<(Option<String>, ReportCollection, ReportOp), usize> =
+        BTreeMap::new();
+    for entry in &entries {
+        *summary_counts
+            .entry((
+                entry.address.artifact.clone(),
+                entry.address.collection,
+                entry.op,
+            ))
+            .or_insert(0) += 1;
+    }
+    let summary = summary_counts
+        .into_iter()
+        .map(|((artifact, collection, op), count)| PlanReportSummaryRow {
+            artifact,
+            collection,
+            op,
+            count,
+        })
+        .collect();
+
+    Ok(PlanReport {
+        domain: plan.domain,
+        direction: plan.direction,
+        schema_version: plan.schema_version,
+        state_format_version: plan.state_format_version,
+        artifacts,
+        entries,
+        summary,
+        allocated_ids,
+        diagnostics: plan
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.clone())
+            .collect(),
+    })
+}
+
+/// The compile-direction entry expansion (increment B, unchanged semantics;
+/// every entry is stamped with the single write artifact).
+fn compile_entries(
+    plan: &SavedPlan,
+    library_ops: &[PlanLibraryOp],
+    components: &[PlanComponentPatch],
+    entries: &mut Vec<ChangeEntry>,
+    allocated_ids: &mut Vec<AllocatedIds>,
+) -> Result<(), PlanError> {
+    let entry_floor = entries.len();
     let created_by_name: BTreeMap<&str, &ComponentStatePayload> = components
         .iter()
         .filter_map(|patch| match patch {
@@ -831,9 +926,6 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
         })
     };
 
-    let mut entries: Vec<ChangeEntry> = Vec::new();
-    let mut allocated_ids: Vec<AllocatedIds> = Vec::new();
-
     // Library-namespace ops.
     for op in library_ops {
         match op {
@@ -841,6 +933,7 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
                 let context = "reporting a font append";
                 entries.push(ChangeEntry {
                     address: ChangeAddress {
+                        artifact: None,
                         component: None,
                         owner_path: None,
                         collection: ReportCollection::Fonts,
@@ -892,6 +985,7 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
                 }
                 entries.push(ChangeEntry {
                     address: ChangeAddress {
+                        artifact: None,
                         component: None,
                         owner_path: None,
                         collection: ReportCollection::ImageAssets,
@@ -907,6 +1001,7 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
                 // entry names the exact store slot destroyed.
                 entries.push(ChangeEntry {
                     address: ChangeAddress {
+                        artifact: None,
                         component: None,
                         owner_path: None,
                         collection: ReportCollection::ImageAssets,
@@ -937,6 +1032,7 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
                 }
                 entries.push(ChangeEntry {
                     address: ChangeAddress {
+                        artifact: None,
                         component: Some(component.clone()),
                         owner_path: None,
                         collection: ReportCollection::Aliases,
@@ -954,6 +1050,7 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
             PlanLibraryOp::AliasRemove { component, alias } => {
                 entries.push(ChangeEntry {
                     address: ChangeAddress {
+                        artifact: None,
                         component: Some(component.clone()),
                         owner_path: None,
                         collection: ReportCollection::Aliases,
@@ -981,6 +1078,7 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
                 let view = after.component_view();
                 entries.push(ChangeEntry {
                     address: ChangeAddress {
+                        artifact: None,
                         component: Some(lib_reference.clone()),
                         owner_path: None,
                         collection: ReportCollection::Components,
@@ -999,7 +1097,7 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
                 });
                 let projections = child_projections(&view)?;
                 one_sided_component_children(
-                    &mut entries,
+                    entries,
                     lib_reference,
                     &projections,
                     ReportOp::Create,
@@ -1059,6 +1157,7 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
                 }
                 entries.push(ChangeEntry {
                     address: ChangeAddress {
+                        artifact: None,
                         component: Some(address.lib_reference.clone()),
                         owner_path: None,
                         collection: ReportCollection::Components,
@@ -1071,19 +1170,20 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
                 let before_children = child_projections(&before_view)?;
                 let after_children = child_projections(&after_view)?;
                 component_child_entries(
-                    &mut entries,
+                    entries,
                     &address.lib_reference,
                     &before_children,
                     &after_children,
                 );
                 if let Some(shrink) = parts_shrink {
-                    parts_shrink_entries(&mut entries, &address.lib_reference, shrink)?;
+                    parts_shrink_entries(entries, &address.lib_reference, shrink)?;
                 }
             }
             PlanComponentPatch::Delete { address, before } => {
                 let view = before.component_view();
                 entries.push(ChangeEntry {
                     address: ChangeAddress {
+                        artifact: None,
                         component: Some(address.lib_reference.clone()),
                         owner_path: None,
                         collection: ReportCollection::Components,
@@ -1102,7 +1202,7 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
                 });
                 let projections = child_projections(&view)?;
                 one_sided_component_children(
-                    &mut entries,
+                    entries,
                     &address.lib_reference,
                     &projections,
                     ReportOp::Delete,
@@ -1111,36 +1211,261 @@ pub fn report(plan: &SavedPlan) -> Result<PlanReport, PlanError> {
         }
     }
 
-    let mut summary_counts: BTreeMap<(ReportCollection, ReportOp), usize> = BTreeMap::new();
-    for entry in &entries {
-        *summary_counts
-            .entry((entry.address.collection, entry.op))
-            .or_insert(0) += 1;
+    // Every compile entry belongs to the plan's single write artifact
+    // (declared InPlaceTarget or Destination), now named explicitly on each
+    // entry (review finding B-3).
+    let write = plan.manifest.iter().find(|entry| {
+        matches!(
+            entry.role,
+            ManifestRole::Destination | ManifestRole::InPlaceTarget
+        )
+    });
+    if let Some(write) = write {
+        for entry in entries.iter_mut().skip(entry_floor) {
+            entry.address.artifact = Some(write.declared_path.clone());
+        }
     }
-    let summary = summary_counts
-        .into_iter()
-        .map(|((collection, op), count)| PlanReportSummaryRow {
-            collection,
-            op,
-            count,
-        })
-        .collect();
+    Ok(())
+}
 
-    Ok(PlanReport {
-        domain: plan.domain,
-        direction: plan.direction,
-        schema_version: plan.schema_version,
-        state_format_version: plan.state_format_version,
-        artifacts,
-        entries,
-        summary,
-        allocated_ids,
-        diagnostics: plan
-            .diagnostics
+/// Dump-direction entry expansion (memo §3): per source file, a created
+/// file's full-text summary with expected-state counts, or each structured
+/// edit with its locator path and fragment summary; staged bundles by
+/// hash/length (bodies never render).
+fn dump_entries(
+    plan: &SavedPlan,
+    source: &crate::plan::PlanSourcePatch,
+    bundles: &[crate::plan::PlanBundlePatch],
+    expected_state: &crate::plan::ExpectedSourceState,
+    entries: &mut Vec<ChangeEntry>,
+) -> Result<(), PlanError> {
+    use crate::plan::PlanSourcePatch;
+    let declared_of = |canonical: &str| {
+        plan.manifest
             .iter()
-            .map(|diagnostic| diagnostic.message.clone())
-            .collect(),
-    })
+            .find(|entry| entry.canonical_path == canonical)
+            .map(|entry| entry.declared_path.clone())
+            .unwrap_or_else(|| canonical.to_owned())
+    };
+    let expected_counts = || -> Vec<FieldChange> {
+        let components = expected_state.components.len();
+        let parameters: usize = expected_state
+            .components
+            .iter()
+            .map(|component| component.parameter_names.len())
+            .sum();
+        let aliases: usize = expected_state
+            .components
+            .iter()
+            .map(|component| component.alias_values.len())
+            .sum();
+        let footprints: usize = expected_state
+            .components
+            .iter()
+            .map(|component| component.footprint_models.len())
+            .sum();
+        let pins: usize = expected_state
+            .components
+            .iter()
+            .map(|component| {
+                component.component_scope_pins
+                    + component.parts.iter().map(|part| part.pins).sum::<usize>()
+            })
+            .sum();
+        let graphics: usize = expected_state
+            .components
+            .iter()
+            .map(|component| {
+                component.component_scope_graphics
+                    + component
+                        .parts
+                        .iter()
+                        .map(|part| part.graphics)
+                        .sum::<usize>()
+            })
+            .sum();
+        [
+            ("expected_components", components),
+            ("expected_parameters", parameters),
+            ("expected_aliases", aliases),
+            ("expected_footprints", footprints),
+            ("expected_pins", pins),
+            ("expected_graphics", graphics),
+        ]
+        .into_iter()
+        .map(|(name, count)| FieldChange {
+            name: name.to_owned(),
+            before: None,
+            after: Some(Value::from(count)),
+        })
+        .collect()
+    };
+    match source {
+        PlanSourcePatch::Create {
+            destination,
+            text,
+            result_hash,
+        } => {
+            let mut fields = vec![
+                FieldChange {
+                    name: "text_bytes".to_owned(),
+                    before: None,
+                    after: Some(Value::from(text.len())),
+                },
+                FieldChange {
+                    name: "text_lines".to_owned(),
+                    before: None,
+                    after: Some(Value::from(text.lines().count())),
+                },
+                FieldChange {
+                    name: "result_hash".to_owned(),
+                    before: None,
+                    after: Some(Value::String(result_hash.hex.clone())),
+                },
+            ];
+            fields.extend(expected_counts());
+            entries.push(ChangeEntry {
+                address: ChangeAddress {
+                    artifact: Some(declared_of(destination)),
+                    component: None,
+                    owner_path: None,
+                    collection: ReportCollection::Source,
+                    old_index: None,
+                    new_index: None,
+                },
+                op: ReportOp::Create,
+                fields,
+            });
+        }
+        PlanSourcePatch::Edit {
+            source: source_path,
+            edits,
+            result_hash,
+        } => {
+            use altium_spec_lang::PlannedSpecEdit;
+            let artifact = declared_of(source_path);
+            for (index, edit) in edits.iter().enumerate() {
+                let summarize = |text: &str| {
+                    let first = text.lines().next().unwrap_or_default();
+                    if first.len() > SUMMARY_BYTE_BUDGET {
+                        // Slicing on a raw byte offset would panic whenever a
+                        // multi-byte character straddles the budget; library
+                        // text legitimately carries Ω, µ, ° and CJK.
+                        let mut cut = SUMMARY_BYTE_BUDGET;
+                        while !first.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                        format!("{}…", &first[..cut])
+                    } else if text.lines().count() > 1 {
+                        format!("{first}…")
+                    } else {
+                        first.to_owned()
+                    }
+                };
+                let (op, locator, fragment) = match edit {
+                    PlannedSpecEdit::InsertBlock { parent, block } => (
+                        if block.replacement {
+                            ReportOp::Replace
+                        } else {
+                            ReportOp::Create
+                        },
+                        parent.path_display(),
+                        format!("block: {}", summarize(&block.text)),
+                    ),
+                    PlannedSpecEdit::DeleteBlock { target } => (
+                        ReportOp::Delete,
+                        target.path_display(),
+                        format!("block: {}", summarize(&target.expected_text)),
+                    ),
+                    PlannedSpecEdit::SetProperty { target, key, value } => (
+                        ReportOp::Replace,
+                        target.path_display(),
+                        format!("{key}: {}", summarize(value)),
+                    ),
+                    PlannedSpecEdit::RemoveProperty { target, key } => (
+                        ReportOp::Delete,
+                        target.path_display(),
+                        format!("property '{key}'"),
+                    ),
+                    PlannedSpecEdit::SetAnnotation { target, binding } => (
+                        ReportOp::Replace,
+                        target.path_display(),
+                        format!(
+                            "annotation(id: {:?}, stable: {:?}, group: {:?}, source_id: {:?})",
+                            binding.id, binding.stable, binding.group, binding.source_id
+                        ),
+                    ),
+                };
+                entries.push(ChangeEntry {
+                    address: ChangeAddress {
+                        artifact: Some(artifact.clone()),
+                        component: None,
+                        owner_path: Some(format!("node {locator}")),
+                        collection: ReportCollection::Source,
+                        old_index: Some(index),
+                        new_index: Some(index),
+                    },
+                    op,
+                    fields: vec![
+                        FieldChange {
+                            name: "edit".to_owned(),
+                            before: None,
+                            after: Some(Value::String(fragment)),
+                        },
+                        // Keeps the exact post-edit hash visible on every edit
+                        // entry without re-rendering the whole file, matching
+                        // the created-source entry's result_hash field.
+                        FieldChange {
+                            name: "result_hash".to_owned(),
+                            before: None,
+                            after: Some(Value::String(result_hash.hex.clone())),
+                        },
+                    ],
+                });
+            }
+        }
+    }
+    for bundle in bundles {
+        let declared = declared_of(&bundle.destination);
+        let precondition = plan
+            .manifest
+            .iter()
+            .find(|entry| entry.canonical_path == bundle.destination)
+            .map(|entry| entry.precondition.clone());
+        let op = match precondition {
+            Some(PlanPrecondition::Absent) | None => ReportOp::Create,
+            Some(PlanPrecondition::Hash(_)) => ReportOp::Replace,
+        };
+        entries.push(ChangeEntry {
+            address: ChangeAddress {
+                artifact: Some(declared),
+                component: None,
+                owner_path: None,
+                collection: ReportCollection::ImageAssets,
+                old_index: None,
+                new_index: None,
+            },
+            op,
+            fields: vec![
+                FieldChange {
+                    name: "resource_name".to_owned(),
+                    before: None,
+                    after: Some(Value::String(bundle.resource_name.clone())),
+                },
+                FieldChange {
+                    name: "byte_len".to_owned(),
+                    before: None,
+                    after: Some(Value::from(bundle.content_hash.byte_len)),
+                },
+                FieldChange {
+                    name: "content_hash".to_owned(),
+                    before: None,
+                    after: Some(Value::String(bundle.content_hash.hex.clone())),
+                },
+            ],
+        });
+    }
+    Ok(())
 }
 
 /// Plain-text rendering for tests and example drivers (no CLI in step 3).
@@ -1485,6 +1810,30 @@ mod tests {
         // Summary counts agree with the entries.
         let total: usize = derived.summary.iter().map(|row| row.count).sum();
         assert_eq!(total, derived.entries.len());
+
+        // The B-3 revisit (increment C): every compile entry and summary row
+        // names the plan's single write artifact, and hash preconditions
+        // surface their hex digests in the artifact table.
+        let write_path = &derived.artifacts[1].declared_path;
+        assert!(
+            derived
+                .entries
+                .iter()
+                .all(|entry| entry.address.artifact.as_deref() == Some(write_path.as_str()))
+        );
+        assert!(
+            derived
+                .summary
+                .iter()
+                .all(|row| row.artifact.as_deref() == Some(write_path.as_str()))
+        );
+        assert!(
+            derived.artifacts[0]
+                .hash
+                .as_ref()
+                .is_some_and(|hash| hash.len() == 64)
+        );
+        assert_eq!(derived.artifacts[1].hash, None);
 
         // The renderer mentions every key element.
         let text = render_plan_report(&derived);

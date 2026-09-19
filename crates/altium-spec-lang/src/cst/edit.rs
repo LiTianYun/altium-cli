@@ -146,6 +146,55 @@ impl IntentBlock {
     pub fn as_str(&self) -> &str {
         &self.source
     }
+
+    /// The complete state of this fragment for persistence (`cst::planned`):
+    /// source text, replacement flag, replacement name, and the tri-state
+    /// trailing-comment replacement.
+    pub(crate) fn planned_parts(&self) -> (&str, bool, Option<&str>, Option<Option<&str>>) {
+        (
+            &self.source,
+            self.replacement,
+            self.replacement_name.as_deref(),
+            self.replacement_trailing_comment
+                .as_ref()
+                .map(|comment| comment.as_deref()),
+        )
+    }
+
+    /// Reconstructs a fragment from persisted parts, re-validating that the
+    /// text parses as exactly one declaration — either at file scope or as a
+    /// single child of a probe component (nested kinds such as pins and
+    /// parameters are only legal inside their parent). A fragment that parses
+    /// as neither (or as more than one block — a breakout attempt) is
+    /// rejected; the final applied text is additionally re-parsed and
+    /// hash-verified by the caller.
+    pub(crate) fn from_planned_parts(
+        source: String,
+        replacement: bool,
+        replacement_name: Option<String>,
+        replacement_trailing_comment: Option<Option<String>>,
+    ) -> Result<Self, StructuredEditError> {
+        let file_scope = SpecTree::parse(source.clone())
+            .ok()
+            .is_some_and(|tree| tree.top_level_blocks().len() == 1);
+        let nested_scope = || {
+            SpecTree::parse(format!("component __PlannedProbe__ {{\n{source}\n}}"))
+                .ok()
+                .is_some_and(|tree| {
+                    let blocks = tree.top_level_blocks();
+                    blocks.len() == 1 && blocks[0].child_blocks().len() == 1
+                })
+        };
+        if !file_scope && !nested_scope() {
+            return Err(StructuredEditError::InvalidPlannedFragment(source));
+        }
+        Ok(Self {
+            source,
+            replacement,
+            replacement_name,
+            replacement_trailing_comment,
+        })
+    }
 }
 
 /// One typed edit against a [`SpecTree`] snapshot.
@@ -183,6 +232,11 @@ pub enum StructuredEditError {
     InvalidPropertyKey(String),
     #[error("intent block must contain exactly one declaration")]
     ExpectedSingleBlock,
+    #[error(
+        "persisted intent-block fragment does not parse as exactly one declaration \
+         (file scope or nested): {0:?}"
+    )]
+    InvalidPlannedFragment(String),
     #[error("expression fragment must contain exactly one expression")]
     ExpectedSingleExpression,
     #[error("source id {0} does not exist in this source snapshot")]

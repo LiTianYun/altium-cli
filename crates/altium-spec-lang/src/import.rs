@@ -223,6 +223,144 @@ pub fn capture_imports(root_path: &Path) -> Result<CapturedSourceGraph, SpecErro
     Ok(capture)
 }
 
+/// Capture a graph whose ROOT source is the given in-memory text, with
+/// transitive imports captured from disk exactly as [`capture_imports`] does.
+/// The root path need not exist on disk (a not-yet-written destination is
+/// resolved as its canonicalized parent joined with the file name); it
+/// anchors relative import resolution and keys the graph.
+///
+/// This is the dump-direction compilation surface (NEXT.md step 3): the
+/// planner and apply verify what a source WOULD compile to before writing
+/// it. `verify_unchanged` on the returned graph checks only the imported
+/// files (the in-memory root has no on-disk counterpart to verify).
+pub fn capture_imports_with_root_text(
+    root_path: &Path,
+    root_text: &str,
+) -> Result<CapturedSourceGraph, SpecError> {
+    let requested_root_path = if root_path.is_absolute() {
+        root_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                SpecError::no_span(
+                    SpecErrorCode::FileNotFound,
+                    format!(
+                        "resolving root spec '{}': cannot read working directory: {error}",
+                        root_path.display()
+                    ),
+                )
+            })?
+            .join(root_path)
+    };
+    let root_path = match requested_root_path.canonicalize() {
+        Ok(path) => path,
+        Err(_) => {
+            let file_name = requested_root_path.file_name().ok_or_else(|| {
+                SpecError::no_span(
+                    SpecErrorCode::FileNotFound,
+                    format!(
+                        "root spec path '{}' has no file name component",
+                        requested_root_path.display()
+                    ),
+                )
+            })?;
+            let parent = match requested_root_path.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent,
+                _ => Path::new("."),
+            };
+            parent
+                .canonicalize()
+                .map_err(|error| {
+                    SpecError::no_span(
+                        SpecErrorCode::FileNotFound,
+                        format!(
+                            "resolving parent directory of root spec '{}': {error}",
+                            requested_root_path.display()
+                        ),
+                    )
+                })?
+                .join(file_name)
+        }
+    };
+    if file_domain(&root_path) == FileDomain::Unknown {
+        return Err(SpecError::no_span(
+            SpecErrorCode::CrossDomainViolation,
+            format!("unsupported root spec extension: '{}'", root_path.display()),
+        ));
+    }
+    let mut sources = IndexMap::new();
+    let root_source = captured_source_from_text(&root_path, root_text.to_owned())?;
+    let edges: Vec<_> = root_source
+        .imports
+        .iter()
+        .map(|edge| (edge.path.clone(), edge.span))
+        .collect();
+    sources.insert(root_path.clone(), root_source);
+    for (destination, span) in edges {
+        capture_source(&destination, &mut sources).map_err(|mut error| {
+            error.message = format!(
+                "import from '{}' at {}..{}: {}",
+                root_path.display(),
+                span.start,
+                span.end,
+                error.message
+            );
+            error
+        })?;
+    }
+    let graph = sources
+        .iter()
+        .map(|(path, source)| {
+            (
+                path.clone(),
+                source
+                    .imports
+                    .iter()
+                    .map(|edge| ImportEdge {
+                        to_path: edge.path.clone(),
+                        alias: edge.alias.clone(),
+                        span: edge.span,
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    let topological_order = topo_sort(&root_path, &graph)?;
+    // Verify the imported files only: the root text is in memory. A root that
+    // ALSO exists on disk is deliberately not compared — callers use this
+    // constructor precisely to compile a text that differs from (or has no)
+    // on-disk counterpart.
+    for (path, captured) in &sources {
+        if path == &root_path {
+            continue;
+        }
+        let current = std::fs::read_to_string(path).map_err(|error| {
+            SpecError::no_span(
+                SpecErrorCode::SourceChanged,
+                format!(
+                    "cannot verify captured source '{}': {error}; recapture inputs",
+                    path.display()
+                ),
+            )
+        })?;
+        if current != captured.source {
+            return Err(SpecError::no_span(
+                SpecErrorCode::SourceChanged,
+                format!(
+                    "captured source '{}' changed; recapture inputs",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(CapturedSourceGraph {
+        root_path,
+        sources,
+        topological_order,
+        requested_root_path,
+    })
+}
+
 fn capture_source(
     path: &Path,
     sources: &mut IndexMap<PathBuf, CapturedSource>,
@@ -236,6 +374,33 @@ fn capture_source(
             format!("reading UTF-8 spec '{}': {error}", path.display()),
         )
     })?;
+    let captured = captured_source_from_text(path, source)?;
+    // Insert before walking edges, allowing cycle detection to use the complete
+    // graph without recursively reopening an ancestor or a shared dependency.
+    let paths: Vec<_> = captured
+        .imports
+        .iter()
+        .map(|edge| (edge.path.clone(), edge.span))
+        .collect();
+    sources.insert(path.to_path_buf(), captured);
+    for (destination, span) in paths {
+        capture_source(&destination, sources).map_err(|mut error| {
+            error.message = format!(
+                "import from '{}' at {}..{}: {}",
+                path.display(),
+                span.start,
+                span.end,
+                error.message
+            );
+            error
+        })?;
+    }
+    Ok(())
+}
+
+/// Parse one source text and collect its validated import edges (the shared
+/// half of [`capture_source`] and [`capture_imports_with_root_text`]).
+fn captured_source_from_text(path: &Path, source: String) -> Result<CapturedSource, SpecError> {
     let ast = parse_spec(&source).map_err(|error| {
         SpecError::no_span(
             SpecErrorCode::ParseError,
@@ -302,33 +467,11 @@ fn capture_source(
             span,
         });
     }
-    // Insert before walking edges, allowing cycle detection to use the complete
-    // graph without recursively reopening an ancestor or a shared dependency.
-    let paths: Vec<_> = imports
-        .iter()
-        .map(|edge| (edge.path.clone(), edge.span))
-        .collect();
-    sources.insert(
-        path.to_path_buf(),
-        CapturedSource {
-            source,
-            ast,
-            imports,
-        },
-    );
-    for (destination, span) in paths {
-        capture_source(&destination, sources).map_err(|mut error| {
-            error.message = format!(
-                "import from '{}' at {}..{}: {}",
-                path.display(),
-                span.start,
-                span.end,
-                error.message
-            );
-            error
-        })?;
-    }
-    Ok(())
+    Ok(CapturedSource {
+        source,
+        ast,
+        imports,
+    })
 }
 
 /// Root AST and its direct imports after validating the complete import graph.

@@ -158,12 +158,10 @@ mod tests {
     };
     use super::*;
     use crate::param_collection::ParameterCollection;
-    use crate::sch_records::{
-        SchImplementation, SchImplementationList, SchLabel, SchLine, SchRecord,
-    };
+    use crate::sch_records::{SchImplementation, SchImplementationList, SchLine, SchRecord};
     use crate::schlib::{SchLib, SchLibAlias, compute_weight};
     use altium_format_types::{
-        Color, Coord, CoordPoint, LineStyle, PenWidth, PinElectricalType, RotationBy90,
+        Color, Coord, CoordPoint, PenWidth, PinElectricalType, RotationBy90,
     };
 
     /// A programmatic "collection zoo" snapshot: every collection class the

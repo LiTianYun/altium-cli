@@ -12,14 +12,20 @@ pub mod edit;
 pub mod lexer;
 pub mod merge;
 pub mod parser;
+pub mod planned;
 pub mod syntax;
 
 pub use access::{
     AnnotationRef, BindingMetadata, BlockKind, BlockRef, PropertyRef, SourceId, SpecTree,
 };
 pub use edit::{ExprSource, IntentBlock, PropertyKey, SpecEdit, StructuredEditError, apply_edits};
-pub use merge::{DumpMergeError, merge_dump};
+pub use merge::{DumpMergeError, merge_dump, plan_merge_dump};
 pub use parser::parse_structured;
+pub use planned::{
+    PlannedBinding, PlannedEditError, PlannedIntentBlock, PlannedLocator, PlannedNodeKind,
+    PlannedSpecEdit, PlannedTrailingComment, SPEC_EDIT_FORMAT_VERSION, apply_planned_edits,
+    decode_spec_edits, encode_spec_edits,
+};
 
 use cstree::build::GreenNodeBuilder;
 

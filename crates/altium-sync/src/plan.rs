@@ -67,6 +67,29 @@ pub enum PlanError {
          regenerate the plan with the current tool"
     )]
     UnsupportedStateFormatVersion { found: u32, supported: u32 },
+    #[error(
+        "unsupported structured-edit format version {found} (supported: {supported}); \
+         regenerate the plan with the current tool"
+    )]
+    UnsupportedEditFormatVersion { found: u32, supported: u32 },
+    #[error("{context}: {source}")]
+    PlannedEdit {
+        context: String,
+        #[source]
+        source: altium_spec_lang::PlannedEditError,
+    },
+    #[error("{context}: {source}")]
+    StructuredEdit {
+        context: String,
+        #[source]
+        source: altium_spec_lang::StructuredEditError,
+    },
+    #[error("{context}: {source}")]
+    DumpMerge {
+        context: String,
+        #[source]
+        source: altium_spec_lang::DumpMergeError,
+    },
     #[error("{context}: {detail}")]
     Manifest { context: String, detail: String },
     #[error("{context}: {source}")]
@@ -673,9 +696,7 @@ pub enum PlanLibraryOp {
     },
 }
 
-/// Direction-specific patch payloads. Dump-direction source patches are
-/// increment C (design memo §S16); adding them extends this enum under the
-/// same schema gate.
+/// Direction-specific patch payloads (design memo §S4/§S16).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum PlanPatches {
@@ -683,6 +704,160 @@ pub enum PlanPatches {
         library_ops: Vec<PlanLibraryOp>,
         components: Vec<PlanComponentPatch>,
     },
+    /// Dump-direction source patches: hash-bound structured edits (or a
+    /// complete embedded new-source text), staged image-asset bundles, and
+    /// the typed expected state the resulting source must compile to.
+    Dump {
+        /// Exact supported `altium_spec_lang::SPEC_EDIT_FORMAT_VERSION`;
+        /// the crate owning edit semantics owns the version that gates it
+        /// (the §S2 principle).
+        edit_format_version: u32,
+        source: PlanSourcePatch,
+        bundles: Vec<PlanBundlePatch>,
+        expected_state: ExpectedSourceState,
+    },
+}
+
+/// The dump plan's source-file patch (design memo §S16).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum PlanSourcePatch {
+    /// A new source file: complete validated text (validated = it parses,
+    /// compiles, and its compiled intent elaborated against the captured
+    /// library to an EMPTY patch at planning), written to the manifest
+    /// `Destination` whose canonical path is recorded here with an
+    /// expected-absence precondition.
+    Create {
+        /// Canonical path of the manifest entry this patch writes.
+        destination: String,
+        text: String,
+        /// BLAKE3 of the exact bytes to be written.
+        result_hash: PlanHash,
+    },
+    /// Structured edits against an existing source, bound to the manifest
+    /// `InPlaceTarget` hash recorded for `source`. Locators rebind against
+    /// the hash-verified text at apply; `result_hash` is the BLAKE3 of the
+    /// post-edit text computed at planning, verified byte-for-byte against
+    /// apply's own output. An empty edit list is a recorded no-op.
+    Edit {
+        /// Canonical path of the manifest entry this patch edits in place.
+        source: String,
+        edits: Vec<altium_spec_lang::PlannedSpecEdit>,
+        result_hash: PlanHash,
+    },
+}
+
+/// One staged `.altium-image` bundle: the complete encoded resource body
+/// (the authorized opaque image-asset boundary) bound to its store resource
+/// name and a manifest `Destination`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanBundlePatch {
+    /// Canonical path of the manifest Destination entry this bundle writes.
+    pub destination: String,
+    /// The store resource name the body was exported from.
+    pub resource_name: String,
+    pub content_hash: PlanHash,
+    pub base64: String,
+}
+
+impl PlanBundlePatch {
+    /// Decodes and hash-verifies the embedded bundle body.
+    pub fn decoded_bytes(&self) -> Result<Vec<u8>, PlanError> {
+        let context = format!(
+            "decoding staged image bundle for '{}' (resource '{}')",
+            self.destination, self.resource_name
+        );
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.base64)
+            .map_err(|error| PlanError::ImagePayload {
+                context: context.clone(),
+                detail: format!("invalid base64: {error}"),
+            })?;
+        self.content_hash.verify_bytes(&bytes, &context)?;
+        Ok(bytes)
+    }
+}
+
+// ── Typed expected source state (dump direction) ─────────────────────────
+
+/// Typed summary of what a source file's compiled intent must look like —
+/// the deterministic apply-side verification target for dump plans
+/// (recompile the resulting source, summarize, compare; no reconciler, no
+/// library access). Derived from `SchLibIntent` by
+/// [`expected_source_state`]; both planning and apply use the same pure
+/// derivation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedSourceState {
+    pub components: Vec<ExpectedComponentState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedPartState {
+    pub number: i32,
+    pub pins: usize,
+    pub graphics: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedComponentState {
+    pub lib_reference: String,
+    pub parameter_names: Vec<String>,
+    pub alias_values: Vec<String>,
+    pub footprint_models: Vec<String>,
+    pub component_scope_pins: usize,
+    pub component_scope_graphics: usize,
+    pub parts: Vec<ExpectedPartState>,
+}
+
+/// Pure typed summary of a compiled `SchLibIntent` (see
+/// [`ExpectedSourceState`]).
+pub fn expected_source_state(
+    intent: &altium_spec_lang::intent::SchLibIntent,
+) -> ExpectedSourceState {
+    ExpectedSourceState {
+        components: intent
+            .components
+            .items
+            .iter()
+            .map(|component| ExpectedComponentState {
+                lib_reference: component.name.node.clone(),
+                parameter_names: component
+                    .parameters
+                    .items
+                    .iter()
+                    .map(|parameter| parameter.name.node.clone())
+                    .collect(),
+                alias_values: component
+                    .aliases
+                    .items
+                    .iter()
+                    .map(|alias| alias.node.clone())
+                    .collect(),
+                footprint_models: component
+                    .footprints
+                    .items
+                    .iter()
+                    .map(|footprint| footprint.model_name.node.clone())
+                    .collect(),
+                component_scope_pins: component.pins.items.len(),
+                component_scope_graphics: component.graphics.items.len(),
+                parts: component
+                    .parts
+                    .items
+                    .iter()
+                    .map(|part| ExpectedPartState {
+                        number: part.number.node.get() as i32,
+                        pins: part.pins.items.len(),
+                        graphics: part.graphics.items.len(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
 }
 
 /// One non-blocking planning note carried by the plan (blocking diagnostics
@@ -950,15 +1125,226 @@ impl SavedPlan {
             });
         }
         check_manifest_collisions(&plan.manifest, None)?;
-        let PlanPatches::Compile { library_ops, .. } = &plan.patches;
-        for op in library_ops {
-            if let PlanLibraryOp::ImageAssetInsert { payload, .. }
-            | PlanLibraryOp::ImageAssetReplace { payload, .. } = op
-            {
-                payload.decoded_bytes()?;
+        match &plan.patches {
+            PlanPatches::Compile { library_ops, .. } => {
+                if plan.direction != PlanDirection::Compile {
+                    return Err(PlanError::InvalidPlan {
+                        detail: "compile patches recorded under a non-Compile direction".to_owned(),
+                    });
+                }
+                for op in library_ops {
+                    if let PlanLibraryOp::ImageAssetInsert { payload, .. }
+                    | PlanLibraryOp::ImageAssetReplace { payload, .. } = op
+                    {
+                        payload.decoded_bytes()?;
+                    }
+                }
+            }
+            PlanPatches::Dump {
+                edit_format_version,
+                bundles,
+                ..
+            } => {
+                if plan.direction != PlanDirection::Dump {
+                    return Err(PlanError::InvalidPlan {
+                        detail: "dump patches recorded under a non-Dump direction".to_owned(),
+                    });
+                }
+                if *edit_format_version != altium_spec_lang::SPEC_EDIT_FORMAT_VERSION {
+                    return Err(PlanError::UnsupportedEditFormatVersion {
+                        found: *edit_format_version,
+                        supported: altium_spec_lang::SPEC_EDIT_FORMAT_VERSION,
+                    });
+                }
+                for bundle in bundles {
+                    bundle.decoded_bytes()?;
+                }
             }
         }
         Ok(plan)
+    }
+
+    /// Assembles and validates a dump-direction plan: manifest capture (the
+    /// same §S11 rejection set), patch↔manifest cross-checks, and a
+    /// lowering-time DRY RUN of the apply-side edit replay — decode the
+    /// persisted edits against a fresh parse of the existing source (or
+    /// re-parse the embedded new text) and require the byte-exact
+    /// `result_hash` — so every emitted dump plan is proven executable at
+    /// planning.
+    ///
+    /// `existing_source_text` is the captured in-place source text for
+    /// `PlanSourcePatch::Edit` (`None` for `Create`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dump_from_parts(
+        scope: PlanScope,
+        artifacts: Vec<PlanArtifact>,
+        plan_path: Option<&Path>,
+        diagnostics: Vec<PlanDiagnostic>,
+        source: PlanSourcePatch,
+        bundles: Vec<PlanBundlePatch>,
+        expected_state: ExpectedSourceState,
+        existing_source_text: Option<&str>,
+    ) -> Result<Self, PlanError> {
+        let manifest = build_manifest(artifacts, plan_path)?;
+        let manifest_entry = |canonical: &str| {
+            manifest
+                .iter()
+                .find(|entry| entry.canonical_path == canonical)
+        };
+
+        // Patch↔manifest cross-checks.
+        match &source {
+            PlanSourcePatch::Create {
+                destination,
+                text,
+                result_hash,
+            } => {
+                let entry = manifest_entry(destination).ok_or_else(|| PlanError::InvalidPlan {
+                    detail: format!(
+                        "source Create targets '{destination}', which is not a manifest entry"
+                    ),
+                })?;
+                if entry.role != ManifestRole::Destination
+                    || entry.precondition != PlanPrecondition::Absent
+                {
+                    return Err(PlanError::InvalidPlan {
+                        detail: format!(
+                            "source Create targets '{destination}', which is not an \
+                             expected-absent Destination"
+                        ),
+                    });
+                }
+                result_hash.verify_bytes(
+                    text.as_bytes(),
+                    "validating the embedded new-source \
+                     text against its recorded result hash",
+                )?;
+                altium_spec_lang::SpecTree::parse(text.clone()).map_err(|error| {
+                    PlanError::InvalidPlan {
+                        detail: format!("embedded new-source text does not parse: {error}"),
+                    }
+                })?;
+            }
+            PlanSourcePatch::Edit {
+                source: source_path,
+                edits,
+                result_hash,
+            } => {
+                let entry = manifest_entry(source_path).ok_or_else(|| PlanError::InvalidPlan {
+                    detail: format!(
+                        "source Edit targets '{source_path}', which is not a manifest entry"
+                    ),
+                })?;
+                if entry.role != ManifestRole::InPlaceTarget {
+                    return Err(PlanError::InvalidPlan {
+                        detail: format!(
+                            "source Edit targets '{source_path}', which is not the declared \
+                             InPlaceTarget"
+                        ),
+                    });
+                }
+                let text = existing_source_text.ok_or_else(|| PlanError::InvalidPlan {
+                    detail: "source Edit lowering requires the captured existing source text"
+                        .to_owned(),
+                })?;
+                if let PlanPrecondition::Hash(hash) = &entry.precondition {
+                    hash.verify_bytes(
+                        text.as_bytes(),
+                        "cross-checking the captured source text against its manifest hash",
+                    )?;
+                }
+                // Dry run: the persisted edits must decode against a FRESH
+                // parse and replay to exactly the recorded result hash.
+                let tree = altium_spec_lang::SpecTree::parse(text.to_owned()).map_err(|error| {
+                    PlanError::InvalidPlan {
+                        detail: format!("captured source text does not parse: {error}"),
+                    }
+                })?;
+                let decoded =
+                    altium_spec_lang::decode_spec_edits(&tree, edits).map_err(|source| {
+                        PlanError::PlannedEdit {
+                            context: "dry-running the persisted source edits".to_owned(),
+                            source,
+                        }
+                    })?;
+                let replayed =
+                    altium_spec_lang::apply_edits(&tree, &decoded).map_err(|source| {
+                        PlanError::StructuredEdit {
+                            context: "dry-running the persisted source edits".to_owned(),
+                            source,
+                        }
+                    })?;
+                result_hash.verify_bytes(
+                    replayed.source().as_bytes(),
+                    "verifying the dry-run edit replay against the recorded result hash",
+                )?;
+            }
+        }
+        for bundle in &bundles {
+            let entry =
+                manifest_entry(&bundle.destination).ok_or_else(|| PlanError::InvalidPlan {
+                    detail: format!(
+                        "bundle for resource '{}' targets '{}', which is not a manifest entry",
+                        bundle.resource_name, bundle.destination
+                    ),
+                })?;
+            if entry.role != ManifestRole::Destination {
+                return Err(PlanError::InvalidPlan {
+                    detail: format!(
+                        "bundle for resource '{}' targets non-Destination manifest entry '{}'",
+                        bundle.resource_name, bundle.destination
+                    ),
+                });
+            }
+            bundle.decoded_bytes()?;
+        }
+        // Every writable manifest entry must be claimed by exactly one patch.
+        for entry in &manifest {
+            let writable = matches!(
+                entry.role,
+                ManifestRole::Destination | ManifestRole::InPlaceTarget
+            );
+            if !writable {
+                continue;
+            }
+            let claims = bundles
+                .iter()
+                .filter(|bundle| bundle.destination == entry.canonical_path)
+                .count()
+                + match &source {
+                    PlanSourcePatch::Create { destination, .. } => {
+                        usize::from(destination == &entry.canonical_path)
+                    }
+                    PlanSourcePatch::Edit { source, .. } => {
+                        usize::from(source == &entry.canonical_path)
+                    }
+                };
+            if claims != 1 {
+                return Err(PlanError::InvalidPlan {
+                    detail: format!(
+                        "writable manifest entry '{}' is claimed by {claims} patches; every \
+                         output must be claimed exactly once",
+                        entry.canonical_path
+                    ),
+                });
+            }
+        }
+
+        Ok(Self {
+            schema_version: PLAN_SCHEMA_VERSION,
+            state_format_version: SCHLIB_STATE_FORMAT_VERSION,
+            domain: PlanDomain::Schlib,
+            direction: PlanDirection::Dump,
+            scope,
+            manifest,
+            patches: PlanPatches::Dump {
+                edit_format_version: altium_spec_lang::SPEC_EDIT_FORMAT_VERSION,
+                source,
+                bundles,
+                expected_state,
+            },
+            diagnostics,
+        })
     }
 }
 
@@ -1194,7 +1580,10 @@ mod tests {
         let PlanPatches::Compile {
             library_ops,
             components,
-        } = &plan.patches;
+        } = &plan.patches
+        else {
+            panic!("expected compile patches");
+        };
         assert_eq!(
             library_ops.as_slice(),
             &[PlanLibraryOp::AliasAdd {
@@ -1589,7 +1978,9 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        let PlanPatches::Compile { library_ops, .. } = &plan.patches;
+        let PlanPatches::Compile { library_ops, .. } = &plan.patches else {
+            panic!("expected compile patches");
+        };
         let PlanLibraryOp::ImageAssetInsert { name, payload, .. } = &library_ops[0] else {
             panic!("expected image insert first, got {:?}", library_ops[0]);
         };

@@ -638,8 +638,10 @@ acting:
   been observed at this state. (The independent review observed the full
   56/32/135 pass at exit 0 on the pre-fix increment-B state; this pass's
   edits touch only report pairing/fail-fast checks, the corpus key
-  rename, and one test.) The verbatim gate MUST be re-run to completion
-  and this line updated before merge.
+  rename, and one test.) DISCHARGED 2026-09-18: the gate was subsequently
+  re-run to completion at the increment-C final state — see the increment-C
+  verification section (exit 0, 56/32/135, every key true) — and again at
+  the step-3 closure state recorded below.
 
 ### Handoffs
 
@@ -648,3 +650,341 @@ acting:
   `plan_compile_schlib`'s 0/2/1 exit codes and `render_plan_report`.
 - Increment C builds the dump-direction planner on the same container and
   the now-consumed address vocabulary.
+
+## Increment C — dump-direction planner and hash-bound source patches (complete, 2026-09-18)
+
+Design authority: memo §4C, §S16, §1's dump-relevant sentences; the task's
+round-trip-law/report obligations; the increment-B recorded revisit
+obligations (report micro-deviations, resolved below).
+
+### altium-spec-lang (serializable structured edits)
+
+- `crates/altium-spec-lang/src/cst/planned.rs` (new):
+  `SPEC_EDIT_FORMAT_VERSION = 1`, `PlannedSpecEdit` — the serializable,
+  versioned mirror of `SpecEdit` (`deny_unknown_fields` throughout) with
+  `PlannedLocator { node_path, expected_kind, expected_text }`: the
+  `SourceId` child-node index path WITHOUT the process-local snapshot
+  counter, plus the target's kind and exact source text. The binding to a
+  specific tree is the containing plan's source content hash; the recorded
+  kind/text are defense in depth — `decode_spec_edits` rebinds each path via
+  the new `SpecTree::source_id_at(&[u32])` (access.rs) and hard-rejects
+  unresolved paths, kind mismatches, and text mismatches
+  (`PlannedEditError::{UnresolvedLocator, LocatorKindMismatch,
+  LocatorTextMismatch}`). Fragments serialize as source text and re-validate
+  on decode through the probe parsers (`PropertyKey::new`,
+  `ExprSource::parse`, and `IntentBlock::from_planned_parts` — a new
+  edit.rs constructor accepting exactly one declaration at file scope or as
+  a single probe-component child, so nested pin/parameter fragments decode
+  while breakout/multi-block text is rejected). The replacement fragment's
+  tri-state trailing comment persists as an explicit
+  `PlannedTrailingComment::{Untouched, Clear, Set}` (nested `Option`s are
+  not JSON-lossless). Tests: encode→JSON→decode→`apply_edits` byte-identical
+  to the direct merge over CRLF + comments + annotations, deletions,
+  stale/tampered locator rejection, and fragment-smuggle rejection.
+- `crates/altium-spec-lang/src/cst/merge.rs`: `plan_merge_dump(existing,
+  fresh) -> Vec<SpecEdit>` — the exact edit computation `merge_dump`
+  performs, exposed without applying; `merge_dump` now routes through it, so
+  a captured plan and a direct merge are the same edit sequence by
+  construction.
+- `crates/altium-spec-lang/src/import.rs`:
+  `capture_imports_with_root_text(root_path, text)` — a captured graph
+  whose ROOT source is an in-memory text (the root path may be absent on
+  disk; imports are captured and verified from disk). This is how both the
+  planner and dump apply compile a source that is not (yet) written.
+  `capture_source` was refactored around the shared
+  `captured_source_from_text`.
+- `BlockKind` gained serde derives (serialized by name inside locators; an
+  unknown name fails decode — correct version-skew behavior).
+
+### altium-sync (dump generation, planner, apply, report)
+
+- `crates/altium-sync/src/schlib/dump_source.rs` (new):
+  `generate_schlib_spec_source(&SchLibSnapshot)` — deterministic
+  `.schlib-spec` text emitting exactly the values elaboration compares, so
+  compile+elaborate of the generated text against the same library is an
+  EMPTY patch by construction. Lossless rendering: `raw` internal-unit
+  coordinates where mils are inexact, `#RRGGBB` colors, exhaustive enum
+  names, lexer-supported string escapes only. Content the intent language
+  cannot represent (or the renderer cannot express exactly) is SKIPPED with
+  a recorded diagnostic, never silently: graphics groups stop at the first
+  unrepresentable member (partial-scope tail preservation), pin groups skip
+  whole on empty/duplicate designators (the merge keys pins by designator),
+  parameters/footprints skip whole on duplicate keys, unaddressable owner
+  groups (owner-0 single-part pins, owner-0 graphics,
+  PartIndependent/OutOfRange) are never authored, and preservation-critical
+  fields (`font_id`, image `source`/`file_name`, pin `hidden_net_name`/
+  `part_swap_group`/`pair_swap_group`, footprint pin-pad definers) are never
+  emitted — unauthored means preserved byte-verbatim. Multi-part components
+  emit owner-0 pins at component scope and per-part blocks with
+  `part_count`.
+- `crates/altium-sync/src/plan.rs`: `PlanPatches::Dump { edit_format_version
+  (exact-match gate against `SPEC_EDIT_FORMAT_VERSION` at decode, §S2's
+  owner-crate principle), source, bundles, expected_state }`;
+  `PlanSourcePatch::Create { destination, text, result_hash }` /
+  `::Edit { source, edits: Vec<PlannedSpecEdit>, result_hash }` (§S16 —
+  locators bound to the manifest source hash; `result_hash` is the BLAKE3 of
+  the post-edit text computed at planning); `PlanBundlePatch` (staged
+  `.altium-image` bodies, base64 + BLAKE3, hash-verified at decode);
+  `ExpectedSourceState`/`expected_source_state(&SchLibIntent)` — the typed
+  expected-intent summary (per component: name, parameter/alias/footprint
+  key lists, per-owner pin/graphic counts, part numbers) both planning and
+  apply derive with the same pure function. `SavedPlan::dump_from_parts`
+  assembles/validates a dump plan: the shared §S11 manifest capture,
+  patch↔manifest cross-checks (Create targets the expected-absent
+  Destination, Edit targets the one InPlaceTarget, every writable entry
+  claimed exactly once), and a lowering-time DRY RUN — decode the persisted
+  edits against a fresh parse and require the byte-exact result hash — so
+  every emitted dump plan is proven executable at planning (the increment-B
+  pattern). Strict decode now also rejects direction/patch-variant
+  mismatches in BOTH directions.
+- `crates/altium-sync/src/planner.rs`: `plan_dump_schlib(target_path,
+  spec_path, plan_path) -> SchLibDumpPlanning { plan, changes, exit_code }`
+  (+ `dump_plan_exit_code`). Missing spec → `SourceCreate` embedding the
+  complete generated text; existing spec → §S7 capture (root + transitive
+  imports read once), `plan_merge_dump` against the generated fresh text,
+  edits ENCODED instead of applied, in-memory replay for the result hash.
+  Convergence proof at planning: the RESULTING source (in-memory root over
+  captured imports via `capture_imports_with_root_text`) compiles and
+  elaborates against the captured library to an EMPTY patch — a non-empty
+  patch aborts planning (never emits a divergent plan); authored image
+  sources in the resulting source are captured exactly as the compile
+  planner does. Embedded image-store assets stage as deterministic bundle
+  destinations (`<stem>.asset<N>-<sanitized>.altium-image` beside the spec)
+  with expected-absence preconditions, or hash preconditions when the file
+  exists (identical bytes → no change; different bytes → declared
+  overwrite, surfaced as a plan diagnostic). Generator skips surface as
+  non-blocking `PlanDiagnostic`s. §S8 recheck (graph verify + asset verify
+  + target re-read/re-hash) runs immediately before assembly. Direction
+  recorded `Dump`; the recorded scope summary is the resulting source's
+  (via the shared `scope_summary`).
+- `crates/altium-sync/src/apply.rs`: `apply_saved_dump_plan(&SavedPlan) ->
+  AppliedDumpPlan` — version/direction gate → `verify_dump_manifest`
+  (re-resolution incl. `PathResolutionChanged`, §S11 re-check, every
+  hash/absence precondition; exactly one TargetDocument, at most one
+  InPlaceTarget; the library is read and hashed but NEVER parsed and never
+  written) → decode edits and re-validate every locator against the
+  hash-verified source text → replay through the byte-preserving
+  `apply_edits` → byte-exact `result_hash` check → deterministic
+  expected-state verification BEFORE any write (recompile the resulting
+  text over its hash-verified imports; compare `expected_source_state`; no
+  reconciler, no library elaboration) → write source + needed bundles to
+  the frozen destinations, each write read back and byte-verified. Bundles
+  whose destination already holds identical bytes are skipped.
+  `apply_saved_plan` keeps rejecting dump plans; `apply_saved_dump_plan`
+  rejects compile plans (wrong-direction rejection both ways). Step-4
+  boundary documented in the fn docs: plain writes with per-file read-back
+  only; multi-file staging/journal/commit-by-rename/recovery are step 4 —
+  the semantic (expected-state) verification runs before any write
+  precisely so rejections leave the filesystem untouched.
+- `crates/altium-sync/src/report.rs`: dump-direction entries (memo §3): a
+  created source file reports one `source` Create entry with the full-text
+  summary (byte/line counts, result hash) plus expected-state counts; an
+  edited source reports one entry PER persisted edit with its locator path
+  and a fragment summary (key: value, block first line, annotation values);
+  staged bundles report as `image_assets` entries by name/hash/length
+  (bodies never render), Create under absence and Replace under a
+  declared-overwrite hash. **Increment-B micro-deviations (B-3), resolved
+  rather than re-recorded:** `ChangeAddress` gained `artifact:
+  Option<String>` (every entry now names the written artifact — compile
+  entries are stamped with the plan's single write artifact), summary rows
+  are keyed `(artifact, collection, op)`, and `ReportArtifact` gained
+  `hash: Option<String>` (the recorded hex digest — the memo's "plan hashes
+  summary"). The index-less library-level alias entries (B-7) remain as
+  recorded: a v1 schema limitation, unchanged by this increment.
+
+### Tests and corpus evidence
+
+- Fixture-free (all in default `cargo test`): the generator convergence law
+  over a programmatic collection zoo (parameters incl. escaped text,
+  aliases, a footprint with an untouchable multi-pad definer, pins with
+  non-mil coordinates and quoted designators, rectangle/arc/polyline
+  graphics with non-default values) plus generator determinism and
+  skip-with-diagnostic behavior (`dump_source.rs`); planned-edit round-trip
+  and rejection laws (`planned.rs`, above); dump create → strict decode →
+  apply → recompile+elaborate → EMPTY patch, replan-exit-0 with zero edits,
+  plan byte-determinism, wrong-direction rejection both ways
+  (`planner.rs::dump_create_plan_round_trips_and_converges`); the CRLF +
+  seeded-comment + annotation preservation law with byte-level assertions
+  around the edited region
+  (`dump_edit_plan_preserves_comments_crlf_annotations_and_converges`);
+  stale source (one byte) rejected at apply, tampered/retargeted locators
+  rejected at rebinding, tampered expected state rejected BEFORE any write
+  (`dump_apply_rejects_stale_source_tampered_locators_and_state_drift`);
+  merge ambiguity (duplicate pin designators in the authored source) blocks
+  planning (`dump_merge_ambiguity_blocks_planning`); bundle staging with
+  absence → write, identical-content → no-op exit 0, tamper → declared
+  overwrite + restore
+  (`dump_stages_image_bundles_with_absence_and_overwrite_preconditions`);
+  compile-report artifact/hash-summary assertions (`report.rs`).
+- `check_schlib_snapshots.rs` dump stage per corpus file: SourceCreate
+  plan → serialize → strict decode → apply (library bytes untouched) →
+  recompile-and-elaborate to an EMPTY patch; no-op second plan (exit 0,
+  zero edits); seeded comment + whole-file CRLF conversion + one flipped
+  property merged back through hash-bound edits with byte-level
+  comment/CRLF checks and renewed convergence; exact dump-report entry
+  counts with per-entry artifacts. New enforced JSON fields:
+  `dump_create_applied`, `dump_create_converges`, `dump_noop_exit0`,
+  `dump_edit_converges`, `dump_comment_preserved`, `dump_crlf_preserved`,
+  `dump_report_entries_exact` (plus informational `dump_generation_skips`,
+  `dump_edits_applied`).
+
+### Deviations / notes within the memo's latitude
+
+- **Merge signature computation de-quadratified.** `tokens_without_trivia`
+  (merge.rs) lexed the WHOLE source per block; on the 135-component
+  STM32F4 dump (a multi-megabyte generated source with thousands of
+  identityless graphic blocks) reconciliation became quadratic and
+  impractically slow. It now lexes only the block's own slice (lexing is
+  context-free and node boundaries are token boundaries), shifting ranges
+  back to absolute offsets — behavior-identical (merge suite unchanged),
+  corpus dump stage drops to seconds.
+- **Dump completeness is guarded, not total.** The generator emits every
+  collection class but records an explicit skip diagnostic wherever exact
+  representation or merge keying is impossible (wild duplicate keys,
+  unrepresentable graphic kinds, control characters, non-24-bit colors,
+  unaddressable owner groups); skipped content stays preserved in the
+  library and the convergence law still holds. Footprint pin-pad definers
+  are deliberately never authored (multi-pad definers are
+  intent-unrepresentable; unauthored definers are preserved verbatim), so a
+  SourceCreate spec applied to a FRESH library would not recreate pin-pad
+  maps — a recorded v1 dump-source limitation, not a silent loss (the
+  library itself is never the write target of a dump).
+- The legacy merge semantics the memo prescribes are text-based: a fresh
+  dump renders literals, so authored EXPRESSIONS inside a component whose
+  values changed are rewritten to literals, and spec content outside the
+  fresh dump (imports, let bindings, collection scope declarations,
+  unmatched blocks) is removed by reconciliation when the merge runs.
+  Comments, annotation ids, and CRLF style are preserved (the C gate).
+  Authored EXPRESSIONS are NOT generally preserved: `reconcile_properties`
+  compares property value TEXT against the freshly rendered literal, so any
+  non-literal expression differs textually and is rewritten — even when it
+  evaluates to the unchanged value, which also makes such a source replan as
+  CHANGES (exit 2) rather than converging silently. An expression survives
+  only while the merge leaves its property untouched. Pinned by
+  `planner.rs::dump_against_an_import_bearing_spec_literalizes_and_deletes_authored_blocks`
+  (import + `let` binding evaluating to the library's exact value: still
+  literalized, import/let blocks deleted). A semantically-scoped dump
+  (edit only within source-declared scope) is a possible future refinement
+  and is NOT step-3 scope.
+- `expected_source_state` is a typed SUMMARY (memo §S16 "typed expected
+  intent summary"), not a full `SchLibIntent` serialization: names/keys per
+  keyed collection plus positional counts. The byte-exact `result_hash`
+  plus the planning-time convergence proof carry the exact-content
+  guarantee; the summary check catches import drift that changes compiled
+  meaning without changing the root bytes.
+- Zero-change dump plans are emitted as `Edit` with an empty edit list
+  (exit 0), keeping the no-op recorded and applyable rather than a special
+  plan shape.
+- Bundle overwrite (existing destination with different bytes) is a
+  declared-overwrite hash precondition plus a plan diagnostic rather than a
+  planning error: the plan states the overwrite explicitly (§S9's "declared
+  overwrite" form) and review sees it.
+
+### Verification (2026-09-18, all verbatim, at the final code state)
+
+- `cargo test -p altium-format --lib` — 491 passed.
+- `cargo test -p altium-sync` — 83 passed (76 increment-B + 2 dump_source
+  + 5 planner dump tests; the wrong-direction test was extended for the
+  strengthened decode gate, and the report test gained the B-3
+  artifact/hash-summary assertions).
+- `cargo test -p altium-spec-lang` — 366 passed (362 + 4 planned-edit).
+- `cargo test -p altium-format-spec` — 168 passed (unchanged).
+- `cargo check -p altium-cli` — clean.
+- `cargo fmt --check -p altium-spec-lang -p altium-sync` — clean.
+- `cargo check -p altium-sync` / `-p altium-spec-lang` — zero warnings.
+- Corpus gate: `cargo run -p altium-sync --example check_schlib_snapshots
+  -- data/schlib/lucashudson-Connectors.SchLib data/schlib/ICs.SchLib
+  data/schlib/arthurbenemann-STM32F4.SchLib` — exit 0, all checks true for
+  56/32/135 components including the seven new enforced dump keys, with
+  `dump_generation_skips` 0/0/0 (every corpus component dumps completely).
+
+## Step-3 closure (2026-09-18)
+
+NEXT.md step-3 gate, clause by clause, with evidence:
+
+1. **"Deterministic semantic plans"** — compile: byte-determinism modulo
+   allocated UniqueIDs (`mask_unique_ids` normalizer; corpus
+   `plan_deterministic` byte-identical for no-creation plans); dump: fully
+   byte-deterministic (nothing minted;
+   `dump_create_plan_round_trips_and_converges` asserts byte equality of
+   two plannings). Emission is a pure function of the plan (compact JSON,
+   no timestamps).
+2. **"Complete preconditions"** — every manifest entry carries a BLAKE3
+   hash or expected absence (§S5/§S6); spec source, transitive imports,
+   image bundles, target document, and every destination are all bound;
+   §S7 read-once, §S8 planning-drift detection, §S9 frozen outputs, §S10
+   explicit in-place declaration, §S11 alias/duplicate/plan-path collision
+   rejection re-run at decode and apply. Stale-input matrix tested for both
+   directions (increment B matrix; increment C stale source/locator/state
+   tampers; corpus `plan_target_drift_rejected`).
+3. **"No-op/create/update/delete examples"** — compile: end-to-end no-op /
+   create / update / delete plan+apply with save/reopen equality and
+   replan-empty (apply.rs tests + corpus full circle); dump: SourceCreate
+   (create), structured edits (update incl. property SetProperty and block
+   deletion paths through the merge), no-op (exit 0, zero edits); component
+   deletion in dump direction = unmatched authored blocks deleted by the
+   captured merge edits (planned.rs deletion replay test).
+4. **"Preserved source comments/expressions/CRLF/annotations"** — rides on
+   the CST guarantees plus new end-to-end checks: byte-level seeded-comment
+   and CRLF assertions around edited regions (fixture-free and corpus),
+   annotation ids preserved through the merge (planned.rs CRLF/annotation
+   round trip; the corpus stage seeds `#[annotation(...)]`-free generated
+   sources, the fixture-free test seeds an annotation and asserts its
+   byte-level survival). Comments, CRLF and annotations meet this clause;
+   authored EXPRESSIONS do NOT — the merge's text comparison literalizes
+   every non-literal expression it touches regardless of evaluated value
+   (recorded above, pinned by
+   `dump_against_an_import_bearing_spec_literalizes_and_deletes_authored_blocks`).
+   Step 3 therefore meets this clause for comments/CRLF/annotations and
+   carries expression preservation as a recorded limitation of the legacy
+   reconcile machinery the memo §4C prescribes verbatim, not as a met
+   requirement.
+5. **"No heuristic execution"** — apply executes exactly the decoded
+   patches: compile installs decoded states through the two-step
+   reconstruction with typed before/after equality; dump replays persisted
+   edits under byte-exact hash binding; the report is a pure derived
+   display (exact indexed diff, no pairing heuristics — step 9), and
+   display can never change patches (report derives FROM the plan).
+
+Independent completeness review of increment C and of the whole step
+against the gate: RUN 2026-09-18 (three independent reviewers — gate
+coverage, adversarial correctness, project rules — over the increment-C
+working tree). Verdict: increment-C deliverables and every step-3 gate
+clause verified against code and named regression tests, with two
+substantive corrections resolved before closure:
+
+1. **Clause 4 was misverified.** The claim that authored expressions
+   survive when their values are unchanged is FALSE: `reconcile_properties`
+   compares value TEXT, so any non-literal expression is literalized and
+   such a source replans as CHANGES. Wording corrected here, in STATUS.md
+   and in NEXT.md; behavior pinned by
+   `planner.rs::dump_against_an_import_bearing_spec_literalizes_and_deletes_authored_blocks`
+   (the first dump test exercising imports and `let` bindings — previously
+   all dump coverage was single-file generated specs).
+2. **`report()` could panic** truncating an edit-fragment summary at a raw
+   byte index when a multi-byte character straddled it (Ω/µ/° and CJK are
+   ordinary library text), violating the everything-fallible-returns-Result
+   rule on the exact-report path. Fixed by cutting on a character boundary
+   (`SUMMARY_BYTE_BUDGET`, `report.rs`), proven red-then-green by
+   `planner.rs::dump_deletes_out_of_library_blocks_and_reports_multibyte_fragments`,
+   which also closes the missing end-to-end dump DELETE example (a persisted
+   `DeleteBlock` planned, applied, and converged).
+
+Also resolved: dump apply's expected-state recompile now binds every
+captured import back to the manifest-verified bytes (rejecting both a
+mid-apply swap and an import the manifest does not record), closing the
+§S7 two-racing-reads gap the reviewers found at `apply.rs` step 4; the
+dead `result_hash` binding in the dump-edit report branch now emits the
+field its comment promised, matching the created-source entry.
+
+Recorded step-3 residuals (honest, none gate-blocking): the memo-§4D
+plan-format reference page under `docs/spec-lang/`/`docs/format/` is not
+yet written (the plan format is documented in the module docs of
+`plan.rs`/`planned.rs` and this worklog); the v1 plan schema
+cannot represent kept-component reordering (`UnrepresentablePatch` at
+planning); alias-only library ops carry no slot indices (B-7); wild-clone
+`FromState` planning rejection is structural, not directly tested (B-2,
+awaits a fixture-authorized pass); dump-source completeness limits above;
+Q3–Q6 and the Q1/Q2 provenance confirmation remain queued for the user.
+Next: step 4 (checked transaction executor wrapping both applies'
+write phases with staging, durable journal, commit-by-rename, recovery).

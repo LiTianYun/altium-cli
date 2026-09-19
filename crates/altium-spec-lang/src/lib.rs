@@ -18,7 +18,11 @@ pub mod lexer;
 pub mod parser;
 pub mod trivia;
 
-pub use cst::{DumpMergeError, merge_dump};
+pub use cst::{
+    DumpMergeError, PlannedEditError, PlannedSpecEdit, SPEC_EDIT_FORMAT_VERSION, SpecTree,
+    StructuredEditError, apply_edits, decode_spec_edits, encode_spec_edits, merge_dump,
+    plan_merge_dump,
+};
 pub use eval::{
     EvalResult, ScopeStack, Severity, Shape, SpecError, SpecErrorCode, Value, eval_expr,
     eval_let_bindings, unit_to_internal,

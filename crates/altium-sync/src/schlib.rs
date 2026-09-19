@@ -37,6 +37,7 @@
 //! would silently diverge from the reviewed state. `apply_in_memory` executes
 //! exactly the cached result after verifying the whole-input `StaleInput`
 //! precondition and the captured image-asset inputs.
+pub(crate) mod dump_source;
 mod elaborate;
 pub(crate) use elaborate::parameter_key_fold;
 pub(crate) mod positional;

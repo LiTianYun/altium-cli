@@ -40,6 +40,20 @@ pub enum DumpMergeError {
 pub fn merge_dump(existing: &str, fresh_dump: &str) -> Result<String, DumpMergeError> {
     let existing = SpecTree::parse(existing.to_owned()).map_err(DumpMergeError::ExistingParse)?;
     let fresh = SpecTree::parse(fresh_dump.to_owned()).map_err(DumpMergeError::DumpParse)?;
+    let edits = plan_merge_dump(&existing, &fresh)?;
+    Ok(apply_edits(&existing, &edits)?.source().to_owned())
+}
+
+/// Compute the exact typed edits [`merge_dump`] would apply to `existing` to
+/// reconcile it with `fresh`, WITHOUT applying them. This is the dump-planner
+/// capture surface (NEXT.md step 3): callers serialize the returned edits
+/// (bound to the source's content hash) instead of executing immediately.
+/// `merge_dump` itself routes through this function, so a captured plan and a
+/// direct merge are the same edit sequence by construction.
+pub fn plan_merge_dump(
+    existing: &SpecTree,
+    fresh: &SpecTree,
+) -> Result<Vec<SpecEdit>, DumpMergeError> {
     let mut edits = Vec::new();
     reconcile_children(
         existing.root_id(),
@@ -47,7 +61,7 @@ pub fn merge_dump(existing: &str, fresh_dump: &str) -> Result<String, DumpMergeE
         fresh.top_level_blocks(),
         &mut edits,
     )?;
-    Ok(apply_edits(&existing, &edits)?.source().to_owned())
+    Ok(edits)
 }
 
 fn reconcile_children(
@@ -373,36 +387,44 @@ fn tokens_without_trivia(
     omit_body: bool,
     omit_name: bool,
 ) -> Vec<(K, String)> {
+    // Lex only the block's own slice (lexing is context-free), shifting the
+    // node-relative token ranges back to absolute offsets. Lexing the whole
+    // source per block made large-library reconciliation quadratic.
     let node_range = byte_range(block.node().text_range());
     let body_range = body_node(block.node()).map(|body| byte_range(body.text_range()));
     let annotation_range = block
         .annotation()
         .map(|annotation| byte_range(annotation.node().text_range()));
     let name_range = block.name_node().map(|name| byte_range(name.text_range()));
-    lex_lossless(block.source())
+    let base = node_range.start;
+    let text = block.text();
+    lex_lossless(text)
         .expect("SpecTree source has already been lexed successfully")
         .into_iter()
-        .filter(|token| node_range.start <= token.range.start && token.range.end <= node_range.end)
-        .filter(|token| {
+        .map(|token| {
+            let range = (token.range.start + base)..(token.range.end + base);
+            (token.kind, range)
+        })
+        .filter(|(_, range)| {
             (!omit_body
                 || !body_range
                     .as_ref()
-                    .is_some_and(|range| contains(range, &token.range)))
+                    .is_some_and(|body| contains(body, range)))
                 && !annotation_range
                     .as_ref()
-                    .is_some_and(|range| contains(range, &token.range))
+                    .is_some_and(|annotation| contains(annotation, range))
                 && (!omit_name
                     || !name_range
                         .as_ref()
-                        .is_some_and(|range| contains(range, &token.range)))
+                        .is_some_and(|name| contains(name, range)))
         })
-        .filter(|token| {
+        .filter(|(kind, _)| {
             !matches!(
-                token.kind,
+                kind,
                 K::Whitespace | K::Newline | K::LineComment | K::BlockComment
             )
         })
-        .map(|token| (token.kind, block.source()[token.range].to_owned()))
+        .map(|(kind, range)| (kind, block.source()[range].to_owned()))
         .collect()
 }
 
