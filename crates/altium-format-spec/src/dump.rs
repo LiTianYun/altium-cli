@@ -1166,6 +1166,22 @@ fn dump_schdoc_component(
             out.push_str(&format!("{}    description: {}\n", pad, quote_string(desc)));
         }
     }
+    // [本机补丁 2026-10-16] AD 内部标识与统计：
+    //   uid = 元件 UniqueId（变更追踪：同一元件跨版本对齐，diff 不再靠排序归一）
+    //   display_mode_count = 符号显示模式套数（>1 说明有多套引脚定义）
+    //   all_pin_count = AD 记录的总引脚数（真值锚点，校验解析结果）
+    if !comp.unique_id.is_empty() {
+        out.push_str(&format!("{}    uid: {}\n", pad, quote_string(&comp.unique_id)));
+    }
+    if comp.display_mode_count > 1 {
+        out.push_str(&format!(
+            "{}    display_mode_count: {}\n",
+            pad, comp.display_mode_count
+        ));
+    }
+    if comp.all_pin_count > 0 {
+        out.push_str(&format!("{}    all_pin_count: {}\n", pad, comp.all_pin_count));
+    }
 
     for child in &comp.children {
         match child {
@@ -1864,6 +1880,20 @@ fn dump_pin_with_part_swap_override(
             "pair_swap_group: {}",
             swap_group_ref(&pin.swap_id_pair, declared_groups)
         ));
+    }
+    // [本机补丁 2026-10-16] 非 Normal 显示模式显式标注（0=Normal / 1=DeMorgan / 2=IEEE）。
+    // AD 的符号为每种显示模式各存一份完整引脚定义（同一元件的块内因此有多套 pin），
+    // 而原实现一律输出却不带区分字段 → 下游无法判断哪套是图纸在用的：
+    // 曾出现连接器 J1 被读成 40 脚（实际 16）、芯片 Y 引脚推不出网络。缺省(=0)不输出。
+    if pin.owner_part_display_mode != 0 {
+        parts.push(format!(
+            "owner_part_display_mode: {}",
+            pin.owner_part_display_mode
+        ));
+    }
+    // [本机补丁 2026-10-16] 引脚级 AD 标识 · 变更追踪（定位到具体哪个脚被改）
+    if !pin.unique_id.is_empty() {
+        parts.push(format!("uid: {}", quote_string(&pin.unique_id)));
     }
     out.push_str(&format!(
         "{}pin {} {{ {} }}\n",

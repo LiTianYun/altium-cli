@@ -466,6 +466,7 @@ fn component_from_schdoc_internal(
         part_count: comp.part_count,
         current_part_id: comp.current_part_id,
         display_mode_count: comp.display_mode_count,
+        all_pin_count: comp.all_pin_count,
         show_hidden_pins: comp.show_hidden_pins,
         children,
     })

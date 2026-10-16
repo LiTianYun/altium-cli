@@ -358,6 +358,8 @@ pub struct SchDocComponent {
     pub part_count: i32,
     pub current_part_id: i32,
     pub display_mode_count: i32,
+    /// [本机补丁 2026-10-16] AD 记录的元件总引脚数（真值锚点，用于校验解析结果）
+    pub all_pin_count: i32,
     pub show_hidden_pins: bool,
 
     // ── Children (ordered) ───────────────────────────────────
